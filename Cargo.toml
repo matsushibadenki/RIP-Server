@@ -1,0 +1,18 @@
+[workspace]
+members = ["crates/*", "services/*"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
+rip-core = { path = "crates/rip-core" }
+rip-storage = { path = "crates/rip-storage" }
+rip-interpreter = { path = "crates/rip-interpreter" }
