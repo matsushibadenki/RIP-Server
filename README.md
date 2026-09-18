@@ -1,4 +1,4 @@
-# J-RIP Server
+# RIP-Server
 
 [開発仕様書](docs/RIP-Server開発仕様書.md)に基づく、ローカル／エッジ向けRIPサーバーの初期実装です。
 現在は **PDF / PS / EPSの受付 → 永続ジョブ管理 → 隔離MuPDF / Ghostscript → TIFFファイル出力** を提供します。
