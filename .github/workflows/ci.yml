@@ -14,4 +14,5 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       - run: docker build -t jrip-ghostscript:local adapters/ghostscript
+      - run: docker build -t jrip-mupdf:local adapters/mupdf
       - run: cargo test --workspace --locked -- --ignored

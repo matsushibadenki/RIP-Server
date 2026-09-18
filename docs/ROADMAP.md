@@ -14,7 +14,9 @@
 - [Done] SQLite WALによるジョブ永続化、状態変更イベント、revisionによる競合防止。
 - [Done] ジョブ投入・一覧・詳細・保留・解除・取消・終端メタデータ削除API。
 - [Done] 共通Bearer認証、アプリケーションエラーの英語・日本語・简体中文メッセージ。
-- [Done] RGB/CMYK/Gray TIFF用Ghostscriptコンテナーアダプターと明示起動の単一ジョブワーカー。
+- [Done] MuPDF / Ghostscriptハイブリッド。PDFはMuPDF、PS/EPSはGhostscript。PDFの明示Ghostscript指定と選択エンジンの永続化。
+- [Done] RGB/CMYK/Gray TIFF出力。MuPDF PAMのサンプルを維持したTIFF格納と、共通のコンテナー隔離実行基盤。
+- [Done] 明示起動の単一ジョブワーカー。
 - [Done] コンテナーのネットワーク／リソース制限、タイムアウト後のコンテナー削除、上限付き出力回収。
 - [Done] 完成出力ディレクトリのatomic rename。COMPLETEDはファイル出力完了を表す。
 - [Done] Canonical Rasterのサイズ／予算／オーバーフロー検証。ラスター処理エンジン自体は未実装。
@@ -28,7 +30,9 @@
 - [Next] LittleCMSによる独立したICC変換、プロファイルとエンジンバージョンの再現性記録。
 - [Next] 自動キュー取得、リース、即時取消、ワーカークラッシュからの安全な復旧。
 - [Next] Re-RIP / Re-Spool、原稿・ラスターの保持期限、全体ディスク上限と孤立ファイルの回収。
-- [Next] PDF / EPS / 日本語の実変換回帰、TIFFピクセル比較、フォント／色のGolden Master。
+- [Done] 2ページPDFのMuPDF RGB/CMYK/Gray変換、独立TIFFデコーダーでの検証、RGBピクセル／ページ順序確認、PDFの明示Ghostscript変換。
+- [Next] EPS / 日本語の実変換回帰、複雑なPDFのエンジン間比較、フォント／色のGolden Master。
+- [Next] エンジンバージョン・イメージdigestの保存、ICC／オーバープリント差異の評価、PAM一時保存容量の削減。
 
 ## 後続の製品機能
 

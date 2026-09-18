@@ -113,47 +113,56 @@ async fn invalid_documents_leave_no_spool_and_auth_is_required() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker and jrip-ghostscript:local image"]
-async fn real_postscript_worker_exports_tiff() {
-    let (dir, app) = app().await;
-    let res = app
-        .clone()
-        .oneshot(upload(
-            "basic.ps",
+#[ignore = "requires Docker, jrip-mupdf:local and jrip-ghostscript:local images"]
+async fn real_worker_uses_hybrid_engine_and_exports_tiff() {
+    for (format, document, expected_engine) in [
+        (
             "application/postscript",
             include_str!("../../../tests/corpus/basic.ps"),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::CREATED);
-    let job: serde_json::Value =
-        serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert_eq!(job["manifest"]["engine"], "auto");
-    let id = job["id"].as_str().unwrap();
-    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_jrip-worker"))
-        .arg(id)
-        .env("JRIP_DATA_ROOT", dir.path())
-        .output()
-        .await
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let path = dir
-        .path()
-        .join("jobs")
-        .join(id)
-        .join("raster/page-000001.tiff");
-    let bytes = std::fs::read(path).unwrap();
-    assert!(bytes.starts_with(b"II\x2a\0") || bytes.starts_with(b"MM\0\x2a"));
-    let res = app
-        .oneshot(request("GET", &format!("/api/v1/jobs/{id}")))
-        .await
-        .unwrap();
-    let job: serde_json::Value =
-        serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert_eq!(job["state"], "COMPLETED");
-    assert_eq!(job["selected_engine"], "ghostscript");
+            "ghostscript",
+        ),
+        (
+            "application/pdf",
+            include_str!("../../../tests/corpus/colors.pdf"),
+            "mupdf",
+        ),
+    ] {
+        let (dir, app) = app().await;
+        let res = app
+            .clone()
+            .oneshot(upload("fixture", format, document))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let job: serde_json::Value =
+            serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert_eq!(job["manifest"]["engine"], "auto");
+        let id = job["id"].as_str().unwrap();
+        let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_jrip-worker"))
+            .arg(id)
+            .env("JRIP_DATA_ROOT", dir.path())
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let path = dir
+            .path()
+            .join("jobs")
+            .join(id)
+            .join("raster/page-000001.tiff");
+        let bytes = std::fs::read(path).unwrap();
+        assert!(bytes.starts_with(b"II\x2a\0") || bytes.starts_with(b"MM\0\x2a"));
+        let res = app
+            .oneshot(request("GET", &format!("/api/v1/jobs/{id}")))
+            .await
+            .unwrap();
+        let job: serde_json::Value =
+            serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert_eq!(job["state"], "COMPLETED");
+        assert_eq!(job["selected_engine"], expected_engine);
+    }
 }

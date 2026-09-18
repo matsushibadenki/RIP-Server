@@ -1,4 +1,45 @@
-/target/
+# Rust build output (keep Cargo.lock for reproducible application builds)
+target/
+**/*.rs.bk
+
+# Local RIP data: source documents, raster output, spool, and database
 /data/
-.DS_Store
+jobs.sqlite3
+jobs.sqlite3-wal
+jobs.sqlite3-shm
+jobs.sqlite3-journal
+
+# Local environment and secrets (keep shareable configuration examples)
 .env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+
+# Python adapter caches and local virtual environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# Local logs and coverage output
+*.log
+*.profraw
+*.profdata
+/coverage/
+
+# Editor temporary files
+*.swp
+*.swo
+*~
+
+# OS metadata
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
+
+# PDF, PS, EPS, TIFF, font, and ICC fixtures are intentionally not ignored.
+# Place private runtime documents under /data/ (the default JRIP_DATA_ROOT).

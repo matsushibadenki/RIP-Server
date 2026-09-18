@@ -58,7 +58,11 @@ impl SandboxConfig {
         manifest
             .validate()
             .map_err(|_| InterpreterError::Rejected("invalid_manifest"))?;
-        if self.max_pages == 0 || self.max_pages > 10000 || self.max_spool_bytes < 1024 * 1024 {
+        if self.max_pages == 0
+            || self.max_pages > 10000
+            || self.max_spool_bytes < 1024 * 1024
+            || self.max_spool_bytes > u64::MAX - 1024 * 1024 - 2
+        {
             return Err(InterpreterError::Rejected("invalid_limits"));
         }
         let source = source
@@ -194,7 +198,7 @@ impl SandboxConfig {
         if !matches!(&result, Ok(Ok(_))) {
             let _ = child.kill().await;
         }
-        // Explicitly remove the container: killing the Docker client does not stop Ghostscript.
+        // Explicitly remove the container: killing the Docker client does not stop the interpreter.
         let cleanup = tokio::time::timeout(
             Duration::from_secs(10),
             Command::new("docker")

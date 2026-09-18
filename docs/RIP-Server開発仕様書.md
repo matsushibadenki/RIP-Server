@@ -234,6 +234,8 @@ Rustを選択する理由は、
 
 ## 6.1 PostScript / PDF
 
+実装方針追記（2026-09-18）：MuPDFとGhostscriptのハイブリッド構成とする。PDFはMuPDFを既定とし、PostScript / EPSはGhostscriptを使用する。PDFのGhostscript明示指定を許可し、処理失敗時の暗黙のエンジン切替は行わない。現在の実装範囲と制限はREADMEとROADMAPを参照。
+
 第一候補：
 
 ```text

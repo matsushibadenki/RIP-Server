@@ -153,7 +153,13 @@ mod tests {
             error_code: None,
             selected_engine: None,
         };
-        repo.insert(&j).await.unwrap();
+        let mut legacy = serde_json::to_value(&j).unwrap();
+        legacy.as_object_mut().unwrap().remove("selected_engine");
+        legacy["manifest"].as_object_mut().unwrap().remove("engine");
+        let old_job: Job = serde_json::from_value(legacy).unwrap();
+        assert_eq!(old_job.manifest.engine, rip_core::EnginePreference::Auto);
+        assert_eq!(old_job.selected_engine, None);
+        repo.insert(&old_job).await.unwrap();
         let held = repo
             .transition(j.clone(), JobState::Held, None)
             .await
