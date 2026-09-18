@@ -91,7 +91,9 @@ async fn hybrid_pdf_colors_order_and_explicit_ghostscript() {
                 } else {
                     [0, 255, 0]
                 };
-                assert!(pixels.chunks_exact(3).all(|pixel| pixel == expected));
+                let (rgb_pixels, remainder) = pixels.as_chunks::<3>();
+                assert!(remainder.is_empty(), "incomplete RGB pixel");
+                assert!(rgb_pixels.iter().all(|pixel| *pixel == expected));
             }
         }
     }

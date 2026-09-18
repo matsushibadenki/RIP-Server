@@ -6,7 +6,8 @@
 
 ## 起動
 
-Rust、Docker（TIFF変換時）が必要です。API自体はDockerへのアクセスを必要としません。
+Rust（rustup）、Docker（TIFF変換時）が必要です。API自体はDockerへのアクセスを必要としません。
+`rust-toolchain.toml` でRust 1.98.0とClippy／rustfmtを指定し、ローカルとCIのチェック条件を揃えています。CIのOSはUbuntu 24.04です。
 
 ```sh
 cargo build --workspace --locked
