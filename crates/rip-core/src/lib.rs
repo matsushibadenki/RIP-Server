@@ -158,6 +158,8 @@ pub struct Job {
     pub error_code: Option<String>,
     #[serde(default)]
     pub selected_engine: Option<EngineKind>,
+    #[serde(default)]
+    pub worker_run_id: Option<Uuid>,
 }
 
 /// Canonical interleaved raster layout; all dimensions and allocations are checked.

@@ -5,15 +5,17 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use rip_core::{DocumentFormat, Job, JobState, Manifest};
-use rip_storage::{Repository, StorageError, now};
+use rip_core::{Job, JobState, Manifest};
+use rip_jobs::{SubmitError, publish_staged};
+use rip_storage::{Repository, StorageError};
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use std::{path::PathBuf, sync::Arc};
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
-pub const MAX_DOCUMENT_BYTES: usize = 32 * 1024 * 1024;
+pub mod dispatch;
+
+pub const MAX_DOCUMENT_BYTES: usize = rip_jobs::MAX_DOCUMENT_BYTES as usize;
 #[derive(Clone)]
 pub struct App {
     pub repo: Repository,
@@ -161,8 +163,7 @@ async fn receive(
     multipart: &mut Multipart,
 ) -> Result<Job, ApiError> {
     let mut manifest = None;
-    let mut detected = None;
-    let mut hash = None;
+    let mut document_received = false;
     while let Some(mut field) = multipart
         .next_field()
         .await
@@ -182,13 +183,11 @@ async fn receive(
                 value.validate().map_err(|e| bad(e.0))?;
                 manifest = Some(value);
             }
-            Some("document") if detected.is_none() => {
+            Some("document") if !document_received => {
                 let mut file = tokio::fs::File::create(directory.join("source.part"))
                     .await
                     .map_err(internal)?;
                 let mut size = 0;
-                let mut prefix = Vec::new();
-                let mut digest = Sha256::new();
                 while let Some(chunk) = field.chunk().await.map_err(|_| bad("invalid_multipart"))? {
                     size += chunk.len();
                     if size > MAX_DOCUMENT_BYTES {
@@ -197,38 +196,25 @@ async fn receive(
                             "document_too_large",
                         ));
                     }
-                    let needed = 100usize.saturating_sub(prefix.len());
-                    prefix.extend_from_slice(&chunk[..chunk.len().min(needed)]);
-                    digest.update(&chunk);
                     file.write_all(&chunk).await.map_err(internal)?;
                 }
                 file.sync_all().await.map_err(internal)?;
-                detected = Some(DocumentFormat::detect(&prefix).map_err(|e| bad(e.0))?);
-                hash = Some(format!("{:x}", digest.finalize()));
+                document_received = true;
             }
             _ => return Err(bad("unexpected_multipart_field")),
         }
     }
     let manifest = manifest.ok_or(bad("missing_manifest"))?;
-    if detected != Some(manifest.format) {
-        return Err(bad("format_mismatch"));
+    if !document_received {
+        return Err(bad("missing_document"));
     }
-    let job = Job {
-        id,
-        manifest,
-        state: JobState::Queued,
-        source_sha256: hash.ok_or(bad("missing_document"))?,
-        created_at: now(),
-        updated_at: now(),
-        revision: 0,
-        error_code: None,
-        selected_engine: None,
-    };
-    tokio::fs::rename(directory.join("source.part"), directory.join("document"))
+    let job = publish_staged(&app.repo, directory, id, manifest)
         .await
-        .map_err(internal)?;
-    // The database is the authoritative manifest. Source publication precedes queue visibility.
-    app.repo.insert(&job).await?;
+        .map_err(|e| match e {
+            SubmitError::Invalid(code) => bad(code),
+            SubmitError::Storage(error) => ApiError::from(error),
+            SubmitError::Io(error) => internal(error),
+        })?;
     tracing::info!(job_id=%id,stage="queued","job uploaded");
     Ok(job)
 }

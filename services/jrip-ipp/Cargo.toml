@@ -1,18 +1,16 @@
 [package]
-name = "jrip-server"
+name = "jrip-ipp"
 version.workspace = true
 edition.workspace = true
 [dependencies]
 rip-core.workspace = true
-rip-storage.workspace = true
-rip-interpreter.workspace = true
+rip-ipp.workspace = true
 rip-jobs.workspace = true
-serde.workspace = true
-serde_json.workspace = true
+rip-storage.workspace = true
+axum = "0.8"
+mdns-sd = "=0.21.0"
+url = "2"
 tokio.workspace = true
-uuid.workspace = true
-axum = { version = "0.8", features = ["multipart"] }
-sha2 = "0.10"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 [dev-dependencies]
