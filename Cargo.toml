@@ -18,3 +18,4 @@ rip-storage = { path = "crates/rip-storage" }
 rip-interpreter = { path = "crates/rip-interpreter" }
 rip-jobs = { path = "crates/rip-jobs" }
 rip-ipp = { path = "crates/rip-ipp" }
+rip-acx = { path = "crates/rip-acx" }

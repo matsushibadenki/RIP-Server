@@ -43,3 +43,6 @@ Desktop.ini
 
 # PDF, PS, EPS, TIFF, font, and ICC fixtures are intentionally not ignored.
 # Place private runtime documents under /data/ (the default JRIP_DATA_ROOT).
+
+# Local checkout of the evolving ACX specification (linked as a sibling project)
+/acx

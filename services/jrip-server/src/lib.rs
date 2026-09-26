@@ -40,6 +40,10 @@ pub fn router(app: App) -> Router {
                 Json(serde_json::json!({"status":"ok","version":env!("CARGO_PKG_VERSION")}))
             }),
         )
+        .route(
+            "/.well-known/acx.json",
+            get(|| async { Json(rip_acx::manifest()) }),
+        )
         .route("/api/v1/jobs", get(list).post(upload))
         .route("/api/v1/jobs/{id}", get(detail).delete(delete))
         .route("/api/v1/jobs/{id}/{action}", post(action))

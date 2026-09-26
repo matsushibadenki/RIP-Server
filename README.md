@@ -23,6 +23,17 @@ APIは既定で `127.0.0.1:8080` に待ち受けます。`JRIP_LISTEN` で変更
 LAN公開時はTLS終端を設けてください。現在の認証は共通Bearerトークンで、ロール別認可ではありません。
 データディレクトリは専用ユーザーのみがアクセスできる場所に配置してください。
 
+## ACX能力発見（実験段階）
+
+Agent向けPrint Infrastructureの能力発見として、APIサーバーは認証不要の
+`GET /.well-known/acx.json` を公開します。現在広告するのは、PDF / PS / EPSを
+MuPDFまたはGhostscriptでTIFFへ変換する `org.jrip.rip.export_tiff` のみです。
+物理印刷、MCP binding、独立した色管理は実装後まで広告しません。
+
+ManifestはリンクしたACXリポジトリの`acx-manifest.schema.json`で検証しています。
+印刷意図の共通形式はACXの実験的PrintIntent profileを使用し、要求値を
+`required`、`preferred`、`automatic`に分けます。
+
 ## PDF限定のIPP受付（実験段階）
 
 REST APIと同じ `JRIP_DATA_ROOT` を使用する別プロセスで起動します。
@@ -99,6 +110,7 @@ PAMの一時ファイルも同じtmpfs予算を使用し、現状の1ファイ�
 | API | 動作 |
 | --- | --- |
 | `GET /health` | 認証不要のヘルスチェック |
+| `GET /.well-known/acx.json` | ACX 0.1のRIP能力Manifest。認証不要 |
 | `POST /api/v1/jobs` | multipartの `manifest` と `document` を受信 |
 | `GET /api/v1/jobs?limit=50&offset=0` | 優先度降順・受信時刻昇順、最大100件 |
 | `GET /api/v1/jobs/{id}` | ジョブ詳細 |

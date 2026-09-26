@@ -25,6 +25,7 @@
 - [Done] 実験段階の `jrip-dispatcher` がREST・IPPの待機ジョブを優先度順に選び、既存ワーカーを1件ずつ起動する。競合時はワーカーのrevisionチェックで二重処理を防ぐ。
 - [Done] ディスパッチャーの二重起動をファイルロックで拒否し、実行IDが一致する監督中ワーカーの異常終了だけを `FAILED` に確定する。
 - [Done] ワーカーリースをSQLiteへ永続化し、10秒ごとのハートビートと30秒の期限を管理する。ディスパッチャー再起動後、期限切れの処理中ジョブを `FAILED/LEASE_EXPIRED` へ復旧する。
+- [Done] `rip-acx` と `/.well-known/acx.json` を追加し、現在のTIFF出力能力だけをACX 0.1 Manifestとして公開。ACX側にnamespaced extensionsと英語・日本語・简体中文の実験的PrintIntent profile、schema、検証ベクターを追加し、両実装間のschema検証を完了。
 
 ## [Next] 第1段階：PDFを受けるIPP仮想プリンター
 
@@ -58,7 +59,7 @@ Printer
 
 すべての層を単一プロセスへ固定せず、versioned schemaと安定した識別子で接続する。1つの `job_id`、`correlation_id`、`attempt_id` を全工程で引き継ぎ、Agentが「受付済み」「RIP完了」「色変換完了」「送信済み」「印刷中」「排紙完了」「失敗」を区別できるようにする。
 
-1. [Next] **Print APIを正規の入口にする。** REST、IPP、MCPから受けた要求を、共通の `PrintIntent` と `JobTicket` へ正規化する。原稿参照、部数、ページ範囲、用紙、面付け、片面／両面、解像度、色意図、品質、優先度、期限、出力先、承認条件を表現し、各フィールドを `required`、`preferred`、`automatic` のいずれかとして指定できるようにする。能力不足時は黙って変更せず、拒否または具体的な代替案を返す。
+1. [Next] **Print APIを正規の入口にする。** ACX側の実験的PrintIntent schemaとnamespaced capability extensionsは実装済み。次にREST、IPP、MCPから受けた要求を、共通の `PrintIntent` と `JobTicket` へ正規化する。原稿参照、部数、ページ範囲、用紙、面付け、片面／両面、解像度、色意図、品質、優先度、期限、出力先、承認条件を表現し、各フィールドを `required`、`preferred`、`automatic` のいずれかとして指定できるようにする。能力不足時は黙って変更せず、拒否または具体的な代替案を返す。
 2. [Next] **共通Capability Modelを定義する。** RIP、Color Management、Queue、Printerが能力と制約を同じ形式で公開する。入力・出力MIME、最大寸法、DPI、色空間、ICC profile、レンダリングインテント、用紙、両面、部数、仕上げ、現在の利用可否を表し、`capability_revision` と有効期限を付ける。Print APIは全工程の交差部分を計算し、実行可能なticketと不一致理由をAgentへ返す。
 3. [Next] **工程間artifact契約を固定する。** `SourceDocument`、`RasterArtifact`、`ColorManagedArtifact`、`DeliveryArtifact` をcontent-addressed artifactとして扱い、SHA-256、MIME、ページ数、寸法、色空間、profile、生成元、保持期限を必須メタデータにする。大容量データはサービス間メッセージへ埋め込まず、許可されたobject storeまたはローカルartifact storeの参照で渡す。
 4. [Next] **状態とイベントを工程単位にする。** ジョブ全体の状態に加えて `VALIDATING`、`RIPPING`、`COLOR_MANAGING`、`QUEUED_FOR_DEVICE`、`SENDING`、`PRINTING`、`COMPLETED`、`PARTIALLY_COMPLETED`、`CANCELED`、`FAILED` を標準化し、工程、進捗、ページ、reason code、再試行可否をイベントとして記録する。`COMPLETED` は実機から確認できた完了条件をticketへ記録し、現在のTIFF出力完了とは別に扱う。

@@ -12,6 +12,30 @@ async fn app() -> (tempfile::TempDir, axum::Router) {
         .unwrap();
     (dir, jrip_server::router(state))
 }
+
+#[tokio::test]
+async fn acx_discovery_describes_the_real_rip_boundary() {
+    let (_dir, app) = app().await;
+    let response = app
+        .oneshot(
+            Request::get("/.well-known/acx.json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let capability = &manifest["capabilities"][0];
+    assert_eq!(manifest["acx"], "0.1");
+    assert_eq!(capability["id"], "org.jrip.rip.export_tiff");
+    assert_eq!(
+        capability["extensions"]["org.jrip.print"]["physicalOutput"],
+        false
+    );
+    assert_eq!(capability["bindings"][0]["endpoint"], "/api/v1/jobs");
+}
 fn upload(name: &str, format: &str, document: &str) -> Request<Body> {
     let manifest = serde_json::json!({"name":name,"format":format,"dpi":300});
     let body = format!(
