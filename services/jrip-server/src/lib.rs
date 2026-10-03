@@ -13,7 +13,9 @@ use std::{path::PathBuf, sync::Arc};
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
+pub mod artifacts;
 pub mod dispatch;
+mod preflight;
 
 pub const MAX_DOCUMENT_BYTES: usize = rip_jobs::MAX_DOCUMENT_BYTES as usize;
 #[derive(Clone)]
@@ -45,13 +47,42 @@ pub fn router(app: App) -> Router {
             get(|| async { Json(rip_acx::manifest()) }),
         )
         .route("/api/v1/jobs", get(list).post(upload))
+        .route("/api/v1/print/resolve", post(resolve_intent))
+        .route("/api/v1/print/preflights", post(preflight::create))
+        .route("/api/v1/print/preflights/{id}", get(preflight::get))
+        .route(
+            "/api/v1/print/preflights/{id}/commit",
+            post(preflight::commit),
+        )
         .route("/api/v1/jobs/{id}", get(detail).delete(delete))
+        .route("/api/v1/jobs/{id}/receipt", get(preflight::receipt))
+        .route("/api/v1/jobs/{id}/artifacts", get(preflight::artifacts))
+        .route(
+            "/api/v1/jobs/{id}/artifacts/{name}",
+            get(artifacts::download),
+        )
+        .route(
+            "/api/v1/jobs/{id}/artifacts/{name}/verify",
+            post(artifacts::verify),
+        )
+        .route(
+            "/api/v1/jobs/{id}/result-receipt",
+            get(preflight::result_receipt),
+        )
         .route("/api/v1/jobs/{id}/{action}", post(action))
         .layer(DefaultBodyLimit::max(MAX_DOCUMENT_BYTES + 64 * 1024))
         .with_state(app)
 }
 #[derive(Debug)]
 pub struct ApiError(StatusCode, &'static str);
+async fn resolve_intent(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Json(intent): Json<rip_acx::intent::PrintIntent>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    auth(&app, &headers)?;
+    Ok(Json(rip_acx::intent::resolve(intent)))
+}
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (
@@ -64,6 +95,16 @@ impl IntoResponse for ApiError {
 fn messages(code: &str) -> serde_json::Value {
     let (en, ja, zh) = match code {
         "unauthorized" => ("Authentication required", "認証が必要です", "需要身份验证"),
+        "artifact_integrity_mismatch" => (
+            "Artifact size or hash does not match the recorded output",
+            "成果物のサイズまたはhashが記録と一致しません",
+            "成果物大小或hash与记录不一致",
+        ),
+        "preflight_expired" => (
+            "Preflight expired; create a new one",
+            "事前確認の期限が切れました。再作成してください",
+            "预检已过期，请重新创建",
+        ),
         "not_found" => ("Job not found", "ジョブが見つかりません", "未找到作业"),
         "state_conflict" => (
             "The job state has changed or this action is not allowed",

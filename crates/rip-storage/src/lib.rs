@@ -1,4 +1,5 @@
-use rip_core::{Job, JobState};
+use rip_core::{Artifact, Job, JobState};
+use sha2::{Digest, Sha256};
 use sqlx::{
     Row, SqlitePool,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
@@ -37,10 +38,78 @@ impl Repository {
         sqlx::query("CREATE TABLE IF NOT EXISTS job_events (sequence INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL, state TEXT NOT NULL, created_at INTEGER NOT NULL)").execute(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS ipp_jobs (ipp_id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL UNIQUE)").execute(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS worker_leases (job_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, expires_at INTEGER NOT NULL)").execute(&pool).await?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS print_preflights (id TEXT PRIMARY KEY, payload TEXT NOT NULL, expires_at INTEGER NOT NULL)").execute(&pool).await?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS print_commits (preflight_id TEXT PRIMARY KEY, job_id TEXT NOT NULL UNIQUE)").execute(&pool).await?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS print_receipts (job_id TEXT PRIMARY KEY, payload TEXT NOT NULL)").execute(&pool).await?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS print_result_receipts (job_id TEXT PRIMARY KEY, payload TEXT NOT NULL)").execute(&pool).await?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS job_artifacts (job_id TEXT PRIMARY KEY, payload TEXT NOT NULL)").execute(&pool).await?;
         Ok(Self { pool })
     }
+    pub async fn save_preflight(
+        &self,
+        id: Uuid,
+        payload: &serde_json::Value,
+        expires_at: i64,
+    ) -> Result<(), StorageError> {
+        sqlx::query("INSERT INTO print_preflights(id,payload,expires_at) VALUES(?,?,?)")
+            .bind(id.to_string())
+            .bind(serde_json::to_string(payload)?)
+            .bind(expires_at)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+    pub async fn get_preflight(&self, id: Uuid) -> Result<serde_json::Value, StorageError> {
+        let row = sqlx::query("SELECT payload FROM print_preflights WHERE id=?")
+            .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or(StorageError::NotFound)?;
+        Ok(serde_json::from_str(row.get("payload"))?)
+    }
     pub async fn insert(&self, job: &Job) -> Result<(), StorageError> {
+        self.insert_with_preflight(job, None).await
+    }
+    pub async fn committed_job(&self, id: Uuid) -> Result<Option<Uuid>, StorageError> {
+        let row = sqlx::query("SELECT job_id FROM print_commits WHERE preflight_id=?")
+            .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|r| Uuid::parse_str(r.get("job_id")).map_err(|_| StorageError::Conflict))
+            .transpose()
+    }
+    pub async fn get_print_receipt(&self, job_id: Uuid) -> Result<serde_json::Value, StorageError> {
+        let row = sqlx::query("SELECT payload FROM print_receipts WHERE job_id=?")
+            .bind(job_id.to_string())
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or(StorageError::NotFound)?;
+        Ok(serde_json::from_str(row.get("payload"))?)
+    }
+    pub async fn get_result_receipt(
+        &self,
+        job_id: Uuid,
+    ) -> Result<serde_json::Value, StorageError> {
+        let row = sqlx::query("SELECT payload FROM print_result_receipts WHERE job_id=?")
+            .bind(job_id.to_string())
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or(StorageError::NotFound)?;
+        Ok(serde_json::from_str(row.get("payload"))?)
+    }
+    pub async fn insert_with_preflight(
+        &self,
+        job: &Job,
+        preflight: Option<Uuid>,
+    ) -> Result<(), StorageError> {
         let mut tx = self.pool.begin().await?;
+        if let Some(id) = preflight {
+            let result = sqlx::query("INSERT OR IGNORE INTO print_commits(preflight_id,job_id) SELECT id,? FROM print_preflights WHERE id=? AND expires_at>?")
+                .bind(job.id.to_string()).bind(id.to_string()).bind(now()).execute(&mut *tx).await?;
+            if result.rows_affected() != 1 {
+                return Err(StorageError::Conflict);
+            }
+        }
         sqlx::query("INSERT INTO jobs VALUES (?, ?, ?, ?, ?)")
             .bind(job.id.to_string())
             .bind(serde_json::to_string(job)?)
@@ -55,6 +124,28 @@ impl Repository {
             .bind(job.updated_at)
             .execute(&mut *tx)
             .await?;
+        if let Some(id) = preflight {
+            let row = sqlx::query("SELECT payload, strftime('%Y-%m-%dT%H:%M:%SZ', ?, 'unixepoch') AS issued_at FROM print_preflights WHERE id=?")
+                .bind(job.created_at).bind(id.to_string()).fetch_one(&mut *tx).await?;
+            let pf: serde_json::Value = serde_json::from_str(row.get("payload"))?;
+            let receipt = serde_json::json!({
+                "acx":"0.1", "receiptId":job.id.to_string(),
+                "capability":pf["capability"], "provider":"urn:acx:provider:jrip-local",
+                "status":"accepted", "issuedAt":row.get::<String,_>("issued_at"),
+                "requestHash":pf["requestHash"],
+                "effects":["job-queued","source-stored"],
+                "recovery":{"reversible":false,"cancelUntil":"terminal","note":"Cancellation can discard output; consumed compute cannot be undone."},
+                "proof":{"type":"plain-provider-record","profile":"org.jrip.acceptance-receipt-v1",
+                    "jobId":job.id,"preflightId":id,"preflightDigest":pf["preflightDigest"],
+                    "sourceSha256":job.source_sha256,"completionMeaning":"raster_export",
+                    "authorization":"shared-bearer","signed":false}
+            });
+            sqlx::query("INSERT INTO print_receipts(job_id,payload) VALUES(?,?)")
+                .bind(job.id.to_string())
+                .bind(serde_json::to_string(&receipt)?)
+                .execute(&mut *tx)
+                .await?;
+        }
         tx.commit().await?;
         Ok(())
     }
@@ -208,6 +299,7 @@ impl Repository {
                         .execute(&mut *tx)
                         .await?;
                     recovered.push(job.id);
+                    store_result_receipt(&mut tx, &job).await?;
                 }
             }
             sqlx::query("DELETE FROM worker_leases WHERE job_id=? AND run_id=? AND expires_at<=?")
@@ -222,9 +314,50 @@ impl Repository {
     }
     pub async fn transition(
         &self,
+        job: Job,
+        next: JobState,
+        error: Option<String>,
+    ) -> Result<Job, StorageError> {
+        self.transition_recorded(job, next, error, None).await
+    }
+    pub async fn complete_with_artifacts(
+        &self,
+        job: Job,
+        artifacts: &[Artifact],
+    ) -> Result<Job, StorageError> {
+        if artifacts.is_empty()
+            || artifacts.len() > 100
+            || artifacts.iter().enumerate().any(|(i, a)| {
+                a.page != i as u32 + 1
+                    || a.name != format!("page-{:06}.tiff", a.page)
+                    || a.media_type != "image/tiff"
+                    || a.bytes == 0
+                    || a.sha256.len() != 64
+                    || !a
+                        .sha256
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
+        {
+            return Err(StorageError::Conflict);
+        }
+        self.transition_recorded(job, JobState::Completed, None, Some(artifacts))
+            .await
+    }
+    pub async fn artifacts(&self, id: Uuid) -> Result<serde_json::Value, StorageError> {
+        let row = sqlx::query("SELECT payload FROM job_artifacts WHERE job_id=?")
+            .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or(StorageError::NotFound)?;
+        Ok(serde_json::from_str(row.get("payload"))?)
+    }
+    async fn transition_recorded(
+        &self,
         mut job: Job,
         next: JobState,
         error: Option<String>,
+        artifacts: Option<&[Artifact]>,
     ) -> Result<Job, StorageError> {
         job.state
             .transition(next)
@@ -251,6 +384,14 @@ impl Repository {
             .bind(job.updated_at)
             .execute(&mut *tx)
             .await?;
+        if let Some(artifacts) = artifacts {
+            sqlx::query("INSERT INTO job_artifacts(job_id,payload) VALUES(?,?)")
+                .bind(job.id.to_string())
+                .bind(serde_json::to_string(artifacts)?)
+                .execute(&mut *tx)
+                .await?;
+        }
+        store_result_receipt(&mut tx, &job).await?;
         tx.commit().await?;
         Ok(job)
     }
@@ -269,6 +410,45 @@ impl Repository {
         }
         Ok(())
     }
+}
+async fn store_result_receipt(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    job: &Job,
+) -> Result<(), StorageError> {
+    if !job.state.terminal() {
+        return Ok(());
+    }
+    let Some(row) = sqlx::query("SELECT payload, strftime('%Y-%m-%dT%H:%M:%SZ', ?, 'unixepoch') AS issued_at FROM print_receipts WHERE job_id=?")
+        .bind(job.updated_at).bind(job.id.to_string()).fetch_optional(&mut **tx).await? else { return Ok(()); };
+    let accepted: serde_json::Value = serde_json::from_str(row.get("payload"))?;
+    let status = match job.state {
+        JobState::Completed => "succeeded",
+        JobState::Cancelled => "cancelled",
+        _ => "failed",
+    };
+    let artifact_row = sqlx::query("SELECT payload FROM job_artifacts WHERE job_id=?")
+        .bind(job.id.to_string())
+        .fetch_optional(&mut **tx)
+        .await?;
+    let artifacts: Option<serde_json::Value> = artifact_row
+        .map(|r| serde_json::from_str(r.get("payload")))
+        .transpose()?;
+    let result = serde_json::json!({"jobId":job.id,"state":job.state,"revision":job.revision,
+        "errorCode":job.error_code,"selectedEngine":job.selected_engine,"sourceSha256":job.source_sha256,
+        "completionMeaning":"raster_export","artifactHashesVerified":artifacts.is_some(),"pageCount":artifacts.as_ref().and_then(|v| v.as_array()).map(Vec::len),"artifacts":artifacts});
+    let receipt = serde_json::json!({"acx":"0.1","receiptId":format!("{}:result",job.id),
+        "provider":accepted["provider"],"capability":accepted["capability"],"requestHash":accepted["requestHash"],
+        "status":status,"issuedAt":row.get::<String,_>("issued_at"),
+        "resultHash":format!("sha256:{:x}",Sha256::digest(serde_json::to_vec(&result)?)),
+        "effects":if job.state == JobState::Completed { vec!["raster-export-completed"] } else { vec!["job-terminated"] },
+        "proof":{"type":"plain-provider-record","signed":false,"profile":"org.jrip.result-receipt-v1",
+        "digestProfile":"org.jrip.serde-json-v1","acceptanceReceiptId":accepted["receiptId"],"result":result}});
+    sqlx::query("INSERT INTO print_result_receipts(job_id,payload) VALUES(?,?)")
+        .bind(job.id.to_string())
+        .bind(serde_json::to_string(&receipt)?)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
 }
 pub fn now() -> i64 {
     std::time::SystemTime::now()

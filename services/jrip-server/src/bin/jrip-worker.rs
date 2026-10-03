@@ -55,7 +55,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rendered = engine
         .render(&directory.join("document"), &staging, &job.manifest)
         .await;
-    heartbeat.abort();
     let current = repo.get(id).await?;
     // A concurrent cancel wins. The bounded interpreter finishes before its output is discarded.
     if current.state == JobState::Cancelled {
@@ -67,19 +66,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match rendered {
         Ok(rendered) => {
             let result = async {
+                let artifacts = jrip_server::artifacts::hash_pages(&rendered.pages).await?;
                 // Publish only complete, validated output sets.
                 tokio::fs::rename(&staging, directory.join("raster")).await?;
-                Ok::<_, std::io::Error>(())
+                Ok::<_, std::io::Error>(artifacts)
             }
             .await;
-            if let Err(error) = result {
-                repo.transition(current, JobState::Failed, Some("SPOOL_ERROR".into()))
-                    .await?;
-                repo.clear_lease(id, run_id).await?;
-                return Err(error.into());
-            }
+            let artifacts = match result {
+                Ok(artifacts) => artifacts,
+                Err(error) => {
+                    repo.transition(current, JobState::Failed, Some("SPOOL_ERROR".into()))
+                        .await?;
+                    repo.clear_lease(id, run_id).await?;
+                    return Err(error.into());
+                }
+            };
             let spooling = repo.transition(current, JobState::Spooling, None).await?;
-            repo.transition(spooling, JobState::Completed, None).await?;
+            repo.complete_with_artifacts(spooling, &artifacts).await?;
             repo.clear_lease(id, run_id).await?;
             tracing::info!(job_id=%id,pages=rendered.pages.len(),engine=?job.selected_engine,output="TIFF", "file export completed");
         }
@@ -91,5 +94,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err(error.into());
         }
     }
+    heartbeat.abort();
     Ok(())
 }

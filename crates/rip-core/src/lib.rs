@@ -162,6 +162,16 @@ pub struct Job {
     pub worker_run_id: Option<Uuid>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Artifact {
+    pub page: u32,
+    pub name: String,
+    pub media_type: String,
+    pub bytes: u64,
+    pub sha256: String,
+}
+
 /// Canonical interleaved raster layout; all dimensions and allocations are checked.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct RasterLayout {

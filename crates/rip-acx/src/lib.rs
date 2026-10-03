@@ -3,6 +3,7 @@ use serde_json::{Value, json};
 
 pub const ACX_VERSION: &str = "0.1";
 pub const RIP_CAPABILITY_ID: &str = "org.jrip.rip.export_tiff";
+pub mod intent;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Manifest {
@@ -108,6 +109,11 @@ pub fn manifest() -> Manifest {
             extensions: json!({
                 "org.jrip.print": {
                     "stage": "rip",
+                    "resolveEndpoint": "/api/v1/print/resolve",
+                    "resolveProfile": "acx-print-intent-0.1-experimental",
+                    "resolutionOnly": true,
+                    "artifactDownloadTemplate": "/api/v1/jobs/{id}/artifacts/{name}",
+                    "artifactVerifyTemplate": "/api/v1/jobs/{id}/artifacts/{name}/verify",
                     "engines": ["mupdf", "ghostscript"],
                     "documentFormats": [
                         "application/pdf",

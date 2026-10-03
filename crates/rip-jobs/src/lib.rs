@@ -22,6 +22,15 @@ pub async fn publish_staged(
     id: Uuid,
     manifest: Manifest,
 ) -> Result<Job, SubmitError> {
+    publish_bound(repo, directory, id, manifest, None).await
+}
+pub async fn publish_bound(
+    repo: &Repository,
+    directory: &Path,
+    id: Uuid,
+    manifest: Manifest,
+    binding: Option<(Uuid, &str)>,
+) -> Result<Job, SubmitError> {
     manifest.validate().map_err(|e| SubmitError::Invalid(e.0))?;
     let mut file = tokio::fs::File::open(directory.join("source.part")).await?;
     let mut data = [0u8; 65536];
@@ -64,8 +73,12 @@ pub async fn publish_staged(
         selected_engine: None,
         worker_run_id: None,
     };
+    if binding.is_some_and(|(_, expected)| expected != job.source_sha256) {
+        return Err(SubmitError::Invalid("source_hash_mismatch"));
+    }
     tokio::fs::rename(directory.join("source.part"), directory.join("document")).await?;
-    repo.insert(&job).await?;
+    repo.insert_with_preflight(&job, binding.map(|(id, _)| id))
+        .await?;
     Ok(job)
 }
 pub async fn submit_bytes(

@@ -42,6 +42,27 @@
 
 ## [Next] Agent Print Infrastructureの標準契約
 
+- [Done] 認証付きTIFFダウンロードとページ単位の公開後整合性検査を追加。サイズ・SHA-256不一致は409、未登録ページは404。検証済み非公開スナップショットを逐次配信し、検証後の元ファイル変更でも配信内容を固定する。
+- [Next] HTTP Range、同時ダウンロードの一時ディスク予算、保持期限と孤立ファイル清掃を実装する。
+
+- [Done] ワーカーがTIFFページを逐次hash計算し、ページ順・名前・サイズ・SHA-256を完了状態と同じトランザクションで保存。結果Receiptにも結び付け、認証付き成果物一覧APIを追加。hash計算中もleaseを更新する。
+- [Next] 成果物の保持期限・孤立ファイル清掃を追加。
+
+- [Done] commit経由ジョブの終端状態と同一トランザクションでACX結果Receiptを保存。完了・失敗・取消・lease失効を記録し、結果JSONのSHA-256と受付Receiptを関連付ける。認証付き `GET /api/v1/jobs/{id}/result-receipt` で取得でき、ジョブ削除後も保持する。
+- [Done] 新ワーカーの結果JSONに成果物のページ数・サイズ・SHA-256一覧を含めた。resultHashはこの結果JSONを対象とする。
+
+- [Done] commitと同一トランザクションでACX 0.1受付Receiptを永続化し、認証付き取得APIとreceiptUrlを追加。ticket hash、原稿hash、preflight digest、job-idを関連付け、再起動・ジョブ削除後も同じ受付証跡を保持する。
+- [Next] RIP完了・失敗・取消の結果Receiptと成果物hashを追加し、受付証跡と結果証跡を区別する。署名profileと保持期限の清掃は後続工程。
+
+- [Done] preflight digest、原稿SHA-256、形式、有効期限を検証するmultipart commit APIを実装。保存済みticketからジョブを登録し、SQLiteトランザクションで同一preflightの同時再送を重複排除する。共通Bearerトークンによる認可を使用。
+- [Next] 主体別scope・認可証跡、原稿構造全体の検証、Receipt、期限切れpreflightと孤立ファイルの清掃を追加する。
+
+- [Done] 設定preflightをSQLiteへ永続化し、5分の期限、確定ticketのrequestHash、preflightDigest、再起動後の取得、期限切れの拒否を実装。digestはJ-RIP専用の実験的JSON encodingで、ACXの共通canonicalizationではない。
+- [Next] 主体別の認可証跡とACX共通digest profileへの対応を追加。設定preflightの作成だけでは実行を許可しない。
+
+- [Done] `POST /api/v1/print/resolve` でACX PrintIntentをTIFF出力用JobTicketへ能力照合する。必須条件の競合、推奨値の調整、実機出力・ICC・用紙・両面・期限など未対応設定を明示する。原稿取得・検証、認可、コミット、ジョブ投入は後続工程。
+- [Next] ACX lifecycle全体の適合を検証する。resolverは設定照合のみで、原稿構造検証や主体別認可を含むACX lifecycleの完了とは扱わない。
+
 ```text
 Agent
   ↓ MCP / Agent SDK
