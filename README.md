@@ -36,11 +36,11 @@ ManifestはリンクしたACXリポジトリの`acx-manifest.schema.json`で検�
 
 ### PrintIntentの設定照合
 
-成果物は `GET /api/v1/jobs/{id}/artifacts/{name}` でBearer認証付きダウンロードができます。登録済みの `page-000001.tiff` 形式の名前だけを受け付け、公開後のサイズとSHA-256を再検証します。不一致はHTTP 409で配信を拒否します。検証済み一時スナップショットを64 KiBずつ配信し、終了時に削除します。ページ単位の明示検査は `POST /api/v1/jobs/{id}/artifacts/{name}/verify` です。HTTP Rangeにはまだ対応していません。一時ディスクは同時取得1件あたり最大1 GiBを使用します。
+成果物は `GET /api/v1/jobs/{id}/artifacts/{name}` でBearer認証付きダウンロードができます。登録済みの `page-000001.tiff` 形式の名前だけを受け付け、公開後のサイズとSHA-256を再検証します。不一致はHTTP 409で配信を拒否します。検証済み一時スナップショットを64 KiBずつ配信し、終了時に削除します。ページ単位の明示検査は `POST /api/v1/jobs/{id}/artifacts/{name}/verify` です。単一のHTTP Range（開始・終了、途中から末尾、末尾N bytes）に対応します。部分応答は206、無効・複数範囲は416です。If-RangeのETag不一致は全体を返します。Rangeでもファイル全体を検証します。一時ディスク予算はAPIプロセスごとに合計1 GiBで、配信終了・切断まで予約し、予算不足は503です。複数プロセス間の予算共有は後続工程です。
 
-English: Authenticated artifact download verifies stored size and SHA-256, then streams a private snapshot. Tampered content returns HTTP 409. A per-page verification endpoint is also available; HTTP Range remains pending.
+English: Authenticated artifact download verifies stored size and SHA-256, then streams a private snapshot. Tampered content returns HTTP 409. A per-page verification endpoint is also available; Single byte ranges and ETag-based If-Range are supported. Snapshot reservations share a 1 GiB per-process budget; exhaustion returns HTTP 503.
 
-简体中文：认证下载先验证记录的大小与SHA-256，再流式传输私有快照；内容不一致返回HTTP 409。可单独验证每页，HTTP Range尚未实现。
+简体中文：认证下载先验证记录的大小与SHA-256，再流式传输私有快照；内容不一致返回HTTP 409。可单独验证每页，支持单一字节范围与基于ETag的If-Range；每进程共享1 GiB快照预算，预算不足返回HTTP 503。
 
 `GET /api/v1/jobs/{id}/result-receipt` はcommit経由ジョブの結果ReceiptをBearer認証付きで返します。終端状態への変更と同時に保存し、完了は `succeeded`、失敗は `failed`、取消は `cancelled` として記録します。実行中や非commitジョブは404です。`proof.result` が `resultHash` の対象で、digest profileは `org.jrip.serde-json-v1`。`completionMeaning: raster_export` はTIFF出力完了を表します。新ワーカーによる完了時はページ順・名前・サイズ・SHA-256を同時に保存し、`artifactHashesVerified: true` として結果に含めます。`GET /api/v1/jobs/{id}/artifacts` で認証付き成果物一覧を取得できます。失敗・取消や旧経路の完了ではfalseです。hashは公開直前のファイル内容を表し、公開後の再検証やダウンロードAPIは後続工程です。
 

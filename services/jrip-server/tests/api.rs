@@ -627,6 +627,7 @@ async fn artifact_download_verifies_content_and_rejects_tampering() {
         .complete_with_artifacts(spooling, &artifacts)
         .await
         .unwrap();
+    let budget = state.artifact_budget.clone();
     let app = jrip_server::router(state);
     let url = format!("/api/v1/jobs/{}/artifacts/page-000001.tiff", completed.id);
     assert_eq!(
@@ -637,6 +638,60 @@ async fn artifact_download_verifies_content_and_rejects_tampering() {
             .status(),
         StatusCode::UNAUTHORIZED
     );
+    for (range, first, last) in [
+        ("bytes=2-7", 2, 7),
+        ("bytes=-3", data.len() - 3, data.len() - 1),
+        ("bytes=139990-", 139990, data.len() - 1),
+    ] {
+        let req = Request::get(&url)
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .header("range", range)
+            .body(Body::empty())
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            res.headers()["content-range"],
+            format!("bytes {first}-{last}/{}", data.len())
+        );
+        assert_eq!(
+            res.into_body().collect().await.unwrap().to_bytes().as_ref(),
+            &data[first..=last]
+        );
+    }
+    for range in ["bytes=999999-", "bytes=0-1,4-5", "bytes=-0", "bytes=+1-2"] {
+        let req = Request::get(&url)
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .header("range", range)
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(req).await.unwrap().status(),
+            StatusCode::RANGE_NOT_SATISFIABLE
+        );
+    }
+    let req = Request::get(&url)
+        .header("authorization", format!("Bearer {TOKEN}"))
+        .header("range", "bytes=1-2")
+        .header("if-range", "\"old\"")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.into_body().collect().await.unwrap().to_bytes().len(),
+        data.len()
+    );
+    let reservation = budget.clone().acquire_many_owned(1024).await.unwrap();
+    assert_eq!(
+        app.clone()
+            .oneshot(request("GET", &url))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    drop(reservation);
     let response = app.clone().oneshot(request("GET", &url)).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["content-type"], "image/tiff");

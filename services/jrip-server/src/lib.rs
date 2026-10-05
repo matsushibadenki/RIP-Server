@@ -23,6 +23,7 @@ pub struct App {
     pub repo: Repository,
     pub root: PathBuf,
     pub token: Arc<str>,
+    pub artifact_budget: Arc<tokio::sync::Semaphore>,
 }
 pub async fn open(root: PathBuf, token: String) -> Result<App, Box<dyn std::error::Error>> {
     tokio::fs::create_dir_all(root.join("jobs")).await?;
@@ -32,6 +33,7 @@ pub async fn open(root: PathBuf, token: String) -> Result<App, Box<dyn std::erro
         repo,
         root,
         token: token.into(),
+        artifact_budget: Arc::new(tokio::sync::Semaphore::new(1024)),
     })
 }
 pub fn router(app: App) -> Router {
@@ -95,6 +97,11 @@ impl IntoResponse for ApiError {
 fn messages(code: &str) -> serde_json::Value {
     let (en, ja, zh) = match code {
         "unauthorized" => ("Authentication required", "認証が必要です", "需要身份验证"),
+        "artifact_budget_exhausted" => (
+            "Temporary artifact budget exhausted; retry after current downloads finish",
+            "成果物用の一時容量予算が不足しています。進行中の取得が完了してから再試行してください",
+            "成果物临时容量预算不足，请等待当前下载完成后重试",
+        ),
         "artifact_integrity_mismatch" => (
             "Artifact size or hash does not match the recorded output",
             "成果物のサイズまたはhashが記録と一致しません",

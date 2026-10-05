@@ -68,7 +68,15 @@ async fn verified_snapshot(
     app: &App,
     id: Uuid,
     name: &str,
-) -> Result<(tokio::fs::File, tempfile::NamedTempFile, Artifact), ApiError> {
+) -> Result<
+    (
+        tokio::fs::File,
+        tempfile::NamedTempFile,
+        Artifact,
+        tokio::sync::OwnedSemaphorePermit,
+    ),
+    ApiError,
+> {
     let artifacts: Vec<Artifact> =
         serde_json::from_value(app.repo.artifacts(id).await?).map_err(internal)?;
     let artifact = artifacts
@@ -78,6 +86,7 @@ async fn verified_snapshot(
     if name.contains('/')
         || name.contains('\\')
         || name != format!("page-{:06}.tiff", artifact.page)
+        || artifact.bytes == 0
         || artifact.bytes > 1024 * 1024 * 1024
     {
         return Err(ApiError(
@@ -108,6 +117,12 @@ async fn verified_snapshot(
             "artifact_integrity_mismatch",
         ));
     }
+    let permits = artifact.bytes.div_ceil(1024 * 1024).max(1) as u32;
+    let permit = app
+        .artifact_budget
+        .clone()
+        .try_acquire_many_owned(permits)
+        .map_err(|_| ApiError(StatusCode::SERVICE_UNAVAILABLE, "artifact_budget_exhausted"))?;
     let guard = tempfile::NamedTempFile::new().map_err(internal)?;
     let mut snapshot = tokio::fs::File::from_std(guard.reopen().map_err(internal)?);
     let mut hash = Sha256::new();
@@ -136,7 +151,7 @@ async fn verified_snapshot(
     }
     snapshot.flush().await.map_err(internal)?;
     snapshot.rewind().await.map_err(internal)?;
-    Ok((snapshot, guard, artifact))
+    Ok((snapshot, guard, artifact, permit))
 }
 
 pub async fn download(
@@ -145,22 +160,76 @@ pub async fn download(
     Path((id, name)): Path<(Uuid, String)>,
 ) -> Result<Response, ApiError> {
     auth(&app, &headers)?;
-    let (file, guard, artifact) = verified_snapshot(&app, id, &name).await?;
-    let stream = futures_util::stream::try_unfold((file, guard), |(mut file, guard)| async move {
-        let mut buffer = vec![0u8; 65536];
-        let n = file.read(&mut buffer).await?;
-        if n == 0 {
-            return Ok::<_, io::Error>(None);
-        }
-        buffer.truncate(n);
-        Ok(Some((buffer, (file, guard))))
-    });
+    let (mut file, guard, artifact, permit) = verified_snapshot(&app, id, &name).await?;
+    let etag = format!("\"sha256:{}\"", artifact.sha256);
+    let requested = if headers
+        .get("if-range")
+        .is_none_or(|v| v.as_bytes() == etag.as_bytes())
+    {
+        headers.get("range")
+    } else {
+        None
+    };
+    let range = if let Some(value) = requested {
+        let parsed = value
+            .to_str()
+            .ok()
+            .and_then(|v| parse_range(v, artifact.bytes));
+        let Some(range) = parsed else {
+            let mut response = StatusCode::RANGE_NOT_SATISFIABLE.into_response();
+            response.headers_mut().insert(
+                "content-range",
+                format!("bytes */{}", artifact.bytes)
+                    .parse()
+                    .map_err(internal)?,
+            );
+            return Ok(response);
+        };
+        Some(range)
+    } else {
+        None
+    };
+    let (start, end) = range.unwrap_or((0, artifact.bytes - 1));
+    let length = end - start + 1;
+    file.seek(std::io::SeekFrom::Start(start))
+        .await
+        .map_err(internal)?;
+    let stream = futures_util::stream::try_unfold(
+        (file, guard, permit, length),
+        |(mut file, guard, permit, remaining)| async move {
+            if remaining == 0 {
+                return Ok::<_, io::Error>(None);
+            }
+            let mut buffer = vec![0u8; remaining.min(65536) as usize];
+            let n = file.read(&mut buffer).await?;
+            if n == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "snapshot truncated",
+                ));
+            }
+            buffer.truncate(n);
+            Ok(Some((buffer, (file, guard, permit, remaining - n as u64))))
+        },
+    );
     let mut response = Body::from_stream(stream).into_response();
+    if range.is_some() {
+        *response.status_mut() = StatusCode::PARTIAL_CONTENT;
+    }
     let headers = response.headers_mut();
+    headers.insert("accept-ranges", "bytes".parse().unwrap());
+    if range.is_some() {
+        headers.insert(
+            "content-range",
+            format!("bytes {start}-{end}/{}", artifact.bytes)
+                .parse()
+                .map_err(internal)?,
+        );
+    }
     headers.insert("content-type", "image/tiff".parse().unwrap());
     headers.insert(
         "content-length",
-        artifact.bytes.to_string().parse().map_err(internal)?,
+        length.to_string().parse().map_err(internal)?,
     );
     headers.insert(
         "content-disposition",
@@ -184,8 +253,41 @@ pub async fn verify(
     Path((id, name)): Path<(Uuid, String)>,
 ) -> Result<Json<Value>, ApiError> {
     auth(&app, &headers)?;
-    let (_, _, artifact) = verified_snapshot(&app, id, &name).await?;
+    let (_, _, artifact, _) = verified_snapshot(&app, id, &name).await?;
     Ok(Json(
         json!({"verified":true,"jobId":id,"artifact":artifact}),
     ))
+}
+
+fn parse_range(value: &str, size: u64) -> Option<(u64, u64)> {
+    let text = value.strip_prefix("bytes=")?;
+    if size == 0 || text.contains(',') || text.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let (start, end) = text.split_once('-')?;
+    let number = |s: &str| {
+        if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) {
+            s.parse::<u64>().ok()
+        } else {
+            None
+        }
+    };
+    if start.is_empty() {
+        let suffix = number(end)?;
+        if suffix == 0 {
+            return None;
+        }
+        return Some((size.saturating_sub(suffix), size - 1));
+    }
+    let start = number(start)?;
+    let end = if end.is_empty() {
+        size - 1
+    } else {
+        number(end)?.min(size - 1)
+    };
+    if start >= size || start > end {
+        None
+    } else {
+        Some((start, end))
+    }
 }
