@@ -87,6 +87,8 @@ impl SandboxConfig {
             "--pull=never".into(),
             "--name".into(),
             name.into(),
+            "--label=org.jrip.interpreter=1".into(),
+            format!("--label=org.jrip.source={source}"),
             "--network=none".into(),
             "--read-only".into(),
             "--cap-drop=ALL".into(),
@@ -317,6 +319,56 @@ impl DocumentInterpreter for HybridInterpreter {
         }
     }
 }
+/// Remove only this interpreter's containers for a source whose worker lease has failed.
+pub async fn cleanup_abandoned_source(source: &Path) -> Result<(), InterpreterError> {
+    let source = tokio::fs::canonicalize(source).await?;
+    let source = source
+        .to_str()
+        .ok_or(InterpreterError::Rejected("invalid_path"))?;
+    let output = tokio::time::timeout(
+        Duration::from_secs(10),
+        Command::new("docker")
+            .args([
+                "ps",
+                "-aq",
+                "--no-trunc",
+                "--filter",
+                "label=org.jrip.interpreter=1",
+                "--filter",
+                &format!("label=org.jrip.source={source}"),
+            ])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| InterpreterError::Rejected("cleanup_timeout"))??;
+    if !output.status.success() || output.stdout.len() > 65536 {
+        return Err(InterpreterError::Rejected("container_cleanup_failed"));
+    }
+    let ids = std::str::from_utf8(&output.stdout)
+        .map_err(|_| InterpreterError::Rejected("invalid_container_ids"))?;
+    for id in ids.lines() {
+        if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(InterpreterError::Rejected("invalid_container_ids"));
+        }
+        let status = tokio::time::timeout(
+            Duration::from_secs(10),
+            Command::new("docker")
+                .args(["rm", "-f", id])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .status(),
+        )
+        .await
+        .map_err(|_| InterpreterError::Rejected("cleanup_timeout"))??;
+        if !status.success() {
+            return Err(InterpreterError::Rejected("container_cleanup_failed"));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

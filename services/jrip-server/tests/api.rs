@@ -743,3 +743,343 @@ async fn artifact_download_verifies_content_and_rejects_tampering() {
         StatusCode::NOT_FOUND
     );
 }
+
+#[tokio::test]
+async fn events_resume_after_restart_and_metadata_deletion() {
+    let (dir, app) = app().await;
+    let response = app
+        .clone()
+        .oneshot(upload(
+            "events.ps",
+            "application/postscript",
+            "%!PS\nshowpage\n",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let job: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let path = format!("/api/v1/jobs/{}", job["id"].as_str().unwrap());
+    for action in ["hold", "release", "cancel"] {
+        assert_eq!(
+            app.clone()
+                .oneshot(request("POST", &format!("{path}/{action}")))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+    }
+    let response = app
+        .clone()
+        .oneshot(request("GET", &format!("{path}/events?limit=2")))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let first: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(first["events"].as_array().unwrap().len(), 2);
+    assert_eq!(first["hasMore"], true);
+    let cursor = first["nextCursor"].as_i64().unwrap();
+    assert_eq!(first["events"][0]["state"], "QUEUED");
+    assert_eq!(first["events"][1]["state"], "HELD");
+    assert_eq!(first["events"][1]["stage"], "QUEUED_FOR_RIP");
+    assert_eq!(first["events"][1]["reasonCode"], "HELD_BY_USER");
+    assert!(first["events"][1]["progressPercent"].is_null());
+    // Another job's later event must not enter this job's resumed history.
+    assert_eq!(
+        app.clone()
+            .oneshot(upload(
+                "other.ps",
+                "application/postscript",
+                "%!PS\nshowpage\n"
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(request("DELETE", &path))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    drop(app);
+    let app = jrip_server::router(
+        jrip_server::open(dir.path().into(), TOKEN.into())
+            .await
+            .unwrap(),
+    );
+    let response = app
+        .clone()
+        .oneshot(request("GET", &format!("{path}/events?after={cursor}")))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let rest: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(rest["events"].as_array().unwrap().len(), 2);
+    assert_eq!(rest["hasMore"], false);
+    assert_eq!(rest["events"][0]["state"], "QUEUED");
+    assert_eq!(rest["events"][1]["state"], "CANCELLED");
+    assert_eq!(rest["events"][1]["reasonCode"], "CANCELED_BY_USER");
+    assert_eq!(rest["events"][1]["stage"], "CANCELED");
+    assert!(rest["events"][0]["sequence"].as_i64().unwrap() > cursor);
+    let end = rest["nextCursor"].as_i64().unwrap();
+    let response = app
+        .clone()
+        .oneshot(request("GET", &format!("{path}/events?after={end}")))
+        .await
+        .unwrap();
+    let empty: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(empty["events"], serde_json::json!([]));
+    assert_eq!(empty["nextCursor"], end);
+    for query in ["after=-1", "limit=0", "limit=101"] {
+        assert_eq!(
+            app.clone()
+                .oneshot(request("GET", &format!("{path}/events?{query}")))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    assert_eq!(
+        app.clone()
+            .oneshot(
+                Request::get(format!("{path}/events"))
+                    .body(Body::empty())
+                    .unwrap()
+            )
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let unknown = format!("/api/v1/jobs/{}/events", uuid::Uuid::new_v4());
+    assert_eq!(
+        app.oneshot(request("GET", &unknown))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn scoped_api_credentials_enforce_operations_and_reject_legacy_bypass() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = jrip_server::open(dir.path().into(), TOKEN.into())
+        .await
+        .unwrap();
+    let reader = "reader-token-at-least-24-characters";
+    let submitter = "submit-token-at-least-24-characters";
+    state.credentials = vec![
+        jrip_server::Credential {
+            token: reader.into(),
+            identity: "reader".into(),
+            scopes: vec!["jobs:read".into()],
+        },
+        jrip_server::Credential {
+            token: submitter.into(),
+            identity: "submitter".into(),
+            scopes: vec!["jobs:submit".into()],
+        },
+    ];
+    let app = jrip_server::router(state);
+    let id = uuid::Uuid::new_v4();
+    for (token, method, path, status) in [
+        (reader, "GET", "/api/v1/jobs".into(), StatusCode::OK),
+        (
+            TOKEN,
+            "GET",
+            "/api/v1/jobs".into(),
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            submitter,
+            "GET",
+            "/api/v1/jobs".into(),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            reader,
+            "POST",
+            format!("/api/v1/jobs/{id}/hold"),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            reader,
+            "DELETE",
+            format!("/api/v1/jobs/{id}"),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            reader,
+            "GET",
+            format!("/api/v1/jobs/{id}/artifacts"),
+            StatusCode::FORBIDDEN,
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+    }
+    let response = app
+        .oneshot(
+            Request::post(format!("/api/v1/jobs/{id}/retry"))
+                .header("authorization", format!("Bearer {submitter}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"requestId":uuid::Uuid::new_v4(),"expectedRevision":0})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn concurrent_retries_deduplicate_and_reject_tampered_sources() {
+    let (dir, app) = app().await;
+    let response = app
+        .clone()
+        .oneshot(upload(
+            "retry.ps",
+            "application/postscript",
+            "%!PS-Adobe-3.0\nshowpage\n",
+        ))
+        .await
+        .unwrap();
+    let job: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let id = job["id"].as_str().unwrap();
+    assert_eq!(
+        app.clone()
+            .oneshot(request("POST", &format!("/api/v1/jobs/{id}/cancel")))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let key = uuid::Uuid::new_v4();
+    let make = |revision, request_id| {
+        Request::post(format!("/api/v1/jobs/{id}/retry"))
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({"expectedRevision":revision,"requestId":request_id}).to_string(),
+            ))
+            .unwrap()
+    };
+    assert_eq!(
+        app.clone()
+            .oneshot(make(0, uuid::Uuid::new_v4()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    let (first, second) = tokio::join!(
+        app.clone().oneshot(make(1, key)),
+        app.clone().oneshot(make(1, key))
+    );
+    let first = first.unwrap();
+    let second = second.unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(second.status(), StatusCode::OK);
+    let first: serde_json::Value =
+        serde_json::from_slice(&first.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let second: serde_json::Value =
+        serde_json::from_slice(&second.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(first["job"]["id"], second["job"]["id"]);
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("jobs")).unwrap().count(),
+        2
+    );
+    assert_eq!(
+        app.clone().oneshot(make(0, key)).await.unwrap().status(),
+        StatusCode::CONFLICT
+    );
+    tokio::fs::write(
+        dir.path().join("jobs").join(id).join("document"),
+        b"%!PS-Adobe-3.0\nchanged\n",
+    )
+    .await
+    .unwrap();
+    let response = app.oneshot(make(1, uuid::Uuid::new_v4())).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("jobs")).unwrap().count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn audit_is_durable_redacted_and_requires_admin() {
+    let (dir, router) = app().await;
+    let response = router
+        .clone()
+        .oneshot(request("GET", "/api/v1/jobs?secret=never-record-this"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers().contains_key("x-jrip-correlation-id"));
+    let response = router
+        .clone()
+        .oneshot(Request::get("/api/v1/jobs").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let repo = rip_storage::Repository::open(&dir.path().join("jobs.sqlite3"))
+        .await
+        .unwrap();
+    let evidence = repo.audit_records(0, 100).await.unwrap();
+    assert_eq!(evidence["records"].as_array().unwrap().len(), 2);
+    assert_eq!(evidence["records"][0]["identity"], "legacy-local");
+    assert_eq!(evidence["records"][0]["status"], 200);
+    assert_eq!(evidence["records"][1]["identity"], "unauthenticated");
+    assert_eq!(evidence["records"][1]["status"], 401);
+    assert!(!evidence.to_string().contains(TOKEN));
+    assert!(!evidence.to_string().contains("never-record-this"));
+    let response = router
+        .clone()
+        .oneshot(request("GET", "/api/v1/audit?limit=1"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["hasMore"], true);
+    assert_eq!(body["records"].as_array().unwrap().len(), 1);
+    let response = router
+        .oneshot(Request::get("/api/v1/audit").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let pending = repo
+        .begin_audit(uuid::Uuid::new_v4(), "worker", "interrupted", None)
+        .await
+        .unwrap();
+    let reopened = rip_storage::Repository::open(&dir.path().join("jobs.sqlite3"))
+        .await
+        .unwrap();
+    let rows = reopened.audit_records(pending - 1, 1).await.unwrap();
+    assert!(rows["records"][0]["finishedAt"].is_null());
+}

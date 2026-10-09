@@ -1,0 +1,17 @@
+[
+  {
+    "identity": "reader-agent",
+    "token": "REPLACE-WITH-A-UNIQUE-READER-TOKEN",
+    "scopes": ["jobs:read", "artifacts:read"]
+  },
+  {
+    "identity": "operator-agent",
+    "token": "REPLACE-WITH-A-UNIQUE-OPERATOR-TOKEN",
+    "scopes": ["jobs:read", "jobs:submit", "jobs:control", "artifacts:read"]
+  },
+  {
+    "identity": "administrator",
+    "token": "REPLACE-WITH-A-UNIQUE-ADMINISTRATOR-TOKEN",
+    "scopes": ["admin"]
+  }
+]

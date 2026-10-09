@@ -1,0 +1,9 @@
+[package]
+name = "rip-raster"
+version.workspace = true
+edition.workspace = true
+[dependencies]
+tiff = "0.10"
+thiserror.workspace = true
+tempfile = "3"
+sha2 = "0.10"

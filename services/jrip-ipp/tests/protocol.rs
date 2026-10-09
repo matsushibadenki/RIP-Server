@@ -185,7 +185,9 @@ async fn pdf_job_round_trip_and_persistent_id() {
     )
     .await;
     assert_eq!(
-        IppRequest::parse(&query).unwrap().integer(2, "job-state"),
+        IppRequest::parse(&query)
+            .unwrap()
+            .enumeration(2, "job-state"),
         Some(3)
     );
     let (_, cancel) = send(
@@ -282,7 +284,7 @@ async fn get_jobs_filters_completed_and_limits_results() {
     request.push(3);
     let (_, response) = send(&app, request).await;
     let listed = IppRequest::parse(&response).unwrap();
-    assert_eq!(listed.integer(2, "job-state"), Some(7));
+    assert_eq!(listed.enumeration(2, "job-state"), Some(7));
     assert!(listed.one(2, "job-id").is_none());
 }
 #[tokio::test]
@@ -382,4 +384,248 @@ async fn unsupported_settings_and_malformed_documents_do_not_create_jobs() {
         std::fs::read_dir(dir.path().join("jobs")).unwrap().count(),
         0
     );
+}
+
+#[tokio::test]
+async fn request_budget_and_slow_upload_are_bounded() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = jrip_ipp::open(dir.path().into(), URI.into()).await.unwrap();
+    tokio::time::pause();
+    let permits = app.requests.acquire_many(4).await.unwrap();
+    let router = jrip_ipp::router(app.clone());
+    let response = router
+        .clone()
+        .oneshot(
+            Request::post("/ipp/print")
+                .header("content-type", "application/ipp")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    drop(permits);
+    let slow = Body::from_stream(futures_util::stream::pending::<
+        Result<axum::body::Bytes, std::io::Error>,
+    >());
+    let response = router
+        .oneshot(
+            Request::post("/ipp/print")
+                .header("content-type", "application/ipp")
+                .body(slow)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+    assert_eq!(app.requests.available_permits(), 4);
+    tokio::time::resume();
+    assert!(app.repo.list_ipp_jobs().await.unwrap().is_empty());
+}
+#[tokio::test]
+async fn proof_page_and_uri_configuration_are_explicit() {
+    let dir = tempfile::tempdir().unwrap();
+    for uri in [
+        "ipp://user:secret@host/ipp/print",
+        "ipp://host/ipp/print?x=1",
+        "ipp://host/ipp/print#x",
+        "ipp:///ipp/print",
+    ] {
+        assert!(jrip_ipp::open(dir.path().into(), uri.into()).await.is_err());
+    }
+    let app = jrip_ipp::open(dir.path().into(), URI.into()).await.unwrap();
+    let response = jrip_ipp::router(app)
+        .oneshot(Request::get("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let text = std::str::from_utf8(&bytes).unwrap();
+    for value in [
+        "lang=\"ja\"",
+        "lang=\"en\"",
+        "lang=\"zh-CN\"",
+        "JRIP_DATA_ROOT/jobs/",
+        "No paper output",
+    ] {
+        assert!(text.contains(value));
+    }
+}
+
+#[tokio::test]
+async fn native_cups_defaults_and_pdf_duplicate_are_unambiguous() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = jrip_ipp::open(dir.path().into(), URI.into()).await.unwrap();
+    let app = jrip_ipp::router(state.clone());
+    let make = |extra_format: &[u8], copies: i32, number_up: i32, finishings: i32, sides: &[u8]| {
+        let mut req = message(ipp::VALIDATE_JOB, b"", Some("application/pdf"), None, false);
+        req.pop();
+        attribute(&mut req, 0x49, "document-format", extra_format);
+        req.push(2);
+        attribute(&mut req, 0x42, "document-name-supplied", b"proof.pdf");
+        attribute(&mut req, 0x42, "job-originating-host-name", b"client.local");
+        attribute(
+            &mut req,
+            0x45,
+            "job-uuid",
+            b"urn:uuid:5c72398b-88f3-4e72-a6f3-e2f3aefbab33",
+        );
+        attribute(&mut req, 0x21, "copies", &copies.to_be_bytes());
+        attribute(&mut req, 0x21, "number-up", &number_up.to_be_bytes());
+        attribute(&mut req, 0x23, "finishings", &finishings.to_be_bytes());
+        attribute(&mut req, 0x44, "sides", sides);
+        req.push(3);
+        req
+    };
+    let (_, reply) = send(&app, make(b"application/pdf", 1, 1, 3, b"one-sided")).await;
+    assert_eq!(status(&reply), ipp::OK);
+    for request in [
+        make(b"application/postscript", 1, 1, 3, b"one-sided"),
+        make(b"application/pdf", 2, 1, 3, b"one-sided"),
+        make(b"application/pdf", 1, 2, 3, b"one-sided"),
+        make(b"application/pdf", 1, 1, 4, b"one-sided"),
+        make(b"application/pdf", 1, 1, 3, b"two-sided-long-edge"),
+    ] {
+        let (_, reply) = send(&app, request).await;
+        assert_ne!(status(&reply), ipp::OK);
+    }
+    let mut triple = message(ipp::VALIDATE_JOB, b"", Some("application/pdf"), None, false);
+    triple.pop();
+    for _ in 0..2 {
+        attribute(&mut triple, 0x49, "document-format", b"application/pdf");
+    }
+    triple.push(3);
+    let (_, reply) = send(&app, triple).await;
+    assert_ne!(status(&reply), ipp::OK);
+    assert!(state.repo.list_ipp_jobs().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn cups_generic_hint_requires_pdf_payload_and_preserves_source() {
+    use rip_core::JobState;
+    let dir = tempfile::tempdir().unwrap();
+    let state = jrip_ipp::open(dir.path().into(), URI.into()).await.unwrap();
+    let app = jrip_ipp::router(state.clone());
+    let pdf = include_bytes!("../../../tests/corpus/colors.pdf");
+    let request = |document: &[u8], hint: &[u8]| {
+        let mut req = message(
+            ipp::PRINT_JOB,
+            document,
+            Some("application/pdf"),
+            None,
+            false,
+        );
+        let index = req.len() - document.len() - 1;
+        let mut extra = Vec::new();
+        attribute(&mut extra, 0x49, "document-format", hint);
+        req.splice(index..index, extra);
+        req
+    };
+    for bad in [
+        request(b"not a PDF", b"application/octet-stream"),
+        request(pdf, b"application/postscript"),
+    ] {
+        let (_, reply) = send(&app, bad).await;
+        assert_ne!(status(&reply), ipp::OK);
+    }
+    let (_, reply) = send(&app, request(pdf, b"application/octet-stream")).await;
+    assert_eq!(status(&reply), ipp::OK);
+    let jobs = state.repo.list_ipp_jobs().await.unwrap();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].1.state, JobState::Queued);
+    assert_eq!(
+        std::fs::read(
+            dir.path()
+                .join("jobs")
+                .join(jobs[0].1.id.to_string())
+                .join("document")
+        )
+        .unwrap(),
+        pdf
+    );
+}
+
+#[tokio::test]
+async fn ipp_hold_release_persists_and_blocks_worker_claims() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = jrip_ipp::open(dir.path().into(), URI.into()).await.unwrap();
+    let router = jrip_ipp::router(state);
+    let (_, response) = send(
+        &router,
+        message(
+            ipp::PRINT_JOB,
+            include_bytes!("../../../tests/corpus/colors.pdf"),
+            Some("application/pdf"),
+            None,
+            false,
+        ),
+    )
+    .await;
+    let id = IppRequest::parse(&response)
+        .unwrap()
+        .integer(2, "job-id")
+        .unwrap();
+    let repo = rip_storage::Repository::open(&dir.path().join("jobs.sqlite3"))
+        .await
+        .unwrap();
+    let stale = repo.next_queued().await.unwrap().unwrap();
+    for _ in 0..2 {
+        let (_, response) = send(&router, message(ipp::HOLD_JOB, &[], None, Some(id), false)).await;
+        assert_eq!(status(&response), ipp::OK);
+    }
+    let reopened = jrip_ipp::open(dir.path().into(), URI.into()).await.unwrap();
+    let router = jrip_ipp::router(reopened);
+    let (_, response) = send(
+        &router,
+        message(ipp::GET_JOB_ATTRIBUTES, &[], None, Some(id), false),
+    )
+    .await;
+    let attrs = IppRequest::parse(&response).unwrap();
+    assert_eq!(attrs.enumeration(2, "job-state"), Some(4));
+    assert_eq!(
+        attrs.text(2, "job-state-reasons", 0x44),
+        Some("job-hold-until-specified")
+    );
+    let repo = rip_storage::Repository::open(&dir.path().join("jobs.sqlite3"))
+        .await
+        .unwrap();
+    assert!(repo.next_queued().await.unwrap().is_none());
+    assert!(matches!(
+        repo.claim_queued(stale.clone(), stale.id, i64::MAX).await,
+        Err(rip_storage::StorageError::Conflict)
+    ));
+
+    let (_, response) = send(
+        &router,
+        message(ipp::RELEASE_JOB, &[], None, Some(id), false),
+    )
+    .await;
+    assert_eq!(status(&response), ipp::OK);
+    assert!(repo.next_queued().await.unwrap().is_some());
+    let (_, response) = send(
+        &router,
+        message(ipp::RELEASE_JOB, &[], None, Some(id), false),
+    )
+    .await;
+    assert_eq!(status(&response), ipp::NOT_POSSIBLE);
+    let pending = repo.next_queued().await.unwrap().unwrap();
+    repo.claim_queued(pending.clone(), pending.id, i64::MAX)
+        .await
+        .unwrap();
+    let (_, response) = send(&router, message(ipp::HOLD_JOB, &[], None, Some(id), false)).await;
+    assert_eq!(status(&response), ipp::NOT_POSSIBLE);
+    let (_, response) = send(
+        &router,
+        message(ipp::CANCEL_JOB, &[], None, Some(id), false),
+    )
+    .await;
+    assert_eq!(status(&response), ipp::OK);
+    let (_, response) = send(&router, message(ipp::HOLD_JOB, &[], None, Some(id), false)).await;
+    assert_eq!(status(&response), ipp::NOT_POSSIBLE);
+    let (_, response) = send(
+        &router,
+        message(ipp::HOLD_JOB, &[], None, Some(i32::MAX), false),
+    )
+    .await;
+    assert_eq!(status(&response), ipp::NOT_FOUND);
 }

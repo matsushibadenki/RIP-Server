@@ -1,0 +1,9 @@
+[
+  {
+    "id": "office",
+    "uri": "ipp://printer.example.invalid/ipp/print",
+    "media": [
+      { "name": "iso_a4_210x297mm", "widthMicrons": 210000, "heightMicrons": 297000 }
+    ]
+  }
+]

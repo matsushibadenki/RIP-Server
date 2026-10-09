@@ -19,3 +19,6 @@ rip-interpreter = { path = "crates/rip-interpreter" }
 rip-jobs = { path = "crates/rip-jobs" }
 rip-ipp = { path = "crates/rip-ipp" }
 rip-acx = { path = "crates/rip-acx" }
+rip-printer = { path = "crates/rip-printer" }
+rip-raster = { path = "crates/rip-raster" }
+rip-color = { path = "crates/rip-color" }

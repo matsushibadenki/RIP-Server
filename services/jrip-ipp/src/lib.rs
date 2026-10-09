@@ -4,7 +4,7 @@ use axum::{
     body::Bytes,
     extract::{DefaultBodyLimit, Path, State},
     http::{HeaderMap, StatusCode},
-    routing::post,
+    routing::{get, post},
 };
 use rip_core::{ColorMode, DocumentFormat, EnginePreference, Job, JobState, Manifest};
 use rip_ipp::{self as ipp, Request, Response};
@@ -16,9 +16,18 @@ pub struct App {
     pub repo: Repository,
     pub root: PathBuf,
     pub printer_uri: Arc<str>,
+    pub requests: Arc<tokio::sync::Semaphore>,
 }
 pub async fn open(root: PathBuf, printer_uri: String) -> Result<App, Box<dyn std::error::Error>> {
-    if !printer_uri.starts_with("ipp://") || !printer_uri.ends_with("/ipp/print") {
+    let uri = url::Url::parse(&printer_uri)?;
+    if uri.scheme() != "ipp"
+        || uri.host_str().is_none()
+        || uri.path() != "/ipp/print"
+        || uri.query().is_some()
+        || uri.fragment().is_some()
+        || !uri.username().is_empty()
+        || uri.password().is_some()
+    {
         return Err("Invalid JRIP_PRINTER_URI".into());
     }
     tokio::fs::create_dir_all(root.join("jobs")).await?;
@@ -28,6 +37,7 @@ pub async fn open(root: PathBuf, printer_uri: String) -> Result<App, Box<dyn std
         repo,
         root,
         printer_uri: printer_uri.into(),
+        requests: Arc::new(tokio::sync::Semaphore::new(4)),
     })
 }
 /// Build only the generic IPP service. PDF-only proof output is not AirPrint or IPP Everywhere.
@@ -64,6 +74,10 @@ pub fn discovery_info(
         ("pdl", "application/pdf"),
         ("ty", "J-RIP PDF Proof"),
         ("qtotal", "1"),
+        (
+            "note",
+            "Virtual printer: PDF to TIFF files; no paper output",
+        ),
     ];
     Ok(mdns_sd::ServiceInfo::new(
         "_ipp._tcp.local.",
@@ -76,12 +90,34 @@ pub fn discovery_info(
 }
 pub fn router(app: App) -> Router {
     Router::new()
+        .route(
+            "/",
+            get(|| async { axum::response::Html(include_str!("proof.html")) }),
+        )
         .route("/ipp/print", post(handle))
         .route("/ipp/print/jobs/{id}", post(handle_job_uri))
         .layer(DefaultBodyLimit::max(
             rip_jobs::MAX_DOCUMENT_BYTES as usize + 16384,
         ))
+        .layer(axum::middleware::from_fn_with_state(
+            app.clone(),
+            guard_request,
+        ))
         .with_state(app)
+}
+async fn guard_request(
+    State(app): State<App>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let Ok(_permit) = app.requests.try_acquire() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    match tokio::time::timeout(std::time::Duration::from_secs(30), next.run(request)).await {
+        Ok(response) => response,
+        Err(_) => StatusCode::REQUEST_TIMEOUT.into_response(),
+    }
 }
 type IppReply = (
     StatusCode,
@@ -113,18 +149,57 @@ async fn handle_request(
         tracing::warn!(content_type, "unsupported IPP content type");
         return reply_http(StatusCode::UNSUPPORTED_MEDIA_TYPE, Vec::new());
     }
-    let req = match Request::parse(&body) {
+    let mut req = match Request::parse(&body) {
         Ok(req) => req,
         Err(_) => {
             tracing::warn!(length = body.len(), "invalid IPP wire message");
             return reply_http(StatusCode::BAD_REQUEST, Vec::new());
         }
     };
+    // macOS CUPS 2.3.4 passthrough can append an auto-detection MIME hint.
+    // Keep PDF only for a bounded pair with verified PDF magic; never choose between concrete conflicting formats.
+    let formats: Vec<_> = req
+        .attributes
+        .iter()
+        .filter(|a| a.name == "document-format")
+        .collect();
+    let duplicate_pdf = matches!(req.operation, ipp::PRINT_JOB | ipp::VALIDATE_JOB)
+        && formats.iter().all(|a| a.value == b"application/pdf");
+    let generic_hint = req.operation == ipp::PRINT_JOB
+        && req.document.starts_with(b"%PDF-")
+        && formats.iter().any(|a| a.value == b"application/pdf")
+        && formats.iter().all(|a| {
+            matches!(
+                a.value.as_slice(),
+                b"application/pdf" | b"application/octet-stream"
+            )
+        });
+    if formats.len() == 2
+        && formats.iter().all(|a| a.group == 1 && a.tag == 0x49)
+        && (duplicate_pdf || generic_hint)
+    {
+        let mut seen = false;
+        req.attributes.retain(|a| {
+            if a.name != "document-format" {
+                return true;
+            }
+            if a.value != b"application/pdf" {
+                return false;
+            }
+            let keep = !seen;
+            seen = true;
+            keep
+        });
+        tracing::debug!("normalized passthrough PDF format pair");
+    }
     let mut status = req.validate_operation();
+    tracing::debug!(operation=req.operation, attributes=?req.attributes.iter().map(|a|(&a.name,a.group,a.tag)).collect::<Vec<_>>(), status=?status, "IPP request metadata");
     let target_id = if let Some(id) = path_id {
         let expected = format!("{}/jobs/{id}", app.printer_uri);
-        if !matches!(req.operation, ipp::GET_JOB_ATTRIBUTES | ipp::CANCEL_JOB)
-            || req.text(1, "job-uri", 0x45) != Some(expected.as_str())
+        if !matches!(
+            req.operation,
+            ipp::GET_JOB_ATTRIBUTES | ipp::CANCEL_JOB | ipp::HOLD_JOB | ipp::RELEASE_JOB
+        ) || req.text(1, "job-uri", 0x45) != Some(expected.as_str())
         {
             status = Err(ipp::BAD_REQUEST);
         }
@@ -140,15 +215,13 @@ async fn handle_request(
     response.text(0x48, "attributes-natural-language", "en");
     if status.is_ok() {
         let result = match req.operation {
-            ipp::GET_PRINTER_ATTRIBUTES => {
-                printer_attributes(&mut response, &app, &req);
-                Ok(())
-            }
+            ipp::GET_PRINTER_ATTRIBUTES => printer_attributes(&mut response, &app, &req).await,
             ipp::PRINT_JOB => print_job(&app, &req, &mut response).await,
             ipp::VALIDATE_JOB => validate_job(&req),
             ipp::GET_JOB_ATTRIBUTES => job_info(&app, &req, target_id, &mut response).await,
             ipp::GET_JOBS => list_jobs(&app, &req, &mut response).await,
             ipp::CANCEL_JOB => cancel(&app, &req, target_id).await,
+            ipp::HOLD_JOB | ipp::RELEASE_JOB => hold_or_release(&app, &req, target_id).await,
             _ => Ok(()),
         };
         if let Err(code) = result {
@@ -173,7 +246,31 @@ fn reply_http(
         body,
     )
 }
-fn printer_attributes(response: &mut Response, app: &App, req: &Request<'_>) {
+async fn printer_attributes(
+    response: &mut Response,
+    app: &App,
+    req: &Request<'_>,
+) -> Result<(), u16> {
+    let jobs = app
+        .repo
+        .list_ipp_jobs()
+        .await
+        .map_err(|_| ipp::INTERNAL_ERROR)?;
+    let processing = jobs.iter().any(|(_, j)| {
+        matches!(
+            j.state,
+            JobState::Ripping
+                | JobState::ColorProcessing
+                | JobState::Halftoning
+                | JobState::Spooling
+                | JobState::Printing
+        )
+    });
+    let queued = jobs
+        .iter()
+        .filter(|(_, j)| !j.state.terminal())
+        .count()
+        .min(i32::MAX as usize) as i32;
     response.group(4);
     macro_rules! attr {
         ($name:literal, $emit:expr) => {
@@ -246,18 +343,36 @@ fn printer_attributes(response: &mut Response, app: &App, req: &Request<'_>) {
         response.text(0x44, "ipp-versions-supported", "1.1")
     );
     if req.wants("operations-supported", "printer-description") {
-        response.integer("operations-supported", i32::from(ipp::PRINT_JOB));
+        response.enumeration("operations-supported", i32::from(ipp::PRINT_JOB));
         for operation in [
             ipp::GET_PRINTER_ATTRIBUTES,
             ipp::VALIDATE_JOB,
             ipp::GET_JOB_ATTRIBUTES,
             ipp::GET_JOBS,
             ipp::CANCEL_JOB,
+            ipp::HOLD_JOB,
+            ipp::RELEASE_JOB,
         ] {
-            response.additional(0x21, &i32::from(operation).to_be_bytes());
+            response.additional(0x23, &i32::from(operation).to_be_bytes());
         }
     }
-    attr!("printer-state", response.integer("printer-state", 3));
+    attr!(
+        "printer-state",
+        response.enumeration("printer-state", if processing { 4 } else { 3 })
+    );
+    attr!(
+        "queued-job-count",
+        response.integer("queued-job-count", queued)
+    );
+    let more_info = app
+        .printer_uri
+        .replacen("ipp://", "http://", 1)
+        .trim_end_matches("ipp/print")
+        .to_string();
+    attr!(
+        "printer-more-info",
+        response.text(0x45, "printer-more-info", &more_info)
+    );
     attr!(
         "printer-is-accepting-jobs",
         response.attribute(0x22, "printer-is-accepting-jobs", &[1])
@@ -265,6 +380,35 @@ fn printer_attributes(response: &mut Response, app: &App, req: &Request<'_>) {
     attr!(
         "printer-state-reasons",
         response.text(0x44, "printer-state-reasons", "none")
+    );
+    template_attr!("copies-default", response.integer("copies-default", 1));
+    template_attr!(
+        "copies-supported",
+        response.attribute(0x33, "copies-supported", &[0, 0, 0, 1, 0, 0, 0, 1])
+    );
+    template_attr!(
+        "number-up-default",
+        response.integer("number-up-default", 1)
+    );
+    template_attr!(
+        "number-up-supported",
+        response.integer("number-up-supported", 1)
+    );
+    template_attr!(
+        "finishings-default",
+        response.enumeration("finishings-default", 3)
+    );
+    template_attr!(
+        "finishings-supported",
+        response.enumeration("finishings-supported", 3)
+    );
+    template_attr!(
+        "sides-default",
+        response.text(0x44, "sides-default", "one-sided")
+    );
+    template_attr!(
+        "sides-supported",
+        response.text(0x44, "sides-supported", "one-sided")
     );
     template_attr!(
         "printer-resolution-default",
@@ -286,6 +430,7 @@ fn printer_attributes(response: &mut Response, app: &App, req: &Request<'_>) {
         response.text(0x44, "print-color-mode-supported", "color");
         response.additional(0x44, b"monochrome");
     }
+    Ok(())
 }
 async fn print_job(app: &App, req: &Request<'_>, response: &mut Response) -> Result<(), u16> {
     if req.document.len() as u64 > rip_jobs::MAX_DOCUMENT_BYTES {
@@ -382,6 +527,31 @@ async fn cancel(app: &App, req: &Request<'_>, target_id: Option<i32>) -> Result<
         .map_err(map_storage)?;
     Ok(())
 }
+async fn hold_or_release(app: &App, req: &Request<'_>, target_id: Option<i32>) -> Result<(), u16> {
+    let id = target_id
+        .or_else(|| req.integer(1, "job-id"))
+        .ok_or(ipp::BAD_REQUEST)?;
+    let job = app.repo.get_ipp_job(id).await.map_err(map_storage)?;
+    let next = if req.operation == ipp::HOLD_JOB {
+        if job.state == JobState::Held {
+            return Ok(());
+        }
+        if job.state != JobState::Queued {
+            return Err(ipp::NOT_POSSIBLE);
+        }
+        JobState::Held
+    } else {
+        if job.state != JobState::Held {
+            return Err(ipp::NOT_POSSIBLE);
+        }
+        JobState::Queued
+    };
+    app.repo
+        .transition(job, next, None)
+        .await
+        .map_err(map_storage)?;
+    Ok(())
+}
 fn map_storage(e: StorageError) -> u16 {
     match e {
         StorageError::NotFound => ipp::NOT_FOUND,
@@ -434,19 +604,46 @@ fn job_attributes(
         JobState::Failed => 8,
         JobState::Completed => 9,
     };
-    attr!("job-state", response.integer("job-state", state));
+    attr!("job-state", response.enumeration("job-state", state));
+    attr!(
+        "job-state-message",
+        response.text(
+            0x41,
+            "job-state-message",
+            match job.state {
+                JobState::Completed => "TIFF file export completed; no paper output",
+                JobState::Failed => "TIFF export failed",
+                JobState::Cancelled => "TIFF export cancelled",
+                _ => "Virtual PDF-to-TIFF job",
+            }
+        )
+    );
     attr!(
         "job-state-reasons",
         response.text(
             0x44,
             "job-state-reasons",
             match job.state {
+                JobState::Held => "job-hold-until-specified",
                 JobState::Cancelled => "job-canceled-by-user",
                 JobState::Failed => "aborted-by-system",
                 _ => "none",
             },
         )
     );
+    if !minimal {
+        for (name, value) in [("copies", 1), ("number-up", 1)] {
+            if req.is_none_or(|request| request.wants(name, "job-template")) {
+                response.integer(name, value);
+            }
+        }
+        if req.is_none_or(|request| request.wants("finishings", "job-template")) {
+            response.enumeration("finishings", 3);
+        }
+        if req.is_none_or(|request| request.wants("sides", "job-template")) {
+            response.text(0x44, "sides", "one-sided");
+        }
+    }
     if !minimal && req.is_none_or(|request| request.wants("printer-resolution", "job-template")) {
         response.resolution_dpi("printer-resolution", job.manifest.dpi);
     }

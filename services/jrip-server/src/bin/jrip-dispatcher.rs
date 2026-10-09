@@ -29,10 +29,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_file_name(format!("jrip-worker{}", std::env::consts::EXE_SUFFIX))
     };
     let repo = Repository::open(&root.join("jobs.sqlite3")).await?;
+    // Retry cleanup after a supervisor restart interrupted a prior cleanup pass.
+    let mut offset = 0;
+    loop {
+        let jobs = repo.list(100, offset).await?;
+        let count = jobs.len();
+        for job in jobs {
+            if job.state == JobState::Failed
+                && matches!(
+                    job.error_code.as_deref(),
+                    Some("LEASE_EXPIRED" | "WORKER_EXIT")
+                )
+            {
+                rip_interpreter::cleanup_abandoned_source(
+                    &root.join("jobs").join(job.id.to_string()).join("document"),
+                )
+                .await?;
+            }
+        }
+        if count < 100 {
+            break;
+        }
+        offset += 100;
+    }
     let mut shutdown = Box::pin(tokio::signal::ctrl_c());
     loop {
         for id in repo.recover_expired_leases(rip_storage::now()).await? {
             tracing::warn!(job_id=%id, "expired worker lease recovered as failed");
+            rip_interpreter::cleanup_abandoned_source(
+                &root.join("jobs").join(id.to_string()).join("document"),
+            )
+            .await?;
         }
         if let Some(job) = repo.next_queued().await? {
             tracing::info!(job_id=%job.id, "dispatching queued job");
@@ -54,6 +81,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let current =
                 jrip_server::dispatch::reconcile_worker_exit(&repo, job.id, run_id).await?;
             tracing::info!(job_id=%job.id, ?status, state=?current.state, "worker exited");
+            if current.error_code.as_deref() == Some("WORKER_EXIT") {
+                rip_interpreter::cleanup_abandoned_source(
+                    &root.join("jobs").join(job.id.to_string()).join("document"),
+                )
+                .await?;
+            }
             if current.state == JobState::Queued {
                 return Err("Worker exited without claiming the queued job".into());
             }

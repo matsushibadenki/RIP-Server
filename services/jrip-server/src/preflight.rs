@@ -22,7 +22,7 @@ pub async fn create(
     headers: HeaderMap,
     Json(intent): Json<rip_acx::intent::PrintIntent>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    auth(&app, &headers)?;
+    authorize(&app, &headers, "jobs:submit")?;
     let resolution = rip_acx::intent::resolve(intent);
     if resolution["executable"] != true {
         return Ok((StatusCode::UNPROCESSABLE_ENTITY, Json(resolution)));
@@ -52,7 +52,7 @@ pub async fn get(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
-    auth(&app, &headers)?;
+    authorize(&app, &headers, "jobs:submit")?;
     let payload = app.repo.get_preflight(id).await?;
     if payload["expiresAt"].as_i64().unwrap_or(0) <= now() {
         return Err(ApiError(StatusCode::GONE, "preflight_expired"));
@@ -66,7 +66,7 @@ pub async fn commit(
     Path(preflight_id): Path<Uuid>,
     mut multipart: Multipart,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    auth(&app, &headers)?;
+    authorize(&app, &headers, "jobs:submit")?;
     let payload = app.repo.get_preflight(preflight_id).await?;
     let supplied = headers
         .get("x-jrip-preflight-digest")
@@ -176,7 +176,7 @@ pub async fn receipt(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
-    auth(&app, &headers)?;
+    authorize(&app, &headers, "jobs:read")?;
     Ok(Json(app.repo.get_print_receipt(id).await?))
 }
 
@@ -185,7 +185,7 @@ pub async fn result_receipt(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
-    auth(&app, &headers)?;
+    authorize(&app, &headers, "jobs:read")?;
     Ok(Json(app.repo.get_result_receipt(id).await?))
 }
 
@@ -194,6 +194,6 @@ pub async fn artifacts(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
-    auth(&app, &headers)?;
+    authorize(&app, &headers, "artifacts:read")?;
     Ok(Json(app.repo.artifacts(id).await?))
 }

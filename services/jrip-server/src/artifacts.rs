@@ -50,7 +50,7 @@ pub async fn hash_pages(pages: &[PathBuf]) -> io::Result<Vec<Artifact>> {
     Ok(result)
 }
 
-use crate::{ApiError, App, auth, internal};
+use crate::{ApiError, App, authorize, internal};
 use axum::{
     Json,
     body::Body,
@@ -62,9 +62,54 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use uuid::Uuid;
 
+pub(crate) struct SnapshotBudget {
+    _local: tokio::sync::OwnedSemaphorePermit,
+    _shared: Vec<std::fs::File>,
+}
+// 64 OS-locked 16 MiB slots bound all processes sharing the same data root.
+// Closing handles (including process exit) releases reservations without stale counters.
+fn reserve_shared(root: &std::path::Path, bytes: u64) -> io::Result<Vec<std::fs::File>> {
+    let directory = std::fs::canonicalize(root)?.join("artifact-budget");
+    std::fs::create_dir_all(&directory)?;
+    if std::fs::canonicalize(&directory)? != directory {
+        return Err(io::Error::other("invalid budget root"));
+    }
+    let slots = bytes.div_ceil(16 * 1024 * 1024).max(1);
+    if slots > 64 {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "budget exhausted",
+        ));
+    }
+    let mut locks = Vec::new();
+    for index in 0..64 {
+        let path = directory.join(format!("slot-{index:02}"));
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)?;
+        if std::fs::canonicalize(&path)? != path {
+            return Err(io::Error::other("invalid budget slot"));
+        }
+        match file.try_lock() {
+            Ok(()) => locks.push(file),
+            Err(std::fs::TryLockError::WouldBlock) => continue,
+            Err(std::fs::TryLockError::Error(error)) => return Err(error),
+        }
+        if locks.len() as u64 == slots {
+            return Ok(locks);
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::WouldBlock,
+        "budget exhausted",
+    ))
+}
 // Verify into a private snapshot before responding; a later source modification cannot
 // change the bytes sent. Snapshot storage is bounded to the registered size / 1 GiB.
-async fn verified_snapshot(
+pub(crate) async fn verified_snapshot(
     app: &App,
     id: Uuid,
     name: &str,
@@ -73,7 +118,7 @@ async fn verified_snapshot(
         tokio::fs::File,
         tempfile::NamedTempFile,
         Artifact,
-        tokio::sync::OwnedSemaphorePermit,
+        SnapshotBudget,
     ),
     ApiError,
 > {
@@ -100,6 +145,28 @@ async fn verified_snapshot(
         .join(id.to_string())
         .join("raster")
         .join(name);
+    snapshot_file(app, path, artifact).await
+}
+pub(crate) type Snapshot = (
+    tokio::fs::File,
+    tempfile::NamedTempFile,
+    Artifact,
+    SnapshotBudget,
+);
+pub(crate) async fn snapshot_file(
+    app: &App,
+    path: PathBuf,
+    artifact: Artifact,
+) -> Result<Snapshot, ApiError> {
+    if artifact.bytes == 0
+        || artifact.bytes > 1024 * 1024 * 1024
+        || artifact.name != format!("page-{:06}.tiff", artifact.page)
+    {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "artifact_integrity_mismatch",
+        ));
+    }
     let canonical = tokio::fs::canonicalize(&path)
         .await
         .map_err(|_| ApiError(StatusCode::NOT_FOUND, "not_found"))?;
@@ -123,7 +190,39 @@ async fn verified_snapshot(
         .clone()
         .try_acquire_many_owned(permits)
         .map_err(|_| ApiError(StatusCode::SERVICE_UNAVAILABLE, "artifact_budget_exhausted"))?;
-    let guard = tempfile::NamedTempFile::new().map_err(internal)?;
+    let root = app.root.clone();
+    let bytes = artifact.bytes;
+    let shared = tokio::task::spawn_blocking(move || reserve_shared(&root, bytes))
+        .await
+        .map_err(internal)?
+        .map_err(|error| {
+            if error.kind() == io::ErrorKind::WouldBlock {
+                ApiError(StatusCode::SERVICE_UNAVAILABLE, "artifact_budget_exhausted")
+            } else {
+                internal(error)
+            }
+        })?;
+    let permit = SnapshotBudget {
+        _local: permit,
+        _shared: shared,
+    };
+    let snapshots = app.root.join("artifact-snapshots");
+    tokio::fs::create_dir_all(&snapshots)
+        .await
+        .map_err(internal)?;
+    if tokio::fs::canonicalize(&snapshots)
+        .await
+        .map_err(internal)?
+        != snapshots
+    {
+        return Err(internal("invalid snapshot root"));
+    }
+    let guard = tempfile::Builder::new()
+        .prefix("artifact-snapshot-")
+        .suffix(".part")
+        .tempfile_in(snapshots)
+        .map_err(internal)?;
+    guard.as_file().try_lock().map_err(internal)?;
     let mut snapshot = tokio::fs::File::from_std(guard.reopen().map_err(internal)?);
     let mut hash = Sha256::new();
     let mut size = 0u64;
@@ -159,8 +258,15 @@ pub async fn download(
     headers: HeaderMap,
     Path((id, name)): Path<(Uuid, String)>,
 ) -> Result<Response, ApiError> {
-    auth(&app, &headers)?;
-    let (mut file, guard, artifact, permit) = verified_snapshot(&app, id, &name).await?;
+    authorize(&app, &headers, "artifacts:read")?;
+    let snapshot = verified_snapshot(&app, id, &name).await?;
+    snapshot_response(headers, snapshot).await
+}
+pub(crate) async fn snapshot_response(
+    headers: HeaderMap,
+    snapshot: Snapshot,
+) -> Result<Response, ApiError> {
+    let (mut file, guard, artifact, permit) = snapshot;
     let etag = format!("\"sha256:{}\"", artifact.sha256);
     let requested = if headers
         .get("if-range")
@@ -252,7 +358,7 @@ pub async fn verify(
     headers: HeaderMap,
     Path((id, name)): Path<(Uuid, String)>,
 ) -> Result<Json<Value>, ApiError> {
-    auth(&app, &headers)?;
+    authorize(&app, &headers, "artifacts:read")?;
     let (_, _, artifact, _) = verified_snapshot(&app, id, &name).await?;
     Ok(Json(
         json!({"verified":true,"jobId":id,"artifact":artifact}),
@@ -289,5 +395,35 @@ fn parse_range(value: &str, size: u64) -> Option<(u64, u64)> {
         None
     } else {
         Some((start, end))
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    #[test]
+    fn independent_reservations_share_capacity_and_release_on_drop() {
+        let root = tempfile::tempdir().unwrap();
+        let full = reserve_shared(root.path(), 1024 * 1024 * 1024).unwrap();
+        assert_eq!(
+            reserve_shared(root.path(), 1).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(full);
+        let small = reserve_shared(root.path(), 1).unwrap();
+        assert_eq!(small.len(), 1);
+        assert_eq!(
+            reserve_shared(root.path(), 1024 * 1024 * 1024)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(small);
+        assert_eq!(
+            reserve_shared(root.path(), 1024 * 1024 * 1024)
+                .unwrap()
+                .len(),
+            64
+        );
     }
 }

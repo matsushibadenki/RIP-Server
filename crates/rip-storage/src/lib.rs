@@ -1,3 +1,8 @@
+pub mod approvals;
+pub mod audit;
+pub mod color;
+pub mod delivery;
+pub mod maintenance;
 use rip_core::{Artifact, Job, JobState};
 use sha2::{Digest, Sha256};
 use sqlx::{
@@ -36,6 +41,9 @@ impl Repository {
             .await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, payload TEXT NOT NULL, priority INTEGER NOT NULL, created_at INTEGER NOT NULL, revision INTEGER NOT NULL)").execute(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS job_events (sequence INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL, state TEXT NOT NULL, created_at INTEGER NOT NULL)").execute(&pool).await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS job_events_cursor ON job_events(job_id,sequence)")
+            .execute(&pool)
+            .await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS ipp_jobs (ipp_id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL UNIQUE)").execute(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS worker_leases (job_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, expires_at INTEGER NOT NULL)").execute(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS print_preflights (id TEXT PRIMARY KEY, payload TEXT NOT NULL, expires_at INTEGER NOT NULL)").execute(&pool).await?;
@@ -43,7 +51,68 @@ impl Repository {
         sqlx::query("CREATE TABLE IF NOT EXISTS print_receipts (job_id TEXT PRIMARY KEY, payload TEXT NOT NULL)").execute(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS print_result_receipts (job_id TEXT PRIMARY KEY, payload TEXT NOT NULL)").execute(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS job_artifacts (job_id TEXT PRIMARY KEY, payload TEXT NOT NULL)").execute(&pool).await?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS deliveries (id TEXT PRIMARY KEY,payload TEXT NOT NULL,state TEXT NOT NULL,revision INTEGER NOT NULL,lease_until INTEGER,created_at INTEGER NOT NULL)").execute(&pool).await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS delivery_queue ON deliveries(state,created_at,id)")
+            .execute(&pool)
+            .await?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS delivery_events (sequence INTEGER PRIMARY KEY AUTOINCREMENT,delivery_id TEXT NOT NULL,state TEXT NOT NULL,created_at INTEGER NOT NULL)").execute(&pool).await?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS job_event_details (sequence INTEGER PRIMARY KEY,payload TEXT NOT NULL)").execute(&pool).await?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS audit_records (sequence INTEGER PRIMARY KEY AUTOINCREMENT,correlation_id TEXT NOT NULL,identity TEXT NOT NULL,operation TEXT NOT NULL,target TEXT,started_at INTEGER NOT NULL,finished_at INTEGER,status INTEGER)").execute(&pool).await?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS execution_approvals(id TEXT PRIMARY KEY,payload TEXT NOT NULL,expires_at INTEGER NOT NULL,revoked INTEGER NOT NULL)").execute(&pool).await?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS retention_tombstones(job_id TEXT PRIMARY KEY,created_at INTEGER NOT NULL,finished_at INTEGER)").execute(&pool).await?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS color_attempts(id TEXT PRIMARY KEY,source_job TEXT NOT NULL,ticket TEXT NOT NULL,payload TEXT NOT NULL,state TEXT NOT NULL,revision INTEGER NOT NULL,lease_until INTEGER,created_at INTEGER NOT NULL)").execute(&pool).await?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS color_events(sequence INTEGER PRIMARY KEY AUTOINCREMENT,attempt_id TEXT NOT NULL,payload TEXT NOT NULL)").execute(&pool).await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS color_queue ON color_attempts(state,created_at,id)",
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS color_event_cursor ON color_events(attempt_id,sequence)",
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS color_cleanup(attempt_id TEXT PRIMARY KEY)")
+            .execute(&pool)
+            .await?;
         Ok(Self { pool })
+    }
+    pub async fn events(
+        &self,
+        id: Uuid,
+        after: i64,
+        limit: i64,
+    ) -> Result<serde_json::Value, StorageError> {
+        if after < 0 || !(1..=100).contains(&limit) {
+            return Err(StorageError::Conflict);
+        }
+        let exists: i64 =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM job_events WHERE job_id=?)")
+                .bind(id.to_string())
+                .fetch_one(&self.pool)
+                .await?;
+        if exists == 0 {
+            return Err(StorageError::NotFound);
+        }
+        let rows = sqlx::query("SELECT e.sequence,e.state,e.created_at,d.payload AS details FROM job_events e LEFT JOIN job_event_details d ON d.sequence=e.sequence WHERE e.job_id=? AND e.sequence>? ORDER BY e.sequence LIMIT ?")
+            .bind(id.to_string()).bind(after).bind(limit + 1).fetch_all(&self.pool).await?;
+        let has_more = rows.len() > limit as usize;
+        let mut cursor = after;
+        let mut events = Vec::new();
+        for row in rows.into_iter().take(limit as usize) {
+            cursor = row.get("sequence");
+            let state: JobState = serde_json::from_str(row.get("state"))?;
+            let mut event = serde_json::json!({"sequence":cursor,"state":state,"createdAt":row.get::<i64,_>("created_at")});
+            if let Some(details) = row.get::<Option<String>, _>("details") {
+                let details: serde_json::Value = serde_json::from_str(&details)?;
+                event
+                    .as_object_mut()
+                    .unwrap()
+                    .extend(details.as_object().ok_or(StorageError::Conflict)?.clone());
+            }
+            events.push(event);
+        }
+        Ok(serde_json::json!({"jobId":id,"events":events,"nextCursor":cursor,"hasMore":has_more}))
     }
     pub async fn save_preflight(
         &self,
@@ -66,6 +135,25 @@ impl Repository {
             .await?
             .ok_or(StorageError::NotFound)?;
         Ok(serde_json::from_str(row.get("payload"))?)
+    }
+    pub async fn retry_preflight(
+        &self,
+        id: Uuid,
+        source: Uuid,
+        revision: i64,
+        payload: &serde_json::Value,
+    ) -> Result<serde_json::Value, StorageError> {
+        sqlx::query("INSERT OR IGNORE INTO print_preflights(id,payload,expires_at) SELECT ?,?,? FROM jobs WHERE id=? AND revision=? AND json_extract(payload,'$.state') IN ('FAILED','CANCELLED')")
+            .bind(id.to_string()).bind(serde_json::to_string(payload)?).bind(i64::MAX)
+            .bind(source.to_string()).bind(revision).execute(&self.pool).await?;
+        let stored = self.get_preflight(id).await.map_err(|e| match e {
+            StorageError::NotFound => StorageError::Conflict,
+            other => other,
+        })?;
+        if stored["retrySource"] != source.to_string() || stored["retryRevision"] != revision {
+            return Err(StorageError::Conflict);
+        }
+        Ok(stored)
     }
     pub async fn insert(&self, job: &Job) -> Result<(), StorageError> {
         self.insert_with_preflight(job, None).await
@@ -118,12 +206,7 @@ impl Repository {
             .bind(job.revision)
             .execute(&mut *tx)
             .await?;
-        sqlx::query("INSERT INTO job_events(job_id,state,created_at) VALUES(?,?,?)")
-            .bind(job.id.to_string())
-            .bind(serde_json::to_string(&job.state)?)
-            .bind(job.updated_at)
-            .execute(&mut *tx)
-            .await?;
+        store_job_event(&mut tx, job).await?;
         if let Some(id) = preflight {
             let row = sqlx::query("SELECT payload, strftime('%Y-%m-%dT%H:%M:%SZ', ?, 'unixepoch') AS issued_at FROM print_preflights WHERE id=?")
                 .bind(job.created_at).bind(id.to_string()).fetch_one(&mut *tx).await?;
@@ -223,12 +306,7 @@ impl Repository {
         if changed.rows_affected() != 1 {
             return Err(StorageError::Conflict);
         }
-        sqlx::query("INSERT INTO job_events(job_id,state,created_at) VALUES(?,?,?)")
-            .bind(job.id.to_string())
-            .bind(serde_json::to_string(&JobState::Ripping)?)
-            .bind(job.updated_at)
-            .execute(&mut *tx)
-            .await?;
+        store_job_event(&mut tx, &job).await?;
         sqlx::query("INSERT INTO worker_leases(job_id,run_id,expires_at) VALUES(?,?,?)")
             .bind(job.id.to_string())
             .bind(run_id.to_string())
@@ -292,12 +370,7 @@ impl Repository {
                         .execute(&mut *tx)
                         .await?;
                 if changed.rows_affected() == 1 {
-                    sqlx::query("INSERT INTO job_events(job_id,state,created_at) VALUES(?,?,?)")
-                        .bind(job.id.to_string())
-                        .bind(serde_json::to_string(&JobState::Failed)?)
-                        .bind(job.updated_at)
-                        .execute(&mut *tx)
-                        .await?;
+                    store_job_event(&mut tx, &job).await?;
                     recovered.push(job.id);
                     store_result_receipt(&mut tx, &job).await?;
                 }
@@ -378,12 +451,7 @@ impl Repository {
         if result.rows_affected() != 1 {
             return Err(StorageError::Conflict);
         }
-        sqlx::query("INSERT INTO job_events(job_id,state,created_at) VALUES(?,?,?)")
-            .bind(job.id.to_string())
-            .bind(serde_json::to_string(&next)?)
-            .bind(job.updated_at)
-            .execute(&mut *tx)
-            .await?;
+        store_job_event(&mut tx, &job).await?;
         if let Some(artifacts) = artifacts {
             sqlx::query("INSERT INTO job_artifacts(job_id,payload) VALUES(?,?)")
                 .bind(job.id.to_string())
@@ -400,7 +468,7 @@ impl Repository {
         if !job.state.terminal() {
             return Err(StorageError::Conflict);
         }
-        let result = sqlx::query("DELETE FROM jobs WHERE id=? AND revision=?")
+        let result = sqlx::query("DELETE FROM jobs WHERE id=? AND revision=? AND NOT EXISTS(SELECT 1 FROM color_attempts c WHERE c.source_job=jobs.id AND (c.state IN ('QUEUED','RUNNING') OR EXISTS(SELECT 1 FROM color_cleanup cc WHERE cc.attempt_id=c.id)))")
             .bind(job.id.to_string())
             .bind(job.revision)
             .execute(&self.pool)
@@ -456,6 +524,48 @@ pub fn now() -> i64 {
         .unwrap_or_default()
         .as_secs() as i64
 }
+
+async fn store_job_event(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    job: &Job,
+) -> Result<(), StorageError> {
+    let result = sqlx::query("INSERT INTO job_events(job_id,state,created_at) VALUES(?,?,?)")
+        .bind(job.id.to_string())
+        .bind(serde_json::to_string(&job.state)?)
+        .bind(job.updated_at)
+        .execute(&mut **tx)
+        .await?;
+    let stage = match job.state {
+        JobState::Received | JobState::Validating | JobState::Preflight => "VALIDATING",
+        JobState::Queued | JobState::Held => "QUEUED_FOR_RIP",
+        JobState::Ripping => "RIPPING",
+        JobState::ColorProcessing => "COLOR_MANAGING",
+        JobState::Halftoning => "HALFTONING",
+        JobState::Spooling => "EXPORTING",
+        JobState::Printing => "PRINTING",
+        JobState::Completed => "COMPLETED",
+        JobState::Cancelled => "CANCELED",
+        JobState::Failed => "FAILED",
+    };
+    let reason = job.error_code.as_deref().unwrap_or(match job.state {
+        JobState::Held => "HELD_BY_USER",
+        JobState::Cancelled => "CANCELED_BY_USER",
+        JobState::Completed => "TIFF_EXPORT_COMPLETED",
+        JobState::Failed => "UNSPECIFIED_FAILURE",
+        _ => "NONE",
+    });
+    let metadata = serde_json::json!({"schemaVersion":1,"stage":stage,"revision":job.revision,
+        "reasonCode":reason,"retryable":matches!(reason,"LEASE_EXPIRED"|"WORKER_EXIT"|"TIMEOUT"),
+        "progressPercent":if job.state==JobState::Completed {Some(100)} else {None},
+        "completionKind":if job.state==JobState::Completed {Some("tiff-export")} else {None}});
+    sqlx::query("INSERT INTO job_event_details(sequence,payload) VALUES(?,?)")
+        .bind(result.last_insert_rowid())
+        .bind(metadata.to_string())
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

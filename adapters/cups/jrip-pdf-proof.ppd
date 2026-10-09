@@ -1,0 +1,47 @@
+*PPD-Adobe: "4.3"
+*FormatVersion: "4.3"
+*FileVersion: "0.1"
+*LanguageVersion: English
+*LanguageEncoding: ISOLatin1
+*PCFileName: "JRIPPDF.PPD"
+*Manufacturer: "J-RIP"
+*Product: "(J-RIP PDF Proof)"
+*ModelName: "J-RIP PDF Proof"
+*ShortNickName: "J-RIP PDF Proof"
+*NickName: "J-RIP PDF Proof (TIFF file output)"
+*PSVersion: "(3010.000) 0"
+*LanguageLevel: "3"
+*ColorDevice: True
+*DefaultColorSpace: CMYK
+*FileSystem: False
+*Throughput: "1"
+*cupsVersion: 1.7
+*cupsFilter2: "application/pdf application/pdf 0 -"
+*cupsIPPSupplies: False
+*cupsSNMPSupplies: False
+*cupsManualCopies: False
+*cupsMaxCopies: 1
+*OpenUI *PageSize/Page size: PickOne
+*OrderDependency: 10 AnySetup *PageSize
+*DefaultPageSize: A4.Fullbleed
+*PageSize A4.Fullbleed/A4: ""
+*PageSize Letter.Fullbleed/US Letter.Fullbleed: ""
+*CloseUI: *PageSize
+*OpenUI *PageRegion/Page region: PickOne
+*OrderDependency: 10 AnySetup *PageRegion
+*DefaultPageRegion: A4.Fullbleed
+*PageRegion A4.Fullbleed/A4: ""
+*PageRegion Letter.Fullbleed/US Letter.Fullbleed: ""
+*CloseUI: *PageRegion
+*DefaultImageableArea: A4.Fullbleed
+*ImageableArea A4.Fullbleed: "0 0 595.28 841.89"
+*ImageableArea Letter.Fullbleed: "0 0 612 792"
+*DefaultPaperDimension: A4.Fullbleed
+*PaperDimension A4.Fullbleed: "595.28 841.89"
+*PaperDimension Letter.Fullbleed: "612 792"
+*DefaultResolution: 600dpi
+*OpenUI *Resolution/Resolution: PickOne
+*OrderDependency: 20 AnySetup *Resolution
+*Resolution 300dpi/300 dpi: ""
+*Resolution 600dpi/600 dpi: ""
+*CloseUI: *Resolution

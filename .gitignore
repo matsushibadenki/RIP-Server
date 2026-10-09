@@ -46,3 +46,10 @@ Desktop.ini
 
 # Local checkout of the evolving ACX specification (linked as a sibling project)
 /acx
+
+# Local authorization policies and private input inbox
+/config/auth-policy.local.json
+/inbox/
+
+# Local outbound printer configuration
+/config/printers.local.json

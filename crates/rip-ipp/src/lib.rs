@@ -5,6 +5,9 @@ pub const VALIDATE_JOB: u16 = 0x0004;
 pub const GET_JOB_ATTRIBUTES: u16 = 0x0009;
 pub const GET_JOBS: u16 = 0x000a;
 pub const CANCEL_JOB: u16 = 0x0008;
+pub const HOLD_JOB: u16 = 0x000c;
+pub const RELEASE_JOB: u16 = 0x000d;
+pub const NOT_POSSIBLE: u16 = 0x0404;
 pub const GET_PRINTER_ATTRIBUTES: u16 = 0x000b;
 pub const OK: u16 = 0x0000;
 pub const BAD_REQUEST: u16 = 0x0400;
@@ -52,6 +55,9 @@ impl<'a> Request<'a> {
         let mut attributes = Vec::new();
         let mut current = String::new();
         loop {
+            if offset > 16 * 1024 {
+                return Err(ParseError);
+            }
             let tag = *input.get(offset).ok_or(ParseError)?;
             offset += 1;
             match tag {
@@ -142,6 +148,13 @@ impl<'a> Request<'a> {
         }
         Some(i32::from_be_bytes(a.value[..4].try_into().ok()?))
     }
+    pub fn enumeration(&self, group: u8, name: &str) -> Option<i32> {
+        let a = self.one(group, name)?;
+        if a.tag != 0x23 || a.value.len() != 4 {
+            return None;
+        }
+        Some(i32::from_be_bytes(a.value[..4].try_into().ok()?))
+    }
     pub fn resolution_dpi(&self, group: u8, name: &str) -> Option<u32> {
         let a = self.one(group, name)?;
         if a.tag != 0x32 || a.value.len() != 9 || a.value[8] != 3 {
@@ -181,7 +194,10 @@ impl<'a> Request<'a> {
         }
         let printer_uri = self.text(1, "printer-uri", 0x45);
         let job_uri = self.text(1, "job-uri", 0x45);
-        if matches!(self.operation, GET_JOB_ATTRIBUTES | CANCEL_JOB) {
+        if matches!(
+            self.operation,
+            GET_JOB_ATTRIBUTES | CANCEL_JOB | HOLD_JOB | RELEASE_JOB
+        ) {
             if (printer_uri.is_some() == job_uri.is_some())
                 || (printer_uri.is_some() && self.integer(1, "job-id").is_none())
                 || (job_uri.is_some() && self.one(1, "job-id").is_some())
@@ -206,7 +222,14 @@ impl<'a> Request<'a> {
                 "attributes-charset" => 0x47,
                 "attributes-natural-language" => 0x48,
                 "printer-uri" | "job-uri" => 0x45,
-                "requesting-user-name" | "job-name" => 0x42,
+                "requesting-user-name"
+                | "job-name"
+                | "document-name-supplied"
+                | "job-originating-host-name" => 0x42,
+                "job-uuid" => 0x45,
+                "finishings" => 0x23,
+                "number-up" | "copies" => 0x21,
+                "sides" => 0x44,
                 "document-format" => 0x49,
                 "job-id" => 0x21,
                 "requested-attributes" => 0x44,
@@ -218,13 +241,14 @@ impl<'a> Request<'a> {
                 _ => return Err(ATTRIBUTES_NOT_SUPPORTED),
             };
             if a.tag != expected
-                || (expected == 0x21 && a.value.len() != 4)
+                || (matches!(expected, 0x21 | 0x23) && a.value.len() != 4)
                 || (expected == 0x32 && a.value.len() != 9)
                 || (expected == 0x22 && (a.value.len() != 1 || a.value[0] > 1))
             {
                 return Err(BAD_REQUEST);
             }
             if expected != 0x21
+                && expected != 0x23
                 && expected != 0x32
                 && expected != 0x22
                 && (a.value.is_empty()
@@ -246,6 +270,21 @@ impl<'a> Request<'a> {
         }
         match self.operation {
             PRINT_JOB | VALIDATE_JOB => {
+                for (name, expected) in [("copies", 1), ("number-up", 1)] {
+                    if self.one(2, name).is_some() && self.integer(2, name) != Some(expected) {
+                        return Err(ATTRIBUTES_NOT_SUPPORTED);
+                    }
+                }
+                if self.one(2, "finishings").is_some()
+                    && self.enumeration(2, "finishings") != Some(3)
+                {
+                    return Err(ATTRIBUTES_NOT_SUPPORTED);
+                }
+                if self.one(2, "sides").is_some()
+                    && self.text(2, "sides", 0x44) != Some("one-sided")
+                {
+                    return Err(ATTRIBUTES_NOT_SUPPORTED);
+                }
                 if self.operation == PRINT_JOB && !self.document.starts_with(b"%PDF-") {
                     return Err(FORMAT_ERROR);
                 }
@@ -254,7 +293,18 @@ impl<'a> Request<'a> {
                 }
                 if self.attributes.iter().any(|a| {
                     (a.group == 2
-                        && !matches!(a.name.as_str(), "printer-resolution" | "print-color-mode"))
+                        && !matches!(
+                            a.name.as_str(),
+                            "printer-resolution"
+                                | "print-color-mode"
+                                | "document-name-supplied"
+                                | "job-originating-host-name"
+                                | "job-uuid"
+                                | "finishings"
+                                | "number-up"
+                                | "copies"
+                                | "sides"
+                        ))
                         || (a.group == 1
                             && !matches!(
                                 a.name.as_str(),
@@ -336,7 +386,7 @@ impl<'a> Request<'a> {
                 }
                 Ok(())
             }
-            GET_JOB_ATTRIBUTES | CANCEL_JOB => {
+            GET_JOB_ATTRIBUTES | CANCEL_JOB | HOLD_JOB | RELEASE_JOB => {
                 if !self.document.is_empty()
                     || self.integer(1, "job-id").is_some_and(|n| n < 1)
                     || (job_uri.is_none() && self.integer(1, "job-id").is_none())
@@ -352,7 +402,8 @@ impl<'a> Request<'a> {
                                     | "job-id"
                                     | "requested-attributes"
                             )
-                            || (self.operation == CANCEL_JOB && a.name == "requested-attributes")
+                            || (self.operation != GET_JOB_ATTRIBUTES
+                                && a.name == "requested-attributes")
                     })
                 {
                     Err(BAD_REQUEST)
@@ -412,6 +463,9 @@ impl Response {
     }
     pub fn integer(&mut self, name: &str, value: i32) {
         self.attribute(0x21, name, &value.to_be_bytes());
+    }
+    pub fn enumeration(&mut self, name: &str, value: i32) {
+        self.attribute(0x23, name, &value.to_be_bytes());
     }
     pub fn resolution_dpi(&mut self, name: &str, dpi: u32) {
         let mut value = [0u8; 9];

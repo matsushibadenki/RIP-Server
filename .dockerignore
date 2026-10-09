@@ -1,0 +1,16 @@
+**
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!crates/
+!crates/**
+!services/
+!services/**
+!adapters/
+!adapters/color/
+!adapters/color/**
+**/target
+**/__pycache__
+**/*.local.json
+**/.env
+**/.env.*

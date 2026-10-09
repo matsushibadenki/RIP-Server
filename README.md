@@ -36,7 +36,7 @@ ManifestはリンクしたACXリポジトリの`acx-manifest.schema.json`で検�
 
 ### PrintIntentの設定照合
 
-成果物は `GET /api/v1/jobs/{id}/artifacts/{name}` でBearer認証付きダウンロードができます。登録済みの `page-000001.tiff` 形式の名前だけを受け付け、公開後のサイズとSHA-256を再検証します。不一致はHTTP 409で配信を拒否します。検証済み一時スナップショットを64 KiBずつ配信し、終了時に削除します。ページ単位の明示検査は `POST /api/v1/jobs/{id}/artifacts/{name}/verify` です。単一のHTTP Range（開始・終了、途中から末尾、末尾N bytes）に対応します。部分応答は206、無効・複数範囲は416です。If-RangeのETag不一致は全体を返します。Rangeでもファイル全体を検証します。一時ディスク予算はAPIプロセスごとに合計1 GiBで、配信終了・切断まで予約し、予算不足は503です。複数プロセス間の予算共有は後続工程です。
+成果物は `GET /api/v1/jobs/{id}/artifacts/{name}` でBearer認証付きダウンロードができます。登録済みの `page-000001.tiff` 形式の名前だけを受け付け、公開後のサイズとSHA-256を再検証します。不一致はHTTP 409で配信を拒否します。検証済み一時スナップショットを64 KiBずつ配信し、終了時に削除します。ページ単位の明示検査は `POST /api/v1/jobs/{id}/artifacts/{name}/verify` です。単一のHTTP Range（開始・終了、途中から末尾、末尾N bytes）に対応します。部分応答は206、無効・複数範囲は416です。If-RangeのETag不一致は全体を返します。Rangeでもファイル全体を検証します。一時ディスク予算は同じデータrootのAPIプロセス間で合計1 GiBをOSロックで共有し、配信終了・切断まで予約します。予算不足は503です。
 
 English: Authenticated artifact download verifies stored size and SHA-256, then streams a private snapshot. Tampered content returns HTTP 409. A per-page verification endpoint is also available; Single byte ranges and ETag-based If-Range are supported. Snapshot reservations share a 1 GiB per-process budget; exhaustion returns HTTP 503.
 
@@ -196,3 +196,88 @@ Initial local RIP foundation: authenticated job API, SQLite persistence, guarded
 这是本地RIP服务器的初始实现：提供需要身份验证的作业API、SQLite持久化、状态转换检查，以及通过独立Docker隔离进程输出TIFF的混合引擎。PDF默认使用MuPDF，PS/EPS使用Ghostscript。可在manifest中设置 `engine: "ghostscript"` 来指定PDF引擎；不会自动切换引擎，`selected_engine` 记录实际选择。设置至少24个字符的 `JRIP_API_TOKEN`，上传包含 `manifest` 和 `document` 的multipart请求，然后运行 `jrip-worker JOB_UUID` 或实验性的顺序处理进程 `jrip-dispatcher`。`COMPLETED` 仅表示文件导出完成。实验性PDF专用IPP接口支持Validate-Job、Get-Jobs、300/600 dpi及彩色/单色输出设置，并可选择启用通用DNS-SD广告；基于SQLite的工作进程租约可在调度器重启后恢复遗留作业。IPPS、打印机输出、次数受限的重试、日文字体验证、ICC管理和Web界面尚未实现。参见[路线图](docs/ROADMAP.md)。
 
 MuPDFのコマンド仕様: [公式 mutool draw ドキュメント](https://mupdf.readthedocs.io/en/1.27.0/tools/mutool-draw.html)。導入版の対応機能はコンテナー結合テストで確認しています。
+
+`GET /api/v1/jobs/{id}/events?after=0&limit=50` はBearer認証付きの状態履歴APIです。`events` はsequence順で、`state` とUnix秒の `createdAt` を返します。次回は `nextCursor` をafterに渡してください。limitは1〜100（既定50）、`hasMore` は続きの有無です。空の応答でもカーソルを保持し、再起動・終端ジョブのメタデータ削除後も追跡できます。存在しないジョブは404です。RESTは状態履歴の差分取得です。MCPの購読通知に対応し、工程別進捗は後続工程です。
+
+English: The authenticated events endpoint returns state history ordered by persistent sequence. Resume with `after=nextCursor`; limit is 1–100 (default 50). Each event includes state and Unix-second createdAt. History survives restart and terminal job metadata deletion. REST uses polling; MCP also supports subscriptions. Stage progress remains planned.
+
+简体中文：认证的events接口按持久化sequence返回状态历史。使用 `after=nextCursor` 继续获取，limit为1–100（默认50）。每条事件包含状态和Unix秒时间createdAt。重启或删除终态作业元数据后仍可读取历史。REST使用轮询，MCP支持订阅。阶段进度仍待实现。
+
+### Local MCP / ローカルMCP / 本地MCP
+
+`cargo run --locked -p jrip-mcp` でstdio MCPサーバーを起動します。API・Dispatcherと同じ `JRIP_DATA_ROOT`、24文字以上の `JRIP_API_TOKEN` を設定してください。stdoutはJSON-RPC専用、操作ログはstderrです。MCP 2025-11-25のinitializeとnotifications/initialized後に利用します。入力上限64 KiB、API応答上限4 MiBです。
+
+読み取り5種、保留・再開・取消3種に加え、`print_create_preflight`、`rip_submit`、`rip_retry_job` を提供します。投入は事前確認IDを冪等キーとし、原稿をSHA-256照合して32 MiBまで受け付けます。原稿は管理者が設定した `JRIP_INPUT_ROOT` の直下へ置き、toolには `sourceName` だけを渡します。絶対パス、親ディレクトリ、シンボリックリンクは拒否します。root未設定時は投入toolを公開しません。原稿・TIFFをMCPメッセージへ埋め込みません。再試行は失敗・取消済みジョブに限定し、元の原稿・設定を使用して新しいjob-idを返します。`requestId` は再送でも同じUUID、`expectedRevision` は元ジョブのrevisionを指定します。設定変更やエンジン変更を伴う実行は新しい事前確認で行ってください。
+
+`JRIP_AUTH_POLICY` に認証ポリシーJSONファイルを指定すると、identityとscopeによる権限検査をAPI・MCPの両方で行います。[設定例](config/auth-policy.example.json)のトークンを置き換え、非公開の `config/auth-policy.local.json` へ保存してください。APIとMCPは同じポリシーを読み、MCPのJRIP_API_TOKENはその中の主体を選びます。ポリシー未設定時は従来の共有トークンをadminとして扱い、設定時はリスト外の共有トークンを拒否します。ポリシー変更はプロセス再起動で反映します。
+
+| Scope | Operations / 操作 / 操作 |
+| --- | --- |
+| jobs:read | ジョブ一覧・詳細・履歴、MCP能力発見、resource読取・購読 |
+| jobs:submit | 事前確認、原稿投入 |
+| jobs:control | 保留・再開・取消 |
+| jobs:submit + jobs:control | 再試行 |
+| artifacts:read | 成果物一覧・検証・ダウンロード |
+| printers:print | Delivery投入・照会・取消（投入はartifacts:readも必要） |
+| settings:write | 不変ICC profileの登録 |
+| admin | 全操作、ジョブ削除、承認発行・監査照会 |
+
+`jrip://jobs/{jobId}/events` はJSON resourceです。`resources/subscribe` 後、サーバーは内部で1秒間隔で履歴を確認し、変更時に `notifications/resources/updated` を送ります。既存履歴も初回更新として通知します。1セッション最大32購読、`resources/unsubscribe` または切断で解除します。通知自体に原稿やイベント本文は含みません。`rip_get_events` のafterに保存したnextCursorを渡して続きを取得してください。resources/readは先頭50件を返します。通知の再送保証はなく、再接続後は再購読とカーソル取得で復旧します。
+
+English: The local stdio MCP server exposes scope-filtered tools, filtered by configured identity scopes and input-root availability. Set JRIP_DATA_ROOT, JRIP_API_TOKEN, optionally JRIP_AUTH_POLICY and JRIP_INPUT_ROOT. Preflight-bound submission validates the source hash and deduplicates by preflight ID; documents up to 32 MiB come from a configured inbox, never inline messages. Retry requires jobs:submit and jobs:control, an unchanged source revision and a stable UUID requestId; it creates a new attempt from a failed or cancelled job using the same source/settings. With a policy configured, API and MCP both reject unauthorized operations and unlisted tokens. Without one, the legacy token remains admin. Policies reload on restart. Event resources support read/subscribe/unsubscribe and standard update notifications, backed by one-second internal polling and up to 32 subscriptions. Resume history with nextCursor; subscriptions are session-local. Physical-delivery approval and durable audit are implemented; remote transport remains planned. See docs/AGENT-CONTROL.md.
+
+简体中文：本地stdio MCP提供按权限过滤的工具，根据配置的identity权限与原稿目录可用性过滤。设置JRIP_DATA_ROOT、JRIP_API_TOKEN，可选JRIP_AUTH_POLICY和JRIP_INPUT_ROOT。提交通过预检ID去重并验证原稿hash；最大32 MiB原稿来自指定目录，不嵌入消息。重试仅适用于失败或取消的作业，使用相同原稿与设置创建新尝试，需要jobs:submit与jobs:control、原作业revision及固定UUID requestId。设置策略后，API与MCP均拒绝未授权操作和未列出的令牌；未设置时保留旧令牌的admin权限。策略修改后重启生效。事件资源支持读取、订阅、取消订阅和标准更新通知，服务内部每秒检查，最多32个订阅。使用nextCursor恢复历史，断线后重新订阅。已实现实体投递审批与持久化审计；远程传输仍待实现。详见docs/AGENT-CONTROL.md。
+
+Protocol references: [MCP tools](https://modelcontextprotocol.io/specification/2025-11-25/server/tools), [MCP resource subscriptions](https://modelcontextprotocol.io/specification/2025-11-25/server/resources#subscriptions).
+
+### Native printer backend / 実機送信バックエンド / 实机投递后端
+
+`crates/rip-printer` はIPP受付と独立した送信ライブラリです。`PrinterBackend` の能力取得・原稿送信・ジョブ状態照会・取消を `NativeIpp` が実装します。送信先URIは管理者設定から渡し、対応MIMEと受付可否を確認してから送ります。受理したdevice job-idとPending状態は、印刷完了とは区別します。各HTTP交換の通信時間は20秒、原稿32 MiB、応答64 KiBまでです。送信中の切断、不正応答、属性の置換は `OutcomeUnknown` とし、自動再送しません。
+
+`ipp://` と証明書を検証する `ipps://` に対応し、IPPSでのBearer認証、TIFFからPWG Rasterへの変換、永続Delivery QueueとPrint API接続を実装済みです。詳細は [Delivery](docs/DELIVERY.md) を参照してください。既存APIの `COMPLETED` は引き続きTIFF出力完了を示します。`cargo test --locked -p rip-printer` は127.0.0.1の模擬プリンターと通信し、実機へ送信しません。
+
+English: The separate rip-printer library implements the PrinterBackend boundary through NativeIpp: capability discovery, submission, job status and cancellation. Accepted device jobs remain distinct from completed physical output. Supported MIME types and accepting-jobs are checked before submission; documents are capped at 32 MiB, replies at 64 KiB and each HTTP exchange at 20 seconds. Uncertain or substituted submissions are never automatically resent. Transport supports IPP and certificate-validated IPPS, optional IPPS Bearer authentication, TIFF-to-PWG conversion, persistent delivery queue and Print API integration. See docs/DELIVERY.md. Tests use a loopback mock printer.
+
+简体中文：独立的rip-printer库通过NativeIpp实现PrinterBackend边界：能力查询、提交、作业状态查询和取消。设备接受作业与实体打印完成分别处理。提交前检查支持的MIME与接收状态；原稿上限32 MiB，响应64 KiB，每次HTTP交换20秒。不确定或属性被替换的提交不会自动重发。已支持IPP及证书验证IPPS、可选IPPS Bearer认证、TIFF转PWG、持久化投递队列和Print API集成。详见docs/DELIVERY.md。测试仅连接本地模拟打印机。
+
+Protocol: [IPP model and semantics, RFC 8011](https://www.rfc-editor.org/rfc/rfc8011.html).
+
+### PWG Raster conversion / PWG Raster変換 / PWG Raster转换
+
+`cargo run --locked -p rip-raster -- OUTPUT.pwg 300 rgb PAGE1.tiff PAGE2.tiff` でページ指定順に変換できます。色指定はrgb、cmyk、black。8-bit TIFFの色型一致を必須とし、画素値を保持します。blackはグレーの白黒極性を合わせます。DPIは明示指定し、TIFFに物理解像度がある場合は一致を確認します。ICC付き、回転、alpha、16-bit、1ファイル内の複数画像は拒否します。ICC色変換やリサイズは行いません。
+
+上限は100ページ、復号64 MiB/ページ、総復号1 GiB、PWG出力32 MiBです。出力は一時ファイルから原子的に公開し、既存ファイルを上書きしません。失敗時は一時ファイルを削除します。形式変換ライブラリとCLIまでの実装で、プリンターの解像度・色型・用紙照合とDelivery Queue接続は後続工程です。
+
+English: rip-raster converts ordered 8-bit TIFF pages to PWG Raster with explicit DPI and matching DeviceRGB, DeviceCMYK or black color mode. Physical TIFF resolution, when present, must agree. ICC profiles, rotations, alpha, 16-bit and multi-image TIFF files are rejected; no color management or resizing is performed. Limits are 100 pages, 64 MiB decoded per page, 1 GiB total and 32 MiB output. Atomic publication never overwrites existing files; failures remove staging. macOS tests independently decode output using CUPS. Printer capability matching and delivery queue integration remain planned.
+
+简体中文：rip-raster按指定页面顺序将8-bit TIFF转为PWG Raster，显式指定DPI并匹配DeviceRGB、DeviceCMYK或黑色模式。存在物理解像度时必须一致。拒绝ICC、旋转、alpha、16-bit及单文件多图像，不进行色彩管理或缩放。上限100页、每页解码64 MiB、总解码1 GiB、输出32 MiB。原子发布不覆盖已有文件，失败时删除临时文件。macOS测试通过CUPS独立解码；打印机能力匹配与投递队列集成仍待实现。
+
+Format reference: [PWG Raster 5102.4](https://ftp.pwg.org/pub/pwg/candidates/cs-ippraster10-20120420-5102.4.pdf).
+
+### Delivery queue foundation / Delivery Queue基盤 / 投递队列基础
+
+`rip-storage::delivery` に、RIPジョブとは別の永続送信試行を保存します。Ticketは完了済みsource job、設定済みprinter-id、PWG成果物SHA-256・サイズ、DPI、色型、用紙を保持します。同じ試行UUIDと同じTicketの再登録は既存レコードを返し、内容の変更は競合として拒否します。成果物登録・hash再検証・送信worker・Print API接続は実装済みです。送信結果不明は自動再送せず、管理者の照合APIで復旧します。
+
+状態はQUEUED → SENDING → ACCEPTED → COMPLETED/CANCELLED/ABORTEDです。SENDINGは60秒のリースとrun-idを持ち、並行claimと古いrevisionの操作を拒否します。送信拒否はREJECTED、結果不明とリース切れはUNKNOWNにします。UNKNOWNをQUEUEDへ戻す操作は提供せず、自動再送を防ぎます。受理後の完了は、device job-idを使ったプリンター照会結果から別途記録します。RIPのCOMPLETEDはTIFF出力のままです。
+
+Native IPPのCapabilitiesは `pwg-raster-document-resolution-supported`、`pwg-raster-document-type-supported`、`media-supported` を取得します。`check_pwg` は受付可否・MIME・DPI・色型・用紙の完全一致を要求します。能力が欠けている場合も拒否し、縮小・色変換・用紙変更を暗黙に行いません。PWG内のページ寸法と実機用紙の照合、能力の有効期限、送信直前の再検証は送信workerとの接続時に追加します。
+
+English: Persistent delivery attempts are stored separately from RIP jobs. An immutable ticket binds a completed source job, configured printer ID, PWG hash/size, DPI, type and media. A stable attempt UUID deduplicates matching requests and rejects changed tickets. A 60-second sender lease and revision checks prevent concurrent ownership. Accepted device jobs require a separate completion observation; expired or uncertain sends become UNKNOWN and never automatically reenter the queue. Native capability matching requires exact MIME, resolution, type and media support. File registration/integrity checks, page-size validation, capability freshness, automatic dispatch and API integration remain planned.
+
+简体中文：持久化投递尝试与RIP作业分别保存。不可变Ticket绑定已完成的源作业、配置的打印机ID、PWG hash/大小、DPI、类型与纸张。固定尝试UUID去重相同请求并拒绝修改。60秒发送租约与revision检查防止并发占用。设备接受后需单独观察完成状态；过期或结果不明的发送变为UNKNOWN，不自动返回队列。能力匹配要求MIME、分辨率、类型与纸张完全支持。文件注册与完整性检查、页面尺寸验证、能力有效期、自动发送及API集成仍待实现。
+
+### Explicit outbound delivery / 明示的な実機送信 / 显式实体打印
+
+[Delivery API and worker setup / 送信APIとWorkerの設定 / 投递API与Worker配置](docs/DELIVERY.md) describes administrator-configured printer IDs, verified PWG registration, persistent delivery attempts and conservative UNKNOWN recovery. The delivery worker is a separate executable and requires explicit printer configuration.
+
+### PDF virtual printer acceptance / PDF仮想プリンターの検証 / PDF虚拟打印机验收
+
+[Setup and validation / 起動・検証手順 / 启动与验证](docs/IPP-PROOF.md): unified launcher, bounded IPP requests, trilingual output-location page, source-scoped container recovery. Mac ipptool verifies real HTTP PDF submission through Dispatcher and Docker MuPDF into one/two-page TIFF; Mac Bonjour discovers the LAN service. Native Mac printer setup and Windows driver acceptance remain Pending.
+
+Mac native CUPS validation now includes the dedicated [PDF passthrough PPD](adapters/cups/jrip-pdf-proof.ppd), System Settings visibility, unchanged source PDF, two TIFF pages and native queue completion. Run `python3 scripts/test-native-cups.py` to create and clean up a temporary loopback test queue. See [Mac setup](docs/IPP-PROOF.md). Driverless and Windows acceptance remain unverified.
+
+### Additional implemented controls / 追加した制御 / 新增控制
+
+- [Agent control](docs/AGENT-CONTROL.md): durable audit, stage metadata, scoped MCP resources, physical-delivery approval and live printer capabilities / 永続監査・工程履歴・MCP権限・印刷承認・実機能力 / 持久化审计、阶段记录、MCP权限、打印审批及实时能力。
+- [Maintenance](docs/MAINTENANCE.md): opt-in retention, resumable cleanup and shared snapshot budget / 明示的な保持期限・再開可能な清掃・共有予算 / 显式保留期限、可恢复清理及共享预算。
+- [Color processing](docs/COLOR-MANAGEMENT.md): LittleCMS conversion, immutable ICC registry, isolated worker, color API/MCP and profile-bound delivery / ICC変換・隔離Worker・API／MCP・profile照合送信 / ICC转换、隔离Worker、API／MCP及profile匹配投递。

@@ -1,0 +1,12 @@
+[package]
+name = "rip-color"
+version.workspace = true
+edition.workspace = true
+[dependencies]
+lcms2 = { version = "=6.2.0", features = ["static"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+sha2 = "0.10"
+tiff = "0.10"
+tempfile = "3"
