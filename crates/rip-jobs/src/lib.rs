@@ -31,6 +31,19 @@ pub async fn publish_bound(
     manifest: Manifest,
     binding: Option<(Uuid, &str)>,
 ) -> Result<Job, SubmitError> {
+    let (job, ticket) =
+        prepare_staged(directory, id, manifest, binding.map(|(_, hash)| hash)).await?;
+    repo.insert_with_ticket(&job, binding.map(|(id, _)| id), Some(&ticket))
+        .await?;
+    Ok(job)
+}
+/// Validate and seal source files without publishing a queue entry.
+pub async fn prepare_staged(
+    directory: &Path,
+    id: Uuid,
+    manifest: Manifest,
+    expected_hash: Option<&str>,
+) -> Result<(Job, rip_core::print::JobTicket), SubmitError> {
     manifest.validate().map_err(|e| SubmitError::Invalid(e.0))?;
     let mut file = tokio::fs::File::open(directory.join("source.part")).await?;
     let mut data = [0u8; 65536];
@@ -73,13 +86,13 @@ pub async fn publish_bound(
         selected_engine: None,
         worker_run_id: None,
     };
-    if binding.is_some_and(|(_, expected)| expected != job.source_sha256) {
+    if expected_hash.is_some_and(|expected| expected != job.source_sha256) {
         return Err(SubmitError::Invalid("source_hash_mismatch"));
     }
     tokio::fs::rename(directory.join("source.part"), directory.join("document")).await?;
-    repo.insert_with_preflight(&job, binding.map(|(id, _)| id))
-        .await?;
-    Ok(job)
+    let ticket = rip_core::print::JobTicket::published(&job, size)
+        .map_err(|error| SubmitError::Invalid(error.0))?;
+    Ok((job, ticket))
 }
 pub async fn submit_bytes(
     repo: &Repository,

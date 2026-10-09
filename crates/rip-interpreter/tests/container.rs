@@ -147,3 +147,36 @@ async fn mupdf_rejects_overflow_and_broken_pdf_without_fallback() {
     assert_eq!(error.to_string(), "interpreter_failed");
     assert!(!directory.path().join("broken/page-000001.tiff").exists());
 }
+
+#[tokio::test]
+#[ignore = "requires Docker and rebuilt jrip-mupdf:local inspection adapter"]
+async fn inspection_resolves_inherited_crop_rotation_and_user_unit() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("geometry.pdf");
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 72 144] /CropBox [0 0 36 72] /Rotate 90 >>",
+        "<< /Type /Page /Parent 2 0 R /Resources << >> /UserUnit 2 >>",
+    ];
+    let mut pdf = "%PDF-1.7\n".to_string();
+    let mut offsets = vec![];
+    for (index, object) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.push_str(&format!("{} 0 obj\n{object}\nendobj\n", index + 1));
+    }
+    let xref = pdf.len();
+    pdf.push_str("xref\n0 4\n0000000000 65535 f \n");
+    for offset in offsets {
+        pdf.push_str(&format!("{offset:010} 00000 n \n"));
+    }
+    pdf.push_str(&format!(
+        "trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n"
+    ));
+    std::fs::write(&source, &pdf).unwrap();
+    let report = rip_interpreter::inspect_pdf(&source).await.unwrap();
+    assert_eq!(report["pages"][0]["widthPoints"].as_f64(), Some(144.0));
+    assert_eq!(report["pages"][0]["heightPoints"].as_f64(), Some(72.0));
+    let broken = pdf.replace(&format!("startxref\n{xref}"), "startxref\n0");
+    std::fs::write(&source, broken).unwrap();
+    assert!(rip_interpreter::inspect_pdf(&source).await.is_err());
+}

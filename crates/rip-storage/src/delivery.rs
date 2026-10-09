@@ -56,12 +56,16 @@ async fn event(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     delivery: &Delivery,
 ) -> Result<(), StorageError> {
-    sqlx::query("INSERT INTO delivery_events(delivery_id,state,created_at) VALUES(?,?,?)")
-        .bind(delivery.id.to_string())
-        .bind(delivery.state.label())
-        .bind(now())
-        .execute(&mut **tx)
-        .await?;
+    let result =
+        sqlx::query("INSERT INTO delivery_events(delivery_id,state,created_at) VALUES(?,?,?)")
+            .bind(delivery.id.to_string())
+            .bind(delivery.state.label())
+            .bind(now())
+            .execute(&mut **tx)
+            .await?;
+    sqlx::query("INSERT INTO delivery_event_details(sequence,payload) VALUES(?,?)")
+        .bind(result.last_insert_rowid()).bind(serde_json::to_string(&serde_json::json!({"revision":delivery.revision,"reasonCode":delivery.reason,"deviceJobId":delivery.device_job_id,"retryable":false}))?)
+        .execute(&mut **tx).await?;
     Ok(())
 }
 impl Repository {
@@ -77,6 +81,25 @@ impl Repository {
         id: Uuid,
         ticket: DeliveryTicket,
         approval: Option<Uuid>,
+    ) -> Result<Delivery, StorageError> {
+        self.enqueue_contract_delivery(id, ticket, approval, None)
+            .await
+    }
+    pub async fn delivery_contract(&self, id: Uuid) -> Result<serde_json::Value, StorageError> {
+        let payload: String =
+            sqlx::query_scalar("SELECT payload FROM delivery_contracts WHERE delivery_id=?")
+                .bind(id.to_string())
+                .fetch_optional(&self.pool)
+                .await?
+                .ok_or(StorageError::NotFound)?;
+        Ok(serde_json::from_str(&payload)?)
+    }
+    pub async fn enqueue_contract_delivery(
+        &self,
+        id: Uuid,
+        ticket: DeliveryTicket,
+        approval: Option<Uuid>,
+        contract: Option<serde_json::Value>,
     ) -> Result<Delivery, StorageError> {
         if ticket.printer_id.is_empty()
             || ticket.printer_id.len() > 128
@@ -116,6 +139,29 @@ impl Repository {
             reason: None,
         };
         let mut tx = self.pool.begin().await?;
+        if let Some(contract) = &contract {
+            let hash = format!(
+                "{:x}",
+                Sha256::digest(serde_json::to_vec(&contract["ticket"])?)
+            );
+            if contract["ticketSha256"] != hash || contract["ticket"]["schemaVersion"] != 1 {
+                return Err(StorageError::Conflict);
+            }
+            let revision = contract["ticket"]["sourceRevision"]
+                .as_i64()
+                .ok_or(StorageError::Conflict)?;
+            if contract["ticket"]["jobId"] != delivery.ticket.source_job.to_string()
+                || contract["ticket"]["attemptId"] != id.to_string()
+                || contract["ticket"]["delivery"] != serde_json::to_value(&delivery.ticket)?
+            {
+                return Err(StorageError::Conflict);
+            }
+            let valid: i64 = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM jobs WHERE id=? AND json_extract(payload,'$.state')='COMPLETED' AND json_extract(payload,'$.revision')=?)")
+                .bind(delivery.ticket.source_job.to_string()).bind(revision).fetch_one(&mut *tx).await?;
+            if valid != 1 {
+                return Err(StorageError::Conflict);
+            }
+        }
         if let Some(color) = delivery.ticket.color_attempt_id {
             let valid:i64=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM color_attempts WHERE id=? AND source_job=? AND state='COMPLETED')").bind(color.to_string()).bind(delivery.ticket.source_job.to_string()).fetch_one(&mut *tx).await?;
             if valid != 1 {
@@ -133,6 +179,13 @@ impl Repository {
         let result=sqlx::query("INSERT OR IGNORE INTO deliveries(id,payload,state,revision,lease_until,created_at) SELECT ?,?,'QUEUED',0,NULL,? FROM jobs WHERE id=? AND json_extract(payload,'$.state')='COMPLETED'")
             .bind(id.to_string()).bind(serde_json::to_string(&delivery)?).bind(now()).bind(delivery.ticket.source_job.to_string()).execute(&mut *tx).await?;
         if result.rows_affected() == 1 {
+            if let Some(contract) = &contract {
+                sqlx::query("INSERT INTO delivery_contracts(delivery_id,payload) VALUES(?,?)")
+                    .bind(id.to_string())
+                    .bind(serde_json::to_string(contract)?)
+                    .execute(&mut *tx)
+                    .await?;
+            }
             event(&mut tx, &delivery).await?;
         }
         let row = sqlx::query("SELECT payload FROM deliveries WHERE id=?")
@@ -143,6 +196,17 @@ impl Repository {
         let stored: Delivery = serde_json::from_str(row.get("payload"))?;
         if stored.ticket != delivery.ticket {
             return Err(StorageError::Conflict);
+        }
+        if let Some(contract) = contract {
+            let payload: String =
+                sqlx::query_scalar("SELECT payload FROM delivery_contracts WHERE delivery_id=?")
+                    .bind(id.to_string())
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .ok_or(StorageError::Conflict)?;
+            if serde_json::from_str::<serde_json::Value>(&payload)? != contract {
+                return Err(StorageError::Conflict);
+            }
         }
         tx.commit().await?;
         Ok(stored)

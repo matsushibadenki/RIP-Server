@@ -21,7 +21,10 @@ pub mod color;
 pub mod delivery;
 pub mod dispatch;
 pub mod maintenance;
+pub mod pipeline;
+mod pipeline_preflight;
 mod preflight;
+pub mod print;
 mod retry;
 pub use authorization::Credential;
 use authorization::authorize;
@@ -88,10 +91,42 @@ pub fn router(app: App) -> Router {
             "/api/v1/color/attempts/{id}/artifacts/{name}",
             get(color::download),
         )
+        .route("/api/v1/print/submissions", post(submit_pipeline))
+        .route("/api/v1/jobs/{id}/pipelines", post(pipeline::create))
+        .route("/api/v1/pipelines/{id}", get(pipeline::detail))
+        .route("/api/v1/pipelines/{id}/events", get(pipeline::events))
+        .route(
+            "/api/v1/pipelines/{id}/timeline",
+            get(pipeline::unified_events),
+        )
+        .route("/api/v1/pipelines/{id}/resume", post(pipeline::resume))
+        .route("/api/v1/pipelines/{id}/cancel", post(pipeline::cancel))
         .route("/api/v1/printers", get(delivery::list))
         .route("/api/v1/printers/{id}", get(delivery::capabilities))
         .route("/api/v1/jobs", get(list).post(upload))
         .route("/api/v1/print/resolve", post(resolve_intent))
+        .route("/api/v1/print/capabilities", get(print::capabilities))
+        .route(
+            "/api/v1/print/validate-ticket",
+            post(print::validate_ticket),
+        )
+        .route("/api/v1/jobs/{id}/ticket", get(print::ticket))
+        .route(
+            "/api/v1/print/document-inspections/{id}",
+            get(pipeline_preflight::inspection),
+        )
+        .route(
+            "/api/v1/print/pipeline-preflights",
+            post(pipeline_preflight::create).layer(DefaultBodyLimit::max(16384)),
+        )
+        .route(
+            "/api/v1/print/pipeline-preflights/{id}",
+            get(preflight::get),
+        )
+        .route(
+            "/api/v1/print/pipeline-preflights/{id}/commit",
+            post(pipeline_preflight::commit),
+        )
         .route("/api/v1/print/preflights", post(preflight::create))
         .route("/api/v1/print/preflights/{id}", get(preflight::get))
         .route(
@@ -102,6 +137,11 @@ pub fn router(app: App) -> Router {
         .route("/api/v1/jobs/{id}/events", get(events))
         .route("/api/v1/jobs/{id}/retry", post(retry::retry))
         .route("/api/v1/jobs/{id}/deliveries", post(delivery::prepare))
+        .route(
+            "/api/v1/jobs/{id}/delivery-preview",
+            post(delivery::preview),
+        )
+        .route("/api/v1/deliveries/{id}/ticket", get(delivery::contract))
         .route("/api/v1/deliveries/{id}", get(delivery::detail))
         .route("/api/v1/deliveries/{id}/cancel", post(delivery::cancel))
         .route(
@@ -321,6 +361,26 @@ async fn receive(
     directory: &std::path::Path,
     multipart: &mut Multipart,
 ) -> Result<Job, ApiError> {
+    let (manifest, _) = stage_upload(directory, multipart, false).await?;
+    let job = publish_staged(&app.repo, directory, id, manifest)
+        .await
+        .map_err(submit_error)?;
+    tracing::info!(job_id=%id,stage="queued","job uploaded");
+    Ok(job)
+}
+fn submit_error(error: SubmitError) -> ApiError {
+    match error {
+        SubmitError::Invalid(code) => bad(code),
+        SubmitError::Storage(error) => error.into(),
+        SubmitError::Io(error) => internal(error),
+    }
+}
+async fn stage_upload(
+    directory: &std::path::Path,
+    multipart: &mut Multipart,
+    allow_pipeline: bool,
+) -> Result<(Manifest, Option<pipeline::Request>), ApiError> {
+    let mut pipeline = None;
     let mut manifest = None;
     let mut document_received = false;
     while let Some(mut field) = multipart
@@ -341,6 +401,21 @@ async fn receive(
                     serde_json::from_slice(&bytes).map_err(|_| bad("invalid_manifest"))?;
                 value.validate().map_err(|e| bad(e.0))?;
                 manifest = Some(value);
+            }
+            Some("pipeline") if allow_pipeline && pipeline.is_none() => {
+                let mut bytes = Vec::new();
+                while let Some(chunk) = field.chunk().await.map_err(|_| bad("invalid_multipart"))? {
+                    if bytes.len() + chunk.len() > 16384 {
+                        return Err(bad("pipeline_too_large"));
+                    }
+                    bytes.extend_from_slice(&chunk);
+                }
+                let request: pipeline::Request =
+                    serde_json::from_slice(&bytes).map_err(|_| bad("invalid_pipeline"))?;
+                if request.expected_revision != 0 {
+                    return Err(bad("initial_revision_required"));
+                }
+                pipeline = Some(request);
             }
             Some("document") if !document_received => {
                 let mut file = tokio::fs::File::create(directory.join("source.part"))
@@ -367,15 +442,7 @@ async fn receive(
     if !document_received {
         return Err(bad("missing_document"));
     }
-    let job = publish_staged(&app.repo, directory, id, manifest)
-        .await
-        .map_err(|e| match e {
-            SubmitError::Invalid(code) => bad(code),
-            SubmitError::Storage(error) => ApiError::from(error),
-            SubmitError::Io(error) => internal(error),
-        })?;
-    tracing::info!(job_id=%id,stage="queued","job uploaded");
-    Ok(job)
+    Ok((manifest, pipeline))
 }
 async fn action(
     State(app): State<App>,
@@ -423,4 +490,43 @@ async fn delete(
     }
     app.repo.delete(job).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn submit_pipeline(
+    State(app): State<App>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    pipeline::scopes(&app, &headers)?;
+    let id = Uuid::new_v4();
+    let directory = app.root.join("jobs").join(id.to_string());
+    tokio::fs::create_dir(&directory).await.map_err(internal)?;
+    let mut committed = false;
+    let result = async {
+        let (manifest, request) = stage_upload(&directory, &mut multipart, true).await?;
+        let request = request.ok_or(bad("missing_pipeline"))?;
+        let (job, ticket) = rip_jobs::prepare_staged(&directory, id, manifest, None).await.map_err(submit_error)?;
+        let workflow_ticket = pipeline::registration_ticket(&app, &headers, &job, &request)?;
+        match app.repo.insert_with_pipeline(&job, None, Some(&ticket), Some((request.request_id, workflow_ticket.clone()))).await {
+            Ok(()) => {
+                committed = true;
+                Ok(serde_json::json!({"jobId":job.id,"pipeline":app.repo.pipeline(request.request_id).await?}))
+            },
+            Err(error) => {
+                match app.repo.pipeline(request.request_id).await {
+                    Ok(existing) if existing["ticket"] == workflow_ticket => {
+                        // Return original acceptance after revisions advance; source metadata may have been retained separately.
+                        Ok(serde_json::json!({"jobId":existing["sourceJob"],"pipeline":existing}))
+                    }
+                    Ok(_) => Err(ApiError(StatusCode::CONFLICT, "pipeline_request_conflict")),
+                    Err(StorageError::NotFound) => Err(error.into()),
+                    Err(error) => Err(error.into()),
+                }
+            }
+        }
+    }.await;
+    if !committed {
+        let _ = tokio::fs::remove_dir_all(&directory).await;
+    }
+    result.map(|value| (StatusCode::ACCEPTED, Json(value)))
 }

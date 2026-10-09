@@ -73,6 +73,21 @@ async fn job_lifecycle_and_storage_boundary() {
     assert_eq!(job["manifest"]["engine"], "auto");
     let id = job["id"].as_str().unwrap();
     let path = format!("/api/v1/jobs/{id}");
+    let ticket_path = format!("{path}/ticket");
+    let response = app
+        .clone()
+        .oneshot(request("GET", &ticket_path))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let ticket: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(ticket["jobId"], id);
+    assert_eq!(ticket["selectedEngine"], "ghostscript");
+    assert_eq!(ticket["document"]["sha256"], job["source_sha256"]);
+    assert_eq!(ticket["document"]["integrityVerified"], true);
+    assert_eq!(ticket["document"]["structureVerified"], false);
+    assert_eq!(ticket["completionMeaning"], "raster_export");
     assert!(dir.path().join("jobs").join(id).join("document").exists());
     assert!(!dir.path().join("evil.ps").exists());
     for action in ["hold", "release", "cancel"] {
@@ -102,8 +117,70 @@ async fn job_lifecycle_and_storage_boundary() {
         StatusCode::NO_CONTENT
     );
     assert_eq!(
-        app.oneshot(request("GET", &path)).await.unwrap().status(),
+        app.clone()
+            .oneshot(request("GET", &path))
+            .await
+            .unwrap()
+            .status(),
         StatusCode::NOT_FOUND
+    );
+    let restarted = jrip_server::router(
+        jrip_server::open(dir.path().into(), TOKEN.into())
+            .await
+            .unwrap(),
+    );
+    let response = restarted
+        .oneshot(request("GET", &ticket_path))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let retained: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(retained, ticket);
+}
+
+#[tokio::test]
+async fn common_capabilities_and_ticket_validation_are_explicit() {
+    let (dir, app) = app().await;
+    let response = app
+        .clone()
+        .oneshot(request("GET", "/api/v1/print/capabilities"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let model: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(model["stages"].as_array().unwrap().len(), 3);
+    assert_eq!(model["executionPaths"]["automaticPhysicalPipeline"], false);
+    assert_eq!(model["authorizationGranted"], false);
+    let intent = serde_json::json!({"document":{"uri":"https://example.org/test.pdf","mediaType":"application/pdf","sha256":"a".repeat(64)},"copies":{"mode":"required","value":1},"output":{"destination":"artifact"}});
+    let resolved = rip_acx::intent::resolve(serde_json::from_value(intent).unwrap());
+    let mut ticket = resolved["ticket"].clone();
+    for expected in [true, false] {
+        if !expected {
+            ticket["documentVerified"] = serde_json::json!(true);
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/print/validate-ticket")
+                    .header("authorization", format!("Bearer {TOKEN}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(ticket.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let result: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(result["valid"], expected);
+        assert_eq!(result["documentVerified"], false);
+    }
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("jobs")).unwrap().count(),
+        0
     );
 }
 #[tokio::test]

@@ -369,6 +369,94 @@ pub async fn cleanup_abandoned_source(source: &Path) -> Result<(), InterpreterEr
     Ok(())
 }
 
+/// Trusted CLI/worker only; the HTTP server never calls this method.
+pub async fn inspect_pdf(source: &Path) -> Result<serde_json::Value, InterpreterError> {
+    let source = tokio::fs::canonicalize(source).await?;
+    let config = SandboxConfig {
+        image: "jrip-mupdf:local".into(),
+        timeout: Duration::from_secs(120),
+        max_pages: 1,
+        max_spool_bytes: 1024 * 1024,
+    };
+    let manifest = Manifest {
+        name: "inspection".into(),
+        format: DocumentFormat::Pdf,
+        dpi: 72,
+        color_mode: ColorMode::Rgb,
+        priority: 50,
+        engine: rip_core::EnginePreference::MuPdf,
+    };
+    let name = format!("jrip-inspection-{}", uuid::Uuid::new_v4());
+    let mut args = config.arguments(
+        EngineKind::MuPdf,
+        &source,
+        source
+            .parent()
+            .ok_or(InterpreterError::Rejected("invalid_path"))?,
+        &manifest,
+        &name,
+        "1000:1000",
+    )?;
+    args.truncate(args.len() - 3);
+    let index = args.len() - 1;
+    args.splice(index..index, ["--entrypoint".into(), "python3".into()]);
+    args.extend(["-I".into(), "/usr/local/lib/jrip/inspect.py".into()]);
+    let mut child = Command::new("docker")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()?;
+    let result = tokio::time::timeout(config.timeout, async {
+        let mut bytes = Vec::new();
+        child
+            .stdout
+            .take()
+            .ok_or(InterpreterError::Rejected("missing_output"))?
+            .take(65537)
+            .read_to_end(&mut bytes)
+            .await?;
+        if bytes.len() > 65536 {
+            return Err(InterpreterError::Rejected("inspection_output_limit"));
+        }
+        if !child.wait().await?.success() {
+            return Err(InterpreterError::Rejected("pdf_inspection_failed"));
+        }
+        let value: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|_| InterpreterError::Rejected("invalid_inspection"))?;
+        if value["schemaVersion"] != 1
+            || value["contentParsed"] != true
+            || value["repaired"] != false
+            || value["encrypted"] != false
+            || !value["pages"]
+                .as_array()
+                .is_some_and(|pages| !pages.is_empty() && pages.len() <= 100)
+        {
+            return Err(InterpreterError::Rejected("invalid_inspection"));
+        }
+        Ok(value)
+    })
+    .await;
+    if !matches!(result, Ok(Ok(_))) {
+        let _ = child.kill().await;
+    }
+    let cleanup = tokio::time::timeout(
+        Duration::from_secs(10),
+        Command::new("docker")
+            .args(["rm", "-f", &name])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .status(),
+    )
+    .await;
+    if !matches!(cleanup,Ok(Ok(status)) if status.success()) {
+        return Err(InterpreterError::Rejected("container_cleanup_failed"));
+    }
+    result.map_err(|_| InterpreterError::Rejected("inspection_timeout"))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

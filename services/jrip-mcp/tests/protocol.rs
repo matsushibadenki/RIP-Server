@@ -33,7 +33,16 @@ async fn handshake_discovery_and_validated_api_calls() {
     );
     initialize(&mut s).await;
     let listing = s.handle(req(2, "tools/list", json!({}))).await.unwrap();
-    assert_eq!(listing["result"]["tools"].as_array().unwrap().len(), 23);
+    assert_eq!(listing["result"]["tools"].as_array().unwrap().len(), 36);
+    let stages = s
+        .handle(req(
+            90,
+            "tools/call",
+            json!({"name":"print_get_capabilities"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(stages["result"]["isError"], false);
     let result = s
         .handle(req(3, "tools/call", json!({"name":"rip_get_capabilities"})))
         .await
@@ -482,7 +491,7 @@ async fn scoped_tools_hide_and_deny_mutations_and_subscriptions() {
     );
     initialize(&mut s).await;
     let tools = s.handle(req(1, "tools/list", json!({}))).await.unwrap();
-    assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 11);
+    assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 17);
     assert_eq!(s.handle(req(2,"tools/call",json!({"name":"rip_cancel_job","arguments":{"jobId":uuid::Uuid::new_v4(),"expectedRevision":0}}))).await.unwrap()["result"]["isError"],true);
     let app = jrip_server::open(dir.path().into(), TOKEN.into())
         .await
@@ -722,15 +731,17 @@ async fn printer_capability_tool_rejects_paths_urls_and_control_characters() {
         "printer?x=1",
         "",
     ] {
-        let response = session
-            .handle(req(
-                2,
-                "tools/call",
-                json!({"name":"print_get_printer","arguments":{"printerId":printer}}),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response["error"]["code"], -32602);
+        for name in ["print_get_printer", "print_get_capabilities"] {
+            let response = session
+                .handle(req(
+                    2,
+                    "tools/call",
+                    json!({"name":name,"arguments":{"printerId":printer}}),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response["error"]["code"], -32602);
+        }
     }
 }
 
@@ -851,6 +862,321 @@ async fn color_tools_pin_policy_and_delegate_revision_checked_queue_control() {
                 8,
                 "tools/call",
                 json!({"name":"color_apply","arguments":args})
+            ))
+            .await
+            .unwrap()["result"]["isError"],
+        true
+    );
+}
+
+#[tokio::test]
+async fn timeline_resource_subscription_resumes_and_respects_read_scope() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = jrip_server::open(dir.path().into(), TOKEN.into())
+        .await
+        .unwrap();
+    let job:rip_core::Job=serde_json::from_value(json!({"id":uuid::Uuid::new_v4(),"manifest":{"name":"timeline.pdf","format":"application/pdf"},"state":"COMPLETED","source_sha256":"a".repeat(64),"created_at":0,"updated_at":0,"revision":0,"error_code":null,"selected_engine":null,"worker_run_id":null})).unwrap();
+    app.repo.insert(&job).await.unwrap();
+    let id = uuid::Uuid::new_v4();
+    app.repo
+        .create_pipeline(id, job.id, 0, json!({}))
+        .await
+        .unwrap();
+    let mut s = Session::new(jrip_server::router(app.clone()), TOKEN.into());
+    initialize(&mut s).await;
+    let uri = format!("jrip://pipelines/{id}/timeline");
+    assert_eq!(
+        s.handle(req(2, "resources/subscribe", json!({"uri":uri})))
+            .await
+            .unwrap()["result"],
+        json!({})
+    );
+    assert_eq!(s.notifications().await[0]["params"]["uri"], uri);
+    assert!(s.notifications().await.is_empty());
+    let read = s
+        .handle(req(3, "resources/read", json!({"uri":uri})))
+        .await
+        .unwrap();
+    let snapshot: Value =
+        serde_json::from_str(read["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
+    let after = snapshot["nextAfter"].clone();
+    app.repo
+        .update_pipeline(id, 0, "BLOCKED", Some("TEST_BLOCKED"), None)
+        .await
+        .unwrap();
+    assert_eq!(s.notifications().await.len(), 1);
+    assert!(s.notifications().await.is_empty());
+    let mut restarted = Session::new(jrip_server::router(app.clone()), TOKEN.into());
+    initialize(&mut restarted).await;
+    let page=tool_value(restarted.handle(req(4,"tools/call",json!({"name":"print_get_pipeline_timeline","arguments":{"pipelineId":id,"after":after}}))).await.unwrap());
+    assert_eq!(page["events"].as_array().unwrap().len(), 1);
+    assert_eq!(page["events"][0]["reasonCode"], "TEST_BLOCKED");
+    assert_eq!(
+        s.handle(req(5, "resources/unsubscribe", json!({"uri":uri})))
+            .await
+            .unwrap()["result"],
+        json!({})
+    );
+    app.repo
+        .update_pipeline(id, 1, "QUEUED", None, None)
+        .await
+        .unwrap();
+    assert!(s.notifications().await.is_empty());
+    let mut forbidden = Session::new(jrip_server::router(app), TOKEN.into()).with_access(
+        "artifact-reader".into(),
+        vec!["artifacts:read".into()],
+        None,
+    );
+    initialize(&mut forbidden).await;
+    for method in ["resources/read", "resources/subscribe"] {
+        assert_eq!(
+            forbidden
+                .handle(req(6, method, json!({"uri":uri})))
+                .await
+                .unwrap()["error"]["code"],
+            -32001
+        );
+    }
+    for invalid in [
+        format!("{uri}?after=0"),
+        "jrip://pipelines/../../jobs/timeline".into(),
+    ] {
+        assert_eq!(
+            s.handle(req(7, "resources/subscribe", json!({"uri":invalid})))
+                .await
+                .unwrap()["error"]["code"],
+            -32602
+        );
+    }
+}
+
+#[tokio::test]
+async fn stdio_pushes_timeline_updates_without_client_polling() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    let dir = tempfile::tempdir().unwrap();
+    let app = jrip_server::open(dir.path().into(), TOKEN.into())
+        .await
+        .unwrap();
+    let job:rip_core::Job=serde_json::from_value(json!({"id":uuid::Uuid::new_v4(),"manifest":{"name":"push.pdf","format":"application/pdf"},"state":"COMPLETED","source_sha256":"a".repeat(64),"created_at":0,"updated_at":0,"revision":0,"error_code":null,"selected_engine":null,"worker_run_id":null})).unwrap();
+    app.repo.insert(&job).await.unwrap();
+    let id = uuid::Uuid::new_v4();
+    app.repo
+        .create_pipeline(id, job.id, 0, json!({}))
+        .await
+        .unwrap();
+    let uri = format!("jrip://pipelines/{id}/timeline");
+    let (client, server) = tokio::io::duplex(256 * 1024);
+    let (read, write) = tokio::io::split(server);
+    let task = tokio::spawn(serve(
+        tokio::io::BufReader::new(read),
+        write,
+        Session::new(jrip_server::router(app.clone()), TOKEN.into()),
+    ));
+    let (read, mut write) = tokio::io::split(client);
+    let mut read = tokio::io::BufReader::new(read);
+    for message in [
+        req(
+            1,
+            "initialize",
+            json!({"protocolVersion":"2025-11-25","clientInfo":{"name":"test","version":"1"},"capabilities":{}}),
+        ),
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+        req(2, "resources/subscribe", json!({"uri":uri})),
+    ] {
+        write
+            .write_all(format!("{message}\n").as_bytes())
+            .await
+            .unwrap();
+    }
+    loop {
+        let mut line = String::new();
+        tokio::time::timeout(std::time::Duration::from_secs(3), read.read_line(&mut line))
+            .await
+            .unwrap()
+            .unwrap();
+        let value: Value = serde_json::from_str(&line).unwrap();
+        if value["method"] == "notifications/resources/updated" {
+            assert_eq!(value["params"]["uri"], uri);
+            break;
+        }
+    }
+    app.repo
+        .update_pipeline(id, 0, "BLOCKED", Some("TEST_BLOCKED"), None)
+        .await
+        .unwrap();
+    let mut line = String::new();
+    tokio::time::timeout(std::time::Duration::from_secs(3), read.read_line(&mut line))
+        .await
+        .unwrap()
+        .unwrap();
+    let value: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(value["method"], "notifications/resources/updated");
+    assert_eq!(value["params"]["uri"], uri);
+    drop(read);
+    drop(write);
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn atomic_pipeline_tool_uses_inbox_and_requires_all_scopes() {
+    let dir = tempfile::tempdir().unwrap();
+    let inbox = tempfile::tempdir().unwrap();
+    tokio::fs::write(inbox.path().join("proof.pdf"), b"%PDF-1.7\nsource")
+        .await
+        .unwrap();
+    let mut app = jrip_server::open(dir.path().into(), TOKEN.into())
+        .await
+        .unwrap();
+    app.printers = vec![jrip_server::delivery::Printer {
+        id: "test".into(),
+        uri: "ipp://127.0.0.1:9/ipp/print".into(),
+        media: vec![jrip_server::delivery::Media {
+            name: "square".into(),
+            width_microns: 25400,
+            height_microns: 25400,
+        }],
+        color_target: None,
+    }];
+    let repo = app.repo.clone();
+    let router = jrip_server::router(app);
+    let mut s = Session::new(router.clone(), TOKEN.into()).with_access(
+        "test-agent".into(),
+        vec!["admin".into()],
+        Some(inbox.path().into()),
+    );
+    initialize(&mut s).await;
+    let args = json!({"sourceName":"proof.pdf","manifest":{"name":"proof.pdf","format":"application/pdf","dpi":72,"color_mode":"rgb"},"pipeline":{"requestId":uuid::Uuid::new_v4(),"expectedRevision":0,"printerId":"test","media":"square"}});
+    let accepted = tool_value(
+        s.handle(req(
+            10,
+            "tools/call",
+            json!({"name":"print_submit_pipeline","arguments":args}),
+        ))
+        .await
+        .unwrap(),
+    );
+    assert!(accepted["jobId"].is_string(), "{accepted}");
+    assert_eq!(
+        tool_value(
+            s.handle(req(
+                11,
+                "tools/call",
+                json!({"name":"print_submit_pipeline","arguments":args})
+            ))
+            .await
+            .unwrap()
+        ),
+        accepted
+    );
+    assert_eq!(repo.list(100, 0).await.unwrap().len(), 1);
+    let mut invalid = args.clone();
+    invalid["sourceName"] = json!("../proof.pdf");
+    assert_eq!(
+        s.handle(req(
+            12,
+            "tools/call",
+            json!({"name":"print_submit_pipeline","arguments":invalid})
+        ))
+        .await
+        .unwrap()["result"]["isError"],
+        true
+    );
+    let mut limited = Session::new(router, TOKEN.into()).with_access(
+        "submitter".into(),
+        vec!["jobs:submit".into()],
+        Some(inbox.path().into()),
+    );
+    initialize(&mut limited).await;
+    let tools = limited
+        .handle(req(13, "tools/list", json!({})))
+        .await
+        .unwrap();
+    assert!(
+        !tools["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["name"] == "print_submit_pipeline")
+    );
+    assert_eq!(
+        limited
+            .handle(req(
+                14,
+                "tools/call",
+                json!({"name":"print_submit_pipeline","arguments":args})
+            ))
+            .await
+            .unwrap()["result"]["isError"],
+        true
+    );
+}
+
+#[tokio::test]
+async fn inspection_reader_is_scoped_and_owner_bound() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = jrip_server::open(dir.path().into(), TOKEN.into())
+        .await
+        .unwrap();
+    app.credentials = vec![
+        jrip_server::Credential {
+            token: TOKEN.into(),
+            identity: "owner".into(),
+            scopes: vec!["admin".into()],
+        },
+        jrip_server::Credential {
+            token: "other".into(),
+            identity: "other".into(),
+            scopes: vec!["admin".into()],
+        },
+    ];
+    let id = uuid::Uuid::new_v4();
+    let report = json!({"inspectionId":id,"sourceSha256":"a".repeat(64),"pages":[{"page":1,"widthPoints":72,"heightPoints":72}]});
+    app.repo
+        .save_document_inspection(id, "owner", &report)
+        .await
+        .unwrap();
+    let router = jrip_server::router(app);
+    let mut owner = Session::new(router.clone(), TOKEN.into());
+    initialize(&mut owner).await;
+    let args = json!({"inspectionId":id});
+    assert_eq!(
+        tool_value(
+            owner
+                .handle(req(
+                    10,
+                    "tools/call",
+                    json!({"name":"print_get_document_inspection","arguments":args})
+                ))
+                .await
+                .unwrap()
+        ),
+        report
+    );
+    let mut other = Session::new(router.clone(), "other".into());
+    initialize(&mut other).await;
+    assert_eq!(
+        other
+            .handle(req(
+                11,
+                "tools/call",
+                json!({"name":"print_get_document_inspection","arguments":args})
+            ))
+            .await
+            .unwrap()["result"]["isError"],
+        true
+    );
+    let mut reader = Session::new(router, TOKEN.into()).with_access(
+        "owner".into(),
+        vec!["jobs:read".into()],
+        None,
+    );
+    initialize(&mut reader).await;
+    assert_eq!(
+        reader
+            .handle(req(
+                12,
+                "tools/call",
+                json!({"name":"print_get_document_inspection","arguments":args})
             ))
             .await
             .unwrap()["result"]["isError"],

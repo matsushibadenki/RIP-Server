@@ -55,6 +55,19 @@
 
 ## 🟠 [Next] Agent Print Infrastructureの標準契約
 
+- 🟢 [Done] 共通JobTicket v0.1を新規REST・IPP・MCP投入と同じトランザクションで保存。原稿hash・エンジン・設定・TIFF完了条件を記録し、設定検証APIと削除後も保持する照会APIを追加。 / Durable shared raster ticket and pure validation / 持久化通用栅格契约及纯设置验证。詳細：[JOB-TICKET.md](JOB-TICKET.md)。
+- 🟢 [Done] RIP・Color・Queue・設定済みPrinterの共通Capability Model、内容revisionと30秒有効期限、MCP能力照会・ticket取得・検証を追加。未照会と利用可能を区別する。 / Common stage capability snapshots and MCP bindings / 通用阶段能力快照及MCP绑定。
+- 🟢 [Done] PrintIntentにengine・ページ範囲・numberUp・面付け・品質を追加し、色方針・優先度・期限のrequirement指定と明示的な代替案を実装。 / Extended intent negotiation / 扩展意图协商。
+- 🟢 [Done] 共通能力照会へ送信条件の交差照合を追加。TIFF→PWG接続、DPI・色型・8bit・用紙・容量と不一致理由を返し、MCPから実機ID指定で照会できる。 / Delivery settings intersection with live MCP discovery / 投递设置交叉匹配及MCP实时查询。
+- 🟢 [Done] 完成済み成果物から実機送信previewを作成し、PWG・寸法・ICC・ライブ能力を検証。hash拘束付き投入と配信契約の原子的保存・取得、MCP操作を実装。 / Verified physical delivery preview and atomic contract / 已验证实体投递预览及原子契约。
+- 🟢 [Done] 完成済みRIPからICC処理・承認待ち・実機送信へ進む永続pipeline worker、状態照会・再開・投入前取消とMCP操作を追加。再起動時のchild再利用、scope再検査、UNKNOWN非再送、活動中原稿の削除・retention保護に対応。 / Durable post-RIP orchestration / 持久化RIP后续编排。詳細：[PIPELINE.md](PIPELINE.md)。
+- 🟢 [Done] workflow状態と同時に工程履歴を永続化。sequence差分取得・最大100件・再起動保持・MCP照会・再送とrevision競合の履歴重複防止。 / Atomic resumable orchestration history / 原子可恢复编排历史。
+- 🟢 [Done] RIP・色・delivery・workflowの統合timeline、原子trigger索引、永続sequence差分取得、既存履歴の一度だけの明示的取り込み、MCP照会を実装。 / Unified persistent stage timeline / 统一持久化阶段timeline。
+- 🟢 [Done] 統合timelineのMCP resource・購読・標準更新通知・解除。1秒の内部確認、32購読上限、jobs:read制御、保存cursorによる再接続後の差分取得に対応。 / MCP timeline update notifications / MCP timeline更新通知。
+- 🟢 [Done] 実機向けPrintIntentのlive能力照合、digest・原稿hash・主体・期限を拘束したpreflight、一括commit、RIP待機から実機送信までの接続、MCPを実装。Docker MuPDFと偽IPPデバイスで完了を検証。 / Bound physical preflight and RIP-to-device workflow verified with Docker/fake IPP / 绑定实体预检与RIP到设备流程，已通过Docker与模拟IPP验证。
+- 🟠 [Next] 共通JobTicketへの物理契約統合、原稿検査のHTTP/MCP非同期受付・trusted worker、強制終了時の検査snapshot回収。 / Unified physical JobTicket, asynchronous inspection queue/worker and snapshot recovery / 统一实体JobTicket、异步检查队列/worker及snapshot回收。
+- 🔴 [Later] HTTP SSEとremote MCP transportのpush通知。 / HTTP SSE and remote MCP push / HTTP SSE与remote MCP push。部数・両面・面付け等の表現対応は実行対応と区別する。 / Cross-stage physical negotiation and execution / 跨阶段实体协商及执行。
+
 - 🟢 [Done] 認証付きTIFFダウンロードとページ単位の公開後整合性検査を追加。サイズ・SHA-256不一致は409、未登録ページは404。検証済み非公開スナップショットを逐次配信し、検証後の元ファイル変更でも配信内容を固定する。
 - 🟢 [Done] 単一HTTP RangeとETagによるIf-Rangeを実装。一時スナップショットはプロセスごとに合計1 GiBを予約し、配信終了・切断で解放。予算不足は503。
 - 🟢 [Done] 同じデータrootのプロセス間でOSロックによる1GiB予算を共有。終了時に予約解放。 / Shared single-host artifact budget / 单机共享产物预算。
@@ -177,3 +190,10 @@ Printer
 - 🟢 [Done] 実機能力・受付可否・状態理由のAPI／MCP／resource、hash版と30秒有効期限。URI・認証情報は非公開。 / Live printer capabilities / 实时打印机能力。
 - 🟢 [Done] MCPの設定済み出力先一覧・Delivery照会／投入／取消、印刷意図照合、revision付き終端ジョブ記録削除。 / MCP delivery controls and terminal metadata deletion / MCP投递控制与结束任务记录删除。
 - 🟢 [Done] UNKNOWNを実機job-id・Delivery UUID付きジョブ名・revisionで照合して復旧。再送せず、別ジョブは拒否。 / UNKNOWN remote-job reconciliation / UNKNOWN远程任务核对。
+
+- 🟢 [Done] 受付済みRIPジョブへのworkflow登録、RIP完了待機、失敗・取消時の後続停止、完了revisionへの接続、再起動とrequestId再送に対応。 / Register workflows before RIP completion, await completion and stop on failure/cancellation, with durable replay. / RIP完成前注册流程、等待完成、失败或取消时停止，支持重启与幂等重放。
+- 🟢 [Done] 実機向けPrintIntentをlive能力・ICC条件と照合し、主体・原稿SHA256・能力revision・期限を固定したpreflightから原子的にworkflowを受付。MCPの作成・commit工具も接続。 / Bound physical PrintIntent preflight and atomic workflow commit, including MCP. / 绑定实体PrintIntent预检与原子流程接收，含MCP。
+
+- 🟢 [Done] multipart一括受付APIとMCP print_submit_pipeline。原稿検証後にjob/JobTicket/workflow/受付イベントを同じDBトランザクションで保存し、並行再送は同じjobIdへ対応付ける。競合・不正原稿・不正出力条件は新規ジョブを残さない。 / Atomic source/workflow API and inbox-bound MCP tool, transactional acceptance and idempotent concurrent replay. / 源文档与流程原子接收API及inbox限定MCP工具，事务接收与并发幂等重放。
+
+- 🟢 [Done] 信頼されたPDF検査CLI、Docker MuPDFの内容解釈・実効寸法検査、原稿hash・主体に拘束した保存結果、API/MCP読取、inspectionId指定時の用紙照合とcommit固定を実装。継承CropBox/回転/UserUnitと修復PDFの拒否、検査から偽IPP完了までを検証。 / Trusted PDF inspection CLI and opt-in bound evidence, verified geometry and end-to-end fake device output / 信任PDF检查CLI与可选绑定证据，已验证尺寸及模拟设备完整输出。

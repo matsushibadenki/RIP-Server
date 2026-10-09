@@ -95,7 +95,7 @@ fn configured_backend(
     }
     Ok(backend)
 }
-fn backend(app: &App, printer: &Printer) -> Result<NativeIpp, rip_printer::Error> {
+pub(crate) fn backend(app: &App, printer: &Printer) -> Result<NativeIpp, rip_printer::Error> {
     configured_backend(
         printer,
         app.printer_security
@@ -190,6 +190,7 @@ pub(crate) struct Request {
     media: String,
     expected_revision: i64,
     color_attempt_id: Option<Uuid>,
+    expected_ticket_sha256: Option<String>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -258,9 +259,41 @@ pub(crate) async fn prepare(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
     Json(req): Json<Request>,
-) -> Result<(StatusCode, Json<Delivery>), ApiError> {
-    authorize(&app, &headers, "printers:print")?;
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    prepare_impl(app, headers, id, req, false).await
+}
+pub(crate) async fn preview(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(req): Json<Request>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    prepare_impl(app, headers, id, req, true).await
+}
+async fn prepare_impl(
+    app: App,
+    headers: HeaderMap,
+    id: Uuid,
+    req: Request,
+    preview: bool,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    authorize(
+        &app,
+        &headers,
+        if preview {
+            "jobs:read"
+        } else {
+            "printers:print"
+        },
+    )?;
     authorize(&app, &headers, "artifacts:read")?;
+    if req
+        .expected_ticket_sha256
+        .as_ref()
+        .is_some_and(|digest| !rip_core::print::valid_digest(digest))
+    {
+        return Err(bad("invalid_ticket_digest"));
+    }
     let job = app.repo.get(id).await?;
     if job.state != JobState::Completed || job.revision != req.expected_revision {
         return Err(ApiError(StatusCode::CONFLICT, "revision_conflict"));
@@ -330,26 +363,39 @@ pub(crate) async fn prepare(
     } else {
         None
     };
-    if let Ok(existing) = app.repo.delivery(req.request_id).await {
+    if !preview && let Ok(existing) = app.repo.delivery(req.request_id).await {
         if existing.ticket.source_job == id
             && existing.ticket.printer_id == ticket.printer_id
             && existing.ticket.media == ticket.media
             && existing.ticket.color_attempt_id == ticket.color_attempt_id
         {
-            return Ok((StatusCode::ACCEPTED, Json(existing)));
+            if let Some(expected) = &req.expected_ticket_sha256 {
+                let contract = app.repo.delivery_contract(req.request_id).await?;
+                if contract["ticketSha256"] != *expected {
+                    return Err(ApiError(StatusCode::CONFLICT, "delivery_ticket_conflict"));
+                }
+            }
+            return Ok((
+                StatusCode::ACCEPTED,
+                Json(serde_json::to_value(existing).map_err(internal)?),
+            ));
         }
         return Err(ApiError(StatusCode::CONFLICT, "delivery_request_conflict"));
     }
-    let approval = approvals::check_delivery(
-        &app,
-        &headers,
-        id,
-        req.expected_revision,
-        req.request_id,
-        &ticket.printer_id,
-        (&ticket.media, ticket.color_attempt_id),
-    )
-    .await?;
+    let approval = if preview {
+        None
+    } else {
+        approvals::check_delivery(
+            &app,
+            &headers,
+            id,
+            req.expected_revision,
+            req.request_id,
+            &ticket.printer_id,
+            (&ticket.media, ticket.color_attempt_id),
+        )
+        .await?
+    };
     backend(&app, printer)
         .map_err(|_| bad("invalid_printer"))?
         .capabilities()
@@ -419,6 +465,28 @@ pub(crate) async fn prepare(
     ticket.artifact_bytes = bytes.len() as u64;
     ticket.artifact_sha256 = format!("{:x}", Sha256::digest(&bytes));
     validate(&bytes, &ticket, &media)?;
+    let physical = serde_json::json!({"schemaVersion":1,"version":"0.1","jobId":id,"attemptId":req.request_id,
+        "sourceRevision":req.expected_revision,"sourceSha256":job.source_sha256,"manifest":job.manifest,"selectedEngine":job.selected_engine,
+        "delivery":ticket,"printerConfigSha256":format!("{:x}",Sha256::digest(serde_json::to_vec(printer).map_err(internal)?)),
+        "copies":1,"sides":"one-sided","pageSelection":"all","numberUp":1,"imposition":"none",
+        "completionMeaning":"device-confirmed","approvalRequired":app.require_print_approval});
+    let contract = serde_json::json!({"ticket":physical,"ticketSha256":format!("{:x}",Sha256::digest(serde_json::to_vec(&physical).map_err(internal)?))});
+    if req
+        .expected_ticket_sha256
+        .as_ref()
+        .is_some_and(|expected| contract["ticketSha256"] != *expected)
+    {
+        return Err(ApiError(StatusCode::CONFLICT, "delivery_ticket_conflict"));
+    }
+    if preview {
+        return Ok((
+            StatusCode::OK,
+            Json(
+                serde_json::json!({"contract":contract,"settingsVerified":true,"artifactVerified":true,"geometryVerified":true,"documentStructureVerified":false,"authorizationGranted":false,"queued":false,
+            "messages":{"en":"Verified delivery preview; commit rechecks capabilities and approval","ja":"送信設定・成果物を確認しました。投入時に能力と承認を再検査します","zh-CN":"已验证投递设置和产物；提交时重新检查能力与审批"}}),
+            ),
+        ));
+    }
     let dir = app.root.join("deliveries");
     tokio::fs::create_dir_all(&dir).await.map_err(internal)?;
     let registration = serde_json::to_vec(&Registration {
@@ -436,11 +504,22 @@ pub(crate) async fn prepare(
     Ok((
         StatusCode::ACCEPTED,
         Json(
-            app.repo
-                .enqueue_approved_delivery(req.request_id, ticket, approval)
-                .await?,
+            serde_json::to_value(
+                app.repo
+                    .enqueue_contract_delivery(req.request_id, ticket, approval, Some(contract))
+                    .await?,
+            )
+            .map_err(internal)?,
         ),
     ))
+}
+pub(crate) async fn contract(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    authorize(&app, &headers, "jobs:read")?;
+    Ok(Json(app.repo.delivery_contract(id).await?))
 }
 pub(crate) async fn detail(
     State(app): State<App>,

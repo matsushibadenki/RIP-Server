@@ -11,7 +11,7 @@ fn now() -> i64 {
 }
 // Experimental profile: compact serde_json Value with lexicographically sorted object keys.
 // This is not RFC 8785 and is explicitly scoped to this provider's ticket vocabulary.
-fn digest(value: &Value) -> Result<String, ApiError> {
+pub(crate) fn digest(value: &Value) -> Result<String, ApiError> {
     Ok(format!(
         "sha256:{:x}",
         Sha256::digest(serde_json::to_vec(value).map_err(internal)?)
@@ -54,6 +54,12 @@ pub async fn get(
 ) -> Result<Json<Value>, ApiError> {
     authorize(&app, &headers, "jobs:submit")?;
     let payload = app.repo.get_preflight(id).await?;
+    if payload["profile"] == "org.jrip.pipeline-preflight-v1" {
+        pipeline::scopes(&app, &headers)?;
+        if payload["actor"] != pipeline::actor(&app, &headers)? {
+            return Err(ApiError(StatusCode::FORBIDDEN, "preflight_actor_mismatch"));
+        }
+    }
     if payload["expiresAt"].as_i64().unwrap_or(0) <= now() {
         return Err(ApiError(StatusCode::GONE, "preflight_expired"));
     }
@@ -68,6 +74,9 @@ pub async fn commit(
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     authorize(&app, &headers, "jobs:submit")?;
     let payload = app.repo.get_preflight(preflight_id).await?;
+    if payload["profile"] == "org.jrip.pipeline-preflight-v1" {
+        return Err(bad("pipeline_commit_endpoint_required"));
+    }
     let supplied = headers
         .get("x-jrip-preflight-digest")
         .and_then(|h| h.to_str().ok())
@@ -103,35 +112,7 @@ pub async fn commit(
     let directory = app.root.join("jobs").join(id.to_string());
     tokio::fs::create_dir(&directory).await.map_err(internal)?;
     let result = async {
-        let mut received = false;
-        while let Some(mut field) = multipart
-            .next_field()
-            .await
-            .map_err(|_| bad("invalid_multipart"))?
-        {
-            if field.name() != Some("document") || received {
-                return Err(bad("unexpected_multipart_field"));
-            }
-            let mut file = tokio::fs::File::create(directory.join("source.part"))
-                .await
-                .map_err(internal)?;
-            let mut size = 0;
-            while let Some(chunk) = field.chunk().await.map_err(|_| bad("invalid_multipart"))? {
-                size += chunk.len();
-                if size > MAX_DOCUMENT_BYTES {
-                    return Err(ApiError(
-                        StatusCode::PAYLOAD_TOO_LARGE,
-                        "document_too_large",
-                    ));
-                }
-                file.write_all(&chunk).await.map_err(internal)?;
-            }
-            file.sync_all().await.map_err(internal)?;
-            received = true;
-        }
-        if !received {
-            return Err(bad("missing_document"));
-        }
+        stage_document(&directory, &mut multipart).await?;
         rip_jobs::publish_bound(
             &app.repo,
             &directory,
@@ -196,4 +177,40 @@ pub async fn artifacts(
 ) -> Result<Json<Value>, ApiError> {
     authorize(&app, &headers, "artifacts:read")?;
     Ok(Json(app.repo.artifacts(id).await?))
+}
+
+pub(crate) async fn stage_document(
+    directory: &std::path::Path,
+    multipart: &mut Multipart,
+) -> Result<(), ApiError> {
+    let mut received = false;
+    while let Some(mut field) = multipart
+        .next_field()
+        .await
+        .map_err(|_| bad("invalid_multipart"))?
+    {
+        if field.name() != Some("document") || received {
+            return Err(bad("unexpected_multipart_field"));
+        }
+        let mut file = tokio::fs::File::create(directory.join("source.part"))
+            .await
+            .map_err(internal)?;
+        let mut size = 0;
+        while let Some(chunk) = field.chunk().await.map_err(|_| bad("invalid_multipart"))? {
+            size += chunk.len();
+            if size > MAX_DOCUMENT_BYTES {
+                return Err(ApiError(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "document_too_large",
+                ));
+            }
+            file.write_all(&chunk).await.map_err(internal)?;
+        }
+        file.sync_all().await.map_err(internal)?;
+        received = true;
+    }
+    if !received {
+        return Err(bad("missing_document"));
+    }
+    Ok(())
 }

@@ -55,6 +55,7 @@ impl Session {
             .as_str()
             .or_else(|| args["deliveryId"].as_str())
             .or_else(|| args["colorAttemptId"].as_str())
+            .or_else(|| args["pipelineId"].as_str())
             .and_then(|id| Uuid::parse_str(id).ok());
         let sequence = if let Some(repo) = &self.audit {
             Some(
@@ -85,7 +86,10 @@ impl Session {
     }
     fn tool_allowed(&self, name: &str) -> bool {
         scopes(name).iter().all(|s| self.allowed(s))
-            && (name != "rip_submit" || self.input_root.is_some())
+            && (!matches!(
+                name,
+                "rip_submit" | "print_submit_pipeline" | "print_commit_pipeline"
+            ) || self.input_root.is_some())
     }
     async fn api(&self, request: Request<Body>) -> Result<Value, Value> {
         let response = self.router.clone().oneshot(request).await.unwrap();
@@ -125,6 +129,37 @@ impl Session {
                 json!({"code":"forbidden","messages":{"en":"Insufficient permission or input root unavailable","ja":"権限不足または原稿rootが未設定です","zh-CN":"权限不足或未设置原稿目录"}}),
             );
         }
+        if matches!(
+            name,
+            "print_create_pipeline" | "print_resume_pipeline" | "print_cancel_pipeline"
+        ) {
+            let path = if name == "print_create_pipeline" {
+                format!("/api/v1/jobs/{}/pipelines", args["jobId"].as_str().unwrap())
+            } else {
+                format!(
+                    "/api/v1/pipelines/{}/{}",
+                    args["pipelineId"].as_str().unwrap(),
+                    if name == "print_resume_pipeline" {
+                        "resume"
+                    } else {
+                        "cancel"
+                    }
+                )
+            };
+            let body = if name == "print_create_pipeline" {
+                json!({"requestId":args["requestId"],"expectedRevision":args["expectedRevision"],"printerId":args["printerId"],"media":args["media"],"color":args["color"]})
+            } else if name == "print_resume_pipeline" {
+                json!({"expectedRevision":args["expectedRevision"],"approvalId":args["approvalId"]})
+            } else {
+                json!({"expectedRevision":args["expectedRevision"]})
+            };
+            let request = self
+                .builder("POST", &path)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .map_err(|_| json!({"code":"invalid_request"}))?;
+            return self.api(request).await;
+        }
         if name == "color_apply" || name == "color_cancel_attempt" {
             let path = if name == "color_apply" {
                 format!(
@@ -149,8 +184,16 @@ impl Session {
                 .map_err(|_| json!({"code":"invalid_request"}))?;
             return self.api(request).await;
         }
-        if matches!(name, "print_deliver_job" | "print_cancel_delivery") {
-            let path = if name == "print_deliver_job" {
+        if matches!(
+            name,
+            "print_deliver_job" | "print_preview_delivery" | "print_cancel_delivery"
+        ) {
+            let path = if name == "print_preview_delivery" {
+                format!(
+                    "/api/v1/jobs/{}/delivery-preview",
+                    args["jobId"].as_str().unwrap()
+                )
+            } else if name == "print_deliver_job" {
                 format!(
                     "/api/v1/jobs/{}/deliveries",
                     args["jobId"].as_str().unwrap()
@@ -161,8 +204,8 @@ impl Session {
                     args["deliveryId"].as_str().unwrap()
                 )
             };
-            let body = if name == "print_deliver_job" {
-                json!({"requestId":args["requestId"],"printerId":args["printerId"],"media":args["media"],"expectedRevision":args["expectedRevision"],"colorAttemptId":args["colorAttemptId"]})
+            let body = if name != "print_cancel_delivery" {
+                json!({"requestId":args["requestId"],"printerId":args["printerId"],"media":args["media"],"expectedRevision":args["expectedRevision"],"colorAttemptId":args["colorAttemptId"],"expectedTicketSha256":args["expectedTicketSha256"]})
             } else {
                 json!({"expectedRevision":args["expectedRevision"]})
             };
@@ -190,7 +233,12 @@ impl Session {
                 .map_err(|_| json!({"code":"invalid_request"}))?;
             return self.api(request).await;
         }
-        if name == "rip_submit" {
+        if matches!(
+            name,
+            "rip_submit" | "print_submit_pipeline" | "print_commit_pipeline"
+        ) {
+            let atomic = name == "print_submit_pipeline";
+            let physical_commit = name == "print_commit_pipeline";
             let root = self.input_root.as_ref().unwrap();
             let name = args["sourceName"].as_str().unwrap();
             if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\']) {
@@ -232,12 +280,32 @@ impl Session {
             let mut body=format!("--{boundary}\r\nContent-Disposition: form-data; name=\"document\"; filename=\"source\"\r\nContent-Type: application/octet-stream\r\n\r\n").into_bytes();
             body.extend_from_slice(&document);
             drop(document);
+            if atomic {
+                for key in ["manifest", "pipeline"] {
+                    body.extend_from_slice(format!("\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"{key}\"\r\n\r\n{}",args[key]).as_bytes());
+                }
+                body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+                let request = self
+                    .builder("POST", "/api/v1/print/submissions")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .map_err(|_| json!({"code":"invalid_request"}))?;
+                return self.api(request).await;
+            }
             body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
             let request = self
                 .builder(
                     "POST",
                     &format!(
-                        "/api/v1/print/preflights/{}/commit",
+                        "/api/v1/print/{}/{}/commit",
+                        if physical_commit {
+                            "pipeline-preflights"
+                        } else {
+                            "preflights"
+                        },
                         args["preflightId"].as_str().unwrap()
                     ),
                 )
@@ -250,6 +318,35 @@ impl Session {
                     format!("multipart/form-data; boundary={boundary}"),
                 )
                 .body(Body::from(body))
+                .map_err(|_| json!({"code":"invalid_request"}))?;
+            return self.api(request).await;
+        }
+        if name == "print_get_document_inspection" {
+            let request = self
+                .builder(
+                    "GET",
+                    &format!(
+                        "/api/v1/print/document-inspections/{}",
+                        args["inspectionId"].as_str().unwrap()
+                    ),
+                )
+                .body(Body::empty())
+                .map_err(|_| json!({"code":"invalid_request"}))?;
+            return self.api(request).await;
+        }
+        if name == "print_create_pipeline_preflight" {
+            let request = self
+                .builder("POST", "/api/v1/print/pipeline-preflights")
+                .header("content-type", "application/json")
+                .body(Body::from(args.to_string()))
+                .map_err(|_| json!({"code":"invalid_request"}))?;
+            return self.api(request).await;
+        }
+        if name == "print_validate_ticket" {
+            let request = self
+                .builder("POST", "/api/v1/print/validate-ticket")
+                .header("content-type", "application/json")
+                .body(Body::from(args["ticket"].to_string()))
                 .map_err(|_| json!({"code":"invalid_request"}))?;
             return self.api(request).await;
         }
@@ -357,6 +454,7 @@ impl Session {
                 }
                 if self.allowed("jobs:read") {
                     templates.push(json!({"uriTemplate":"jrip://printers/{printerId}","name":"Printer / プリンター / 打印机","mimeType":"application/json"}));
+                    templates.push(json!({"uriTemplate":"jrip://pipelines/{pipelineId}/timeline","name":"Unified timeline / 全工程履歴 / 统一阶段历史","mimeType":"application/json"}));
                 }
                 json!({"resourceTemplates":templates})
             }
@@ -364,6 +462,21 @@ impl Session {
                 let Some(uri) = params["uri"].as_str() else {
                     return Some(error(id, -32602, "URI required"));
                 };
+                if timeline_resource(uri).is_some() {
+                    if !self.allowed("jobs:read") {
+                        return Some(error(id, -32001, "Insufficient permission"));
+                    }
+                    let path = event_resource(uri).unwrap().0;
+                    let value = match self.get(&path).await {
+                        Ok(value) => value,
+                        Err(_) => {
+                            return Some(error(id, -32002, "Resource not found or forbidden"));
+                        }
+                    };
+                    return Some(
+                        json!({"jsonrpc":"2.0","id":id,"result":{"contents":[{"uri":uri,"mimeType":"application/json","text":value.to_string()}]}}),
+                    );
+                }
                 if let Some(printer) = uri.strip_prefix("jrip://printers/") {
                     if !self.allowed("jobs:read") {
                         return Some(error(id, -32001, "Insufficient permission"));
@@ -418,14 +531,14 @@ impl Session {
                 let Some(uri) = params["uri"].as_str() else {
                     return Some(error(id, -32602, "URI required"));
                 };
-                let Some(job) = resource_job(uri) else {
+                let Some((path, _)) = event_resource(uri) else {
                     return Some(error(id, -32602, "Invalid event resource URI"));
                 };
                 if method == "resources/unsubscribe" {
                     self.subscriptions.remove(uri);
                     json!({})
                 } else {
-                    let value = match self.get(&format!("/api/v1/jobs/{job}/events")).await {
+                    let value = match self.get(&path).await {
                         Ok(v) => v,
                         Err(_) => {
                             return Some(error(id, -32002, "Resource not found or forbidden"));
@@ -454,18 +567,14 @@ impl Session {
         }
         let mut notifications = Vec::new();
         for (uri, cursor) in self.subscriptions.clone() {
-            let job = resource_job(&uri).unwrap();
-            if let Ok(value) = self
-                .get(&format!(
-                    "/api/v1/jobs/{job}/events?after={cursor}&limit=100"
-                ))
-                .await
+            let (path, cursor_key) = event_resource(&uri).unwrap();
+            if let Ok(value) = self.get(&format!("{path}?after={cursor}&limit=100")).await
                 && value["events"]
                     .as_array()
                     .is_some_and(|events| !events.is_empty())
             {
                 self.subscriptions
-                    .insert(uri.clone(), value["nextCursor"].as_i64().unwrap());
+                    .insert(uri.clone(), value[cursor_key].as_i64().unwrap());
                 notifications.push(json!({"jsonrpc":"2.0","method":"notifications/resources/updated","params":{"uri":uri}}));
             }
         }
@@ -484,17 +593,46 @@ fn resource_job(uri: &str) -> Option<Uuid> {
     let value = uri.strip_prefix("jrip://jobs/")?.strip_suffix("/events")?;
     Uuid::parse_str(value).ok()
 }
+fn timeline_resource(uri: &str) -> Option<Uuid> {
+    let value = uri
+        .strip_prefix("jrip://pipelines/")?
+        .strip_suffix("/timeline")?;
+    Uuid::parse_str(value).ok()
+}
+fn event_resource(uri: &str) -> Option<(String, &'static str)> {
+    if let Some(id) = timeline_resource(uri) {
+        Some((format!("/api/v1/pipelines/{id}/timeline"), "nextAfter"))
+    } else {
+        resource_job(uri).map(|id| (format!("/api/v1/jobs/{id}/events"), "nextCursor"))
+    }
+}
 fn error(id: Value, code: i64, message: &str) -> Value {
     json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}})
 }
 fn scopes(name: &str) -> Vec<&'static str> {
     match name {
-        "rip_submit" | "print_create_preflight" | "print_resolve_intent" => vec!["jobs:submit"],
+        "print_get_document_inspection"
+        | "rip_submit"
+        | "print_create_preflight"
+        | "print_resolve_intent"
+        | "print_validate_ticket" => vec!["jobs:submit"],
         "rip_hold_job" | "rip_release_job" | "rip_cancel_job" => vec!["jobs:control"],
         "rip_retry_job" => vec!["jobs:control", "jobs:submit"],
         "rip_list_artifacts" => vec!["artifacts:read"],
         "rip_delete_job" => vec!["admin"],
         "print_deliver_job" => vec!["printers:print", "artifacts:read"],
+        "print_preview_delivery" => vec!["jobs:read", "artifacts:read"],
+        "print_create_pipeline_preflight"
+        | "print_commit_pipeline"
+        | "print_submit_pipeline"
+        | "print_create_pipeline"
+        | "print_resume_pipeline" => vec![
+            "jobs:read",
+            "jobs:submit",
+            "artifacts:read",
+            "printers:print",
+        ],
+        "print_cancel_pipeline" => vec!["jobs:control", "printers:print"],
         "print_cancel_delivery" => vec!["printers:print"],
         "color_apply" => vec!["jobs:submit", "artifacts:read"],
         "color_cancel_attempt" => vec!["jobs:control"],
@@ -503,6 +641,21 @@ fn scopes(name: &str) -> Vec<&'static str> {
 }
 fn tools() -> Vec<Value> {
     [
+        ("print_get_document_inspection","Read bound PDF inspection / 原稿検査結果を取得 / 读取绑定PDF检查"),
+        ("print_create_pipeline_preflight","Resolve physical PrintIntent / 実機向け印刷意図を事前確認 / 预检实体打印意图"),
+        ("print_commit_pipeline","Commit bound physical workflow / 事前確認済み処理連携を受付 / 提交绑定实体流程"),
+        ("print_submit_pipeline","Atomically submit source and workflow / 原稿と処理連携を一括受付 / 原子提交源文档与流程"),
+        ("print_create_pipeline","Register pipeline awaiting RIP completion / RIP完了を待つ処理連携を登録 / 注册等待RIP完成的流程"),
+        ("print_get_pipeline_timeline","Read unified stage timeline / 全工程履歴の取得 / 获取统一阶段历史"),
+        ("print_get_pipeline_events","Resume pipeline stage history / 工程履歴の差分取得 / 恢复阶段历史"),
+        ("print_get_pipeline","Read pipeline state / 連携状態を取得 / 获取流程状态"),
+        ("print_resume_pipeline","Resume with current authority / 権限と承認を確認して再開 / 依据当前权限与审批恢复"),
+        ("print_cancel_pipeline","Cancel before delivery / 送信準備前に取消 / 投递前取消"),
+        ("print_preview_delivery","Verify physical delivery ticket / 実機送信契約を確認 / 验证实体投递契约"),
+        ("print_get_delivery_ticket","Read committed physical ticket / 実機送信契約を取得 / 获取已提交实体契约"),
+        ("print_get_capabilities","Get common stage capabilities / 共通工程能力を取得 / 获取通用阶段能力"),
+        ("print_get_job_ticket","Get immutable job ticket / 保存済みJobTicketを取得 / 获取持久化JobTicket"),
+        ("print_validate_ticket","Validate raster ticket settings / ラスター契約設定を検証 / 验证栅格契约设置"),
         ("color_get_capabilities","Get explicit ICC capabilities / ICC処理能力取得 / 获取ICC处理能力"),
         ("color_apply","Queue explicit ICC processing / ICC色処理を予約 / 排队显式ICC处理"),
         ("color_get_attempt","Get color attempt and reports / 色処理とレポート照会 / 查询颜色尝试及报告"),
@@ -530,15 +683,33 @@ fn tools() -> Vec<Value> {
     ].into_iter().map(|(name,description)| {
         let mut properties=json!({});let mut required=vec![];
         let control=matches!(name,"rip_hold_job"|"rip_release_job"|"rip_cancel_job"|"rip_retry_job"|"rip_delete_job"|"print_deliver_job"|"print_cancel_delivery");
-        if (control && name!="print_cancel_delivery") || matches!(name,"rip_get_job"|"rip_get_events"|"rip_list_artifacts") {properties["jobId"]=json!({"type":"string","format":"uuid"});required.push("jobId");}
-        if control {properties["expectedRevision"]=json!({"type":"integer","minimum":0});required.push("expectedRevision");}
-        if matches!(name,"rip_retry_job"|"print_deliver_job") {properties["requestId"]=json!({"type":"string","format":"uuid"});required.push("requestId");}
+        if (control && name!="print_cancel_delivery") || matches!(name,"rip_get_job"|"rip_get_events"|"rip_list_artifacts"|"print_get_job_ticket"|"print_preview_delivery") {properties["jobId"]=json!({"type":"string","format":"uuid"});required.push("jobId");}
+        if name=="print_get_document_inspection" {properties["inspectionId"]=json!({"type":"string","format":"uuid"});required.push("inspectionId");}
+        if name=="print_create_pipeline_preflight" {
+            properties["inspectionId"]=json!({"type":"string","format":"uuid"});
+            properties["requestId"]=json!({"type":"string","format":"uuid"});required.push("requestId");
+            properties["intent"]=json!({"type":"object"});required.push("intent");
+            properties["color"]=json!({"type":"object"});
+        }
+        if name=="print_create_pipeline" {
+            for key in ["jobId","requestId"] {properties[key]=json!({"type":"string","format":"uuid"});required.push(key);}
+            for key in ["printerId","media"] {properties[key]=json!({"type":"string","minLength":1});required.push(key);}
+            properties["color"]=json!({"type":"object","description":"Explicit inputProfileSha256, optional outputProfileSha256 and policy; validated by Print API / Print APIで検証 / 由Print API验证"});
+        }
+        if matches!(name,"print_get_pipeline_timeline"|"print_get_pipeline_events"|"print_get_pipeline"|"print_resume_pipeline"|"print_cancel_pipeline") {properties["pipelineId"]=json!({"type":"string","format":"uuid"});required.push("pipelineId");}
+        if matches!(name,"print_create_pipeline"|"print_resume_pipeline"|"print_cancel_pipeline") {properties["expectedRevision"]=json!({"type":"integer","minimum":0});required.push("expectedRevision");}
+        if name=="print_resume_pipeline" {properties["approvalId"]=json!({"type":"string","format":"uuid"});}
+        if name=="print_validate_ticket" {properties["ticket"]=json!({"type":"object","description":"Versioned JobTicket; deeply validated by Print API / Print APIで検証 / 由Print API验证"});required.push("ticket");}
+        if control || name=="print_preview_delivery" {properties["expectedRevision"]=json!({"type":"integer","minimum":0});required.push("expectedRevision");}
+        if matches!(name,"rip_retry_job"|"print_deliver_job"|"print_preview_delivery") {properties["requestId"]=json!({"type":"string","format":"uuid"});required.push("requestId");}
         if matches!(name,"print_create_preflight"|"print_resolve_intent") {properties["intent"]=json!({"type":"object","description":"ACX PrintIntent; validated by Print API / Print APIで検証 / 由Print API验证"});required.push("intent");}
         if name=="print_get_printer" {properties["printerId"]=json!({"type":"string","minLength":1});required.push("printerId");}
-        if matches!(name,"print_get_delivery"|"print_cancel_delivery") {
+        if name=="print_get_capabilities" {properties["printerId"]=json!({"type":"string","minLength":1,"maxLength":128,"pattern":"^[A-Za-z0-9_-]+$"});}
+        if matches!(name,"print_get_delivery"|"print_cancel_delivery"|"print_get_delivery_ticket") {
             properties["deliveryId"]=json!({"type":"string","format":"uuid"});required.push("deliveryId");
         }
-        if name=="print_deliver_job" {
+        if matches!(name,"print_deliver_job"|"print_preview_delivery") {
+            properties["expectedTicketSha256"]=json!({"type":"string","format":"sha256","pattern":"^[0-9a-f]{64}$"});
             properties["approvalId"]=json!({"type":"string","format":"uuid"});
             properties["colorAttemptId"]=json!({"type":"string","format":"uuid"});
             for key in ["printerId","media"] {properties[key]=json!({"type":"string","minLength":1});required.push(key);}
@@ -552,17 +723,21 @@ fn tools() -> Vec<Value> {
         if matches!(name,"color_get_attempt"|"color_get_events"|"color_cancel_attempt") {properties["colorAttemptId"]=json!({"type":"string","format":"uuid"});required.push("colorAttemptId");}
         if name=="color_cancel_attempt" {properties["expectedRevision"]=json!({"type":"integer","minimum":0});required.push("expectedRevision");}
         if name=="color_get_profile" {properties["profileSha256"]=json!({"type":"string","format":"sha256","pattern":"^[0-9a-f]{64}$"});required.push("profileSha256");}
-        if name=="rip_submit" {
+        if name=="print_submit_pipeline" {
+            properties["sourceName"]=json!({"type":"string","minLength":1});required.push("sourceName");
+            for key in ["manifest","pipeline"] {properties[key]=json!({"type":"object","description":"Validated by Print API / Print APIで検証 / 由Print API验证"});required.push(key);}
+        }
+        if matches!(name,"rip_submit"|"print_commit_pipeline") {
             for (key,format) in [("preflightId","uuid"),("preflightDigest",""),("sourceName","")] {
                 properties[key]=json!({"type":"string","minLength":1});if format=="uuid" {properties[key]["format"]=json!(format);}required.push(key);
             }
         }
-        if matches!(name,"rip_list_jobs"|"rip_get_events"|"color_get_events") {
+        if matches!(name,"print_get_pipeline_timeline"|"print_get_pipeline_events"|"rip_list_jobs"|"rip_get_events"|"color_get_events") {
             properties["limit"]=json!({"type":"integer","minimum":1,"maximum":100,"default":50});
             properties[if name=="rip_list_jobs" {"offset"}else{"after"}]=json!({"type":"integer","minimum":0,"default":0});
         }
-        let modifying=control||matches!(name,"print_create_preflight"|"print_resolve_intent"|"rip_submit"|"color_apply"|"color_cancel_attempt");
-        json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false},"annotations":{"readOnlyHint":!modifying,"destructiveHint":control||name=="color_cancel_attempt","idempotentHint":matches!(name,"rip_submit"|"rip_retry_job"|"print_deliver_job"|"color_apply")||!modifying,"openWorldHint":false}})
+        let modifying=control||matches!(name,"print_create_pipeline_preflight"|"print_commit_pipeline"|"print_submit_pipeline"|"print_create_pipeline"|"print_resume_pipeline"|"print_cancel_pipeline"|"print_create_preflight"|"print_resolve_intent"|"rip_submit"|"color_apply"|"color_cancel_attempt");
+        json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false},"annotations":{"readOnlyHint":!modifying,"destructiveHint":control||matches!(name,"color_cancel_attempt"|"print_cancel_pipeline"),"idempotentHint":matches!(name,"print_commit_pipeline"|"print_submit_pipeline"|"print_create_pipeline"|"rip_submit"|"rip_retry_job"|"print_deliver_job"|"color_apply")||!modifying,"openWorldHint":false}})
     }).collect()
 }
 fn validate(name: &str, args: &Value) -> Result<(), &'static str> {
@@ -635,10 +810,34 @@ fn tool_path(name: &str, args: &Value) -> String {
             args["profileSha256"].as_str().unwrap()
         ),
         "rip_get_capabilities" => "/.well-known/acx.json".into(),
+        "print_get_capabilities" => args["printerId"]
+            .as_str()
+            .map(|id| format!("/api/v1/print/capabilities?printerId={id}"))
+            .unwrap_or_else(|| "/api/v1/print/capabilities".into()),
+        "print_get_job_ticket" => format!("/api/v1/jobs/{id}/ticket"),
         "print_list_printers" => "/api/v1/printers".into(),
         "print_get_printer" => format!("/api/v1/printers/{}", args["printerId"].as_str().unwrap()),
         "print_get_delivery" => format!(
             "/api/v1/deliveries/{}",
+            args["deliveryId"].as_str().unwrap()
+        ),
+        "print_get_pipeline_timeline" => format!(
+            "/api/v1/pipelines/{}/timeline?after={}&limit={}",
+            args["pipelineId"].as_str().unwrap(),
+            args["after"].as_i64().unwrap_or(0),
+            args["limit"].as_i64().unwrap_or(50)
+        ),
+        "print_get_pipeline_events" => format!(
+            "/api/v1/pipelines/{}/events?after={}&limit={}",
+            args["pipelineId"].as_str().unwrap(),
+            args["after"].as_i64().unwrap_or(0),
+            args["limit"].as_i64().unwrap_or(50)
+        ),
+        "print_get_pipeline" => {
+            format!("/api/v1/pipelines/{}", args["pipelineId"].as_str().unwrap())
+        }
+        "print_get_delivery_ticket" => format!(
+            "/api/v1/deliveries/{}/ticket",
             args["deliveryId"].as_str().unwrap()
         ),
         "rip_list_jobs" => format!(

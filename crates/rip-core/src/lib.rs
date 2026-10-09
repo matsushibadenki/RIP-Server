@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+pub mod print;
 
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
@@ -105,7 +106,7 @@ impl EnginePreference {
         }
     }
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub name: String,

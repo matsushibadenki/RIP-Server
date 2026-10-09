@@ -3,6 +3,8 @@ pub mod audit;
 pub mod color;
 pub mod delivery;
 pub mod maintenance;
+pub mod pipeline;
+pub mod unified;
 use rip_core::{Artifact, Job, JobState};
 use sha2::{Digest, Sha256};
 use sqlx::{
@@ -75,6 +77,26 @@ impl Repository {
         sqlx::query("CREATE TABLE IF NOT EXISTS color_cleanup(attempt_id TEXT PRIMARY KEY)")
             .execute(&pool)
             .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS job_tickets(job_id TEXT PRIMARY KEY,payload TEXT NOT NULL)",
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS delivery_contracts(delivery_id TEXT PRIMARY KEY,payload TEXT NOT NULL)").execute(&pool).await?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS document_inspections(id TEXT PRIMARY KEY,actor TEXT NOT NULL,payload TEXT NOT NULL)").execute(&pool).await?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS print_pipelines(id TEXT PRIMARY KEY,source_job TEXT NOT NULL,ticket TEXT NOT NULL,payload TEXT NOT NULL,state TEXT NOT NULL,revision INTEGER NOT NULL,created_at INTEGER NOT NULL)").execute(&pool).await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS pipeline_source ON print_pipelines(source_job,state)",
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS pipeline_order ON print_pipelines(created_at,id)")
+            .execute(&pool)
+            .await?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS pipeline_events(sequence INTEGER PRIMARY KEY AUTOINCREMENT,pipeline_id TEXT NOT NULL,payload TEXT NOT NULL)").execute(&pool).await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS pipeline_event_cursor ON pipeline_events(pipeline_id,sequence)").execute(&pool).await?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS delivery_event_details(sequence INTEGER PRIMARY KEY,payload TEXT NOT NULL)").execute(&pool).await?;
+        unified::install(&pool).await?;
         Ok(Self { pool })
     }
     pub async fn events(
@@ -113,6 +135,34 @@ impl Repository {
             events.push(event);
         }
         Ok(serde_json::json!({"jobId":id,"events":events,"nextCursor":cursor,"hasMore":has_more}))
+    }
+    pub async fn save_document_inspection(
+        &self,
+        id: Uuid,
+        actor: &str,
+        payload: &serde_json::Value,
+    ) -> Result<(), StorageError> {
+        sqlx::query("INSERT INTO document_inspections(id,actor,payload) VALUES(?,?,?)")
+            .bind(id.to_string())
+            .bind(actor)
+            .bind(serde_json::to_string(payload)?)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+    pub async fn document_inspection(
+        &self,
+        id: Uuid,
+        actor: &str,
+    ) -> Result<serde_json::Value, StorageError> {
+        let value: String =
+            sqlx::query_scalar("SELECT payload FROM document_inspections WHERE id=? AND actor=?")
+                .bind(id.to_string())
+                .bind(actor)
+                .fetch_optional(&self.pool)
+                .await?
+                .ok_or(StorageError::NotFound)?;
+        Ok(serde_json::from_str(&value)?)
     }
     pub async fn save_preflight(
         &self,
@@ -190,6 +240,47 @@ impl Repository {
         job: &Job,
         preflight: Option<Uuid>,
     ) -> Result<(), StorageError> {
+        self.insert_with_ticket(job, preflight, None).await
+    }
+    pub async fn job_ticket(&self, id: Uuid) -> Result<rip_core::print::JobTicket, StorageError> {
+        let payload: String = sqlx::query_scalar("SELECT payload FROM job_tickets WHERE job_id=?")
+            .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or(StorageError::NotFound)?;
+        Ok(serde_json::from_str(&payload)?)
+    }
+    pub async fn insert_with_ticket(
+        &self,
+        job: &Job,
+        preflight: Option<Uuid>,
+        ticket: Option<&rip_core::print::JobTicket>,
+    ) -> Result<(), StorageError> {
+        self.insert_with_pipeline(job, preflight, ticket, None)
+            .await
+    }
+    pub async fn insert_with_pipeline(
+        &self,
+        job: &Job,
+        preflight: Option<Uuid>,
+        ticket: Option<&rip_core::print::JobTicket>,
+        pipeline: Option<(Uuid, serde_json::Value)>,
+    ) -> Result<(), StorageError> {
+        if pipeline.is_some() && ticket.is_none() {
+            return Err(StorageError::Conflict);
+        }
+        if let Some(ticket) = ticket {
+            ticket
+                .validate_raster()
+                .map_err(|_| StorageError::Conflict)?;
+            if ticket.job_id != Some(job.id)
+                || ticket.document.sha256 != job.source_sha256
+                || ticket.manifest != job.manifest
+                || !ticket.document.integrity_verified
+            {
+                return Err(StorageError::Conflict);
+            }
+        }
         let mut tx = self.pool.begin().await?;
         if let Some(id) = preflight {
             let result = sqlx::query("INSERT OR IGNORE INTO print_commits(preflight_id,job_id) SELECT id,? FROM print_preflights WHERE id=? AND expires_at>?")
@@ -206,7 +297,17 @@ impl Repository {
             .bind(job.revision)
             .execute(&mut *tx)
             .await?;
+        if let Some(ticket) = ticket {
+            sqlx::query("INSERT INTO job_tickets(job_id,payload) VALUES(?,?)")
+                .bind(job.id.to_string())
+                .bind(serde_json::to_string(ticket)?)
+                .execute(&mut *tx)
+                .await?;
+        }
         store_job_event(&mut tx, job).await?;
+        if let Some((id, ticket)) = pipeline {
+            pipeline::insert_new(&mut tx, id, job, ticket).await?;
+        }
         if let Some(id) = preflight {
             let row = sqlx::query("SELECT payload, strftime('%Y-%m-%dT%H:%M:%SZ', ?, 'unixepoch') AS issued_at FROM print_preflights WHERE id=?")
                 .bind(job.created_at).bind(id.to_string()).fetch_one(&mut *tx).await?;
@@ -216,12 +317,14 @@ impl Repository {
                 "capability":pf["capability"], "provider":"urn:acx:provider:jrip-local",
                 "status":"accepted", "issuedAt":row.get::<String,_>("issued_at"),
                 "requestHash":pf["requestHash"],
-                "effects":["job-queued","source-stored"],
+                "effects":if pf["profile"] == "org.jrip.pipeline-preflight-v1" {serde_json::json!(["job-queued","source-stored","workflow-queued"])} else {serde_json::json!(["job-queued","source-stored"])},
                 "recovery":{"reversible":false,"cancelUntil":"terminal","note":"Cancellation can discard output; consumed compute cannot be undone."},
                 "proof":{"type":"plain-provider-record","profile":"org.jrip.acceptance-receipt-v1",
                     "jobId":job.id,"preflightId":id,"preflightDigest":pf["preflightDigest"],
                     "sourceSha256":job.source_sha256,"completionMeaning":"raster_export",
-                    "authorization":"shared-bearer","signed":false}
+                    "authorization":"shared-bearer","signed":false,
+                    "workflowId":pf["workflowRequest"]["requestId"],
+                    "workflowCompletionMeaning":if pf["profile"] == "org.jrip.pipeline-preflight-v1" {Some("device-confirmed")}else{None}}
             });
             sqlx::query("INSERT INTO print_receipts(job_id,payload) VALUES(?,?)")
                 .bind(job.id.to_string())
@@ -468,7 +571,7 @@ impl Repository {
         if !job.state.terminal() {
             return Err(StorageError::Conflict);
         }
-        let result = sqlx::query("DELETE FROM jobs WHERE id=? AND revision=? AND NOT EXISTS(SELECT 1 FROM color_attempts c WHERE c.source_job=jobs.id AND (c.state IN ('QUEUED','RUNNING') OR EXISTS(SELECT 1 FROM color_cleanup cc WHERE cc.attempt_id=c.id)))")
+        let result = sqlx::query("DELETE FROM jobs WHERE id=? AND revision=? AND NOT EXISTS(SELECT 1 FROM print_pipelines p WHERE p.source_job=jobs.id AND p.state NOT IN ('COMPLETED','FAILED','CANCELLED')) AND NOT EXISTS(SELECT 1 FROM color_attempts c WHERE c.source_job=jobs.id AND (c.state IN ('QUEUED','RUNNING') OR EXISTS(SELECT 1 FROM color_cleanup cc WHERE cc.attempt_id=c.id)))")
             .bind(job.id.to_string())
             .bind(job.revision)
             .execute(&self.pool)

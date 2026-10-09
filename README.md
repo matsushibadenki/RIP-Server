@@ -281,3 +281,5 @@ Mac native CUPS validation now includes the dedicated [PDF passthrough PPD](adap
 - [Agent control](docs/AGENT-CONTROL.md): durable audit, stage metadata, scoped MCP resources, physical-delivery approval and live printer capabilities / 永続監査・工程履歴・MCP権限・印刷承認・実機能力 / 持久化审计、阶段记录、MCP权限、打印审批及实时能力。
 - [Maintenance](docs/MAINTENANCE.md): opt-in retention, resumable cleanup and shared snapshot budget / 明示的な保持期限・再開可能な清掃・共有予算 / 显式保留期限、可恢复清理及共享预算。
 - [Color processing](docs/COLOR-MANAGEMENT.md): LittleCMS conversion, immutable ICC registry, isolated worker, color API/MCP and profile-bound delivery / ICC変換・隔離Worker・API／MCP・profile照合送信 / ICC转换、隔离Worker、API／MCP及profile匹配投递。
+
+PrintIntent事前確認・原稿一括受付・RIP待機・ICC処理・承認・実機送信は [PIPELINE.md](docs/PIPELINE.md) を参照。 / See the guide for physical PrintIntent preflight, atomic source acceptance, RIP, ICC and device delivery. / 实体PrintIntent预检、源文档原子接收、RIP、ICC及设备投递请参阅流程指南。

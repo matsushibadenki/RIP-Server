@@ -68,7 +68,7 @@ pub(crate) struct SnapshotBudget {
 }
 // 64 OS-locked 16 MiB slots bound all processes sharing the same data root.
 // Closing handles (including process exit) releases reservations without stale counters.
-fn reserve_shared(root: &std::path::Path, bytes: u64) -> io::Result<Vec<std::fs::File>> {
+pub fn reserve_shared(root: &std::path::Path, bytes: u64) -> io::Result<Vec<std::fs::File>> {
     let directory = std::fs::canonicalize(root)?.join("artifact-budget");
     std::fs::create_dir_all(&directory)?;
     if std::fs::canonicalize(&directory)? != directory {

@@ -1256,7 +1256,10 @@ name = "rip-core"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
+ "sha2",
  "thiserror",
+ "url",
  "uuid",
 ]
 
@@ -1265,6 +1268,7 @@ name = "rip-interpreter"
 version = "0.1.0"
 dependencies = [
  "rip-core",
+ "serde_json",
  "tar",
  "tempfile",
  "thiserror",
