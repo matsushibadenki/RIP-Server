@@ -1153,3 +1153,71 @@ async fn audit_is_durable_redacted_and_requires_admin() {
     let rows = reopened.audit_records(pending - 1, 1).await.unwrap();
     assert!(rows["records"][0]["finishedAt"].is_null());
 }
+
+#[tokio::test]
+async fn preflight_digest_versions_survive_restart_and_commit_uses_stored_profile() {
+    use sha2::{Digest, Sha256};
+    for legacy in [false, true] {
+        let (dir, api) = app().await;
+        let document = "%!PS-Adobe-3.0\nshowpage\n";
+        let intent = serde_json::json!({"document":{"uri":"https://example.org/proof.ps","mediaType":"application/postscript","sha256":format!("{:x}",Sha256::digest(document))},"copies":{"mode":"required","value":1},"output":{"destination":"artifact"}});
+        let mut request = Request::post("/api/v1/print/preflights")
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .header("content-type", "application/json");
+        if legacy {
+            request = request.header("x-jrip-digest-profile", "org.jrip.serde-json-v1");
+        }
+        let response = api
+            .oneshot(request.body(Body::from(intent.to_string())).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let pf: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(
+            pf["profile"],
+            if legacy {
+                "org.jrip.settings-preflight-v1"
+            } else {
+                "org.jrip.settings-preflight-v2"
+            }
+        );
+        let expected = if legacy {
+            "org.jrip.serde-json-v1"
+        } else {
+            "org.jrip.jcs-safe-v1"
+        };
+        assert_eq!(pf["digestProfile"], expected);
+        let mut unsigned = pf.clone();
+        unsigned.as_object_mut().unwrap().remove("preflightDigest");
+        let computed = if legacy {
+            format!(
+                "sha256:{:x}",
+                Sha256::digest(serde_json::to_vec(&unsigned).unwrap())
+            )
+        } else {
+            rip_digest::digest(&unsigned).unwrap()
+        };
+        assert_eq!(pf["preflightDigest"], computed);
+        let reopened = jrip_server::open(dir.path().into(), TOKEN.into())
+            .await
+            .unwrap();
+        let response=jrip_server::router(reopened.clone()).oneshot(Request::post(format!("/api/v1/print/preflights/{}/commit",pf["preflightId"].as_str().unwrap())).header("authorization",format!("Bearer {TOKEN}")).header("x-jrip-preflight-digest",&computed)
+            .header("x-jrip-digest-profile",if legacy{"org.jrip.jcs-safe-v1"}else{"org.jrip.serde-json-v1"})
+            .header("content-type","multipart/form-data; boundary=bound").body(Body::from(format!("--bound\r\nContent-Disposition: form-data; name=\"document\"\r\n\r\n{document}\r\n--bound--\r\n"))).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let result: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        let receipt = reopened
+            .repo
+            .get_print_receipt(
+                uuid::Uuid::parse_str(result["job"]["id"].as_str().unwrap()).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(receipt["proof"]["requestHashDigestProfile"], expected);
+        assert_eq!(receipt["proof"]["preflightDigestProfile"], expected);
+    }
+}

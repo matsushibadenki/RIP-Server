@@ -16,7 +16,9 @@ The CLI caps input at 1 MiB. The Node scripts are independent conformance checks
 
 New Receipt signatures use `org.jrip.receipt-ed25519-v2` and `signature.digestProfile:org.jrip.jcs-safe-v1`. Their message is the UTF-8 signature profile, one zero byte, and canonical bytes of the whole receipt after removing only signature.value. Legacy v1 signatures still verify using their original serde_json representation and domain. Stored receipts are never rewritten. Existing requestHash/resultHash fields remain governed by their existing proof digestProfile; the v2 signature canonicalizes the complete receipt, including those legacy hashes.
 
-`GET /api/v1/pipelines/{id}/ticket` and existing MCP `print_get_pipeline_ticket` add `portableDigest:{profile,sha256,available}` for the same immutable `ticket` object. Unsupported canonical input yields available:false and CANONICAL_INPUT_UNSUPPORTED; the original ticketSha256 stays unchanged. Execution state is excluded from both ticket hashes. Existing preflight authorization digests, storage identities and raw-file hashes retain their prior contracts. Migrating those protocols requires separate version negotiation; they must not silently change hashing rules.
+`GET /api/v1/pipelines/{id}/ticket` and existing MCP `print_get_pipeline_ticket` add `portableDigest:{profile,sha256,available}` for the same immutable `ticket` object. Unsupported canonical input yields available:false and CANONICAL_INPUT_UNSUPPORTED; the original ticketSha256 stays unchanged. Execution state is excluded from both ticket hashes. Storage identities and raw-file hashes retain their prior contracts.
+
+New settings and physical pipeline preflights default to `org.jrip.settings-preflight-v2` / `org.jrip.pipeline-preflight-v2`, paired with `digestProfile:org.jrip.jcs-safe-v1`. Both requestHash and preflightDigest use that selected profile; preflightDigest excludes only its own field. Creation accepts `X-JRIP-Digest-Profile: org.jrip.serde-json-v1` to explicitly select legacy v1, or the JCS profile to select v2. Unknown or repeated headers are rejected. MCP `print_create_preflight` and `print_create_pipeline_preflight` expose the optional `digestProfile` enum. Commit uses the persisted profile, rejects mismatched profile pairs, and never renegotiates from a commit header. Persisted v1 records remain usable without rewriting. Acceptance proofs record requestHashDigestProfile and preflightDigestProfile separately; raster resultHash retains its existing proof digestProfile.
 
 ## 日本語
 
@@ -24,7 +26,7 @@ New Receipt signatures use `org.jrip.receipt-ed25519-v2` and `signature.digestPr
 
 Rust共通crateとCLIを追加しました。厳密parserは重複キー・不正Unicode・非JSON数値を拒否します。他のparserで失われた重複情報は復元できません。新しいReceipt署名はv2とJCSを使い、過去のv1署名も元の規則で検証します。Receipt本体の既存requestHash/resultHashは、それぞれの既存profileを保持します。
 
-共通ticketのAPI/MCPには `portableDigest` を追加します。元のhash・事前承認digest・ファイルhashは変更しません。Rust/JavaScriptのhash一致とNodeによる署名・改ざん検出を検証します。参照Nodeスクリプトは適正なfixture向けの相互運用確認用であり、本番の厳密JSON parserや失効検証の代わりにはなりません。
+共通ticketのAPI/MCPには `portableDigest` を追加します。元のticket hash・ファイルhashは変更しません。新規preflightはsettings/pipelineのv2とJCSを既定とし、作成時の `X-JRIP-Digest-Profile` またはMCPの `digestProfile` で旧serde-json-v1を選択できます。requestHashとpreflightDigestは選択した方式で計算します。commitは保存済みprofileを使い、不正な組み合わせを拒否します。保存済みv1は書き換えず利用できます。受付Receiptは各hashの方式を個別に記録します。Rust/JavaScriptのhash一致とNodeによる署名・改ざん検出を検証します。参照Nodeスクリプトは適正なfixture向けの相互運用確認用であり、本番の厳密JSON parserや失効検証の代わりにはなりません。
 
 ## 简体中文
 
@@ -32,4 +34,4 @@ Rust共通crateとCLIを追加しました。厳密parserは重複キー・不�
 
 增加共享Rust crate与CLI。严格parser拒绝重复键、无效Unicode及非JSON数字；不能恢复其他parser已丢弃的重复信息。新回执签名采用v2及JCS，历史v1仍按原规则验证。回执原有requestHash/resultHash继续使用各自旧profile。
 
-统一ticket API/MCP增加portableDigest，原hash、预检授权digest及文件hash不变。验证Rust/JavaScript摘要一致性及Node签名/篡改检测。Node参考脚本仅用于有效fixture的互操作检查，不代替生产严格JSON parser或撤销验证。
+统一ticket API/MCP增加portableDigest，原ticket hash及文件hash不变。新预检默认采用settings/pipeline v2及JCS；创建时可通过 `X-JRIP-Digest-Profile` 或MCP的 `digestProfile` 选择旧serde-json-v1。requestHash和preflightDigest均采用所选规则。提交按已保存的profile验证并拒绝不匹配组合，旧v1记录无需重写。接收回执分别记录各摘要规则。验证Rust/JavaScript摘要一致性及Node签名/篡改检测。Node参考脚本仅用于有效fixture的互操作检查，不代替生产严格JSON parser或撤销验证。

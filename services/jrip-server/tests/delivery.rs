@@ -1807,3 +1807,49 @@ async fn source_inspection_is_owner_hash_and_media_bound() {
     assert_eq!(fake.prints.load(Ordering::SeqCst), 0);
     task.abort();
 }
+
+#[tokio::test]
+async fn legacy_physical_preflight_keeps_its_digest_and_workflow_effects() {
+    let (_dir, app, _, fake, task) = fixture(false).await;
+    let document = "%PDF-1.7\nsource";
+    let req = serde_json::json!({"requestId":Uuid::new_v4(),"intent":physical_intent(document)});
+    let response = jrip_server::router(app.clone())
+        .oneshot(
+            Request::post("/api/v1/print/pipeline-preflights")
+                .header("authorization", "Bearer token")
+                .header("x-jrip-digest-profile", "org.jrip.serde-json-v1")
+                .header("content-type", "application/json")
+                .body(Body::from(req.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let pf: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(pf["profile"], "org.jrip.pipeline-preflight-v1");
+    let committed = commit_physical(&app, &pf, document, false).await;
+    assert_eq!(committed.0, StatusCode::CREATED);
+    let receipt = app
+        .repo
+        .get_print_receipt(Uuid::parse_str(committed.1["jobId"].as_str().unwrap()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        receipt["proof"]["preflightDigestProfile"],
+        "org.jrip.serde-json-v1"
+    );
+    assert_eq!(
+        receipt["proof"]["workflowCompletionMeaning"],
+        "device-confirmed"
+    );
+    assert!(
+        receipt["effects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == "workflow-queued")
+    );
+    assert_eq!(fake.prints.load(Ordering::SeqCst), 0);
+    task.abort();
+}

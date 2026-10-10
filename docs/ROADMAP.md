@@ -90,7 +90,9 @@
 - 🟢 [Done] 管理者API/MCPで署名鍵を恒久失効、成功監査と原子保存、同理由の再送、実行中writerの保存時確認。失効鍵の受付は拒否し、終端結果は署名不能を明示して保存。現在状態を確認する検証CLIも追加。 / Durable key revocation / 持久密钥撤销。
 - 🟢 [Done] 配送の完了・取消・中止・拒否を状態／イベントと同じトランザクションでReceipt保存。実機job-id、配送／実機契約、ラスター結果hashと署名を結び付け、jobs:read限定のAPI/MCPで取得。UNKNOWN／受付済みは完了と扱わない。 / Atomic delivery result receipts / 原子投递结果回执。
 - 🟢 [Done] 制限付きRFC 8785共通digest crate／厳密parser／CLI、JCS署名v2と旧v1検証、共通ticketの追加portableDigest。既存hashを変更せずRust／Nodeで相互検証。[CANONICAL-DIGEST.md](CANONICAL-DIGEST.md)。 / Portable bounded JCS digest / 可移植有界JCS摘要。
-- 🟠 [Next] KMS、事前承認digestのversion移行、監査証跡のarchive。
+- 🟢 [Done] 事前承認digestのversion移行：新規settings／pipeline preflightはJCS v2、明示指定で旧v1、保存済みprofileによるcommit検証。再起動後の互換性と旧物理workflow受付を検証。 / Versioned preflight digest negotiation and persisted-profile verification / 版本化预检摘要协商与持久化profile验证。
+- 🟢 [Done] 監査archiveの不変DB snapshot・JCS digest・ローカルCLI出力／復旧／独立digest検証。未完了記録を飛ばさず元記録を保持。 [AUDIT-ARCHIVE.md](AUDIT-ARCHIVE.md)。 / Immutable bounded audit archives and local export verification / 不可变有界审计归档及本地导出验证。
+- 🟠 [Next] KMS、監査archiveの外部保管・署名・保持期限。
 
 - 🟢 [Done] preflight digest、原稿SHA-256、形式、有効期限を検証するmultipart commit APIを実装。保存済みticketからジョブを登録し、SQLiteトランザクションで同一preflightの同時再送を重複排除する。共通Bearerトークンによる認可を使用。
 - 🟠 [Next] 主体別scope・認可証跡、原稿構造全体の検証、Receipt、期限切れpreflightと孤立ファイルの清掃を追加する。
