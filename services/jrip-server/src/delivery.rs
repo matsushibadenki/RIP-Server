@@ -700,3 +700,12 @@ pub async fn tick(app: &App) -> Result<(), StorageError> {
     }
     Ok(())
 }
+
+pub(crate) async fn result_receipt(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    authorize(&app, &headers, "jobs:read")?;
+    Ok(Json(app.repo.delivery_result_receipt(id).await?))
+}

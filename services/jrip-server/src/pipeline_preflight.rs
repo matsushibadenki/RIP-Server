@@ -352,6 +352,7 @@ pub async fn commit(
     let job_id = Uuid::new_v4();
     let directory = app.root.join("jobs").join(job_id.to_string());
     tokio::fs::create_dir(&directory).await.map_err(internal)?;
+    let _writer = rip_jobs::upload_guard(&directory).map_err(internal)?;
     let result = async {
         preflight::stage_document(&directory, &mut multipart).await?;
         let manifest =

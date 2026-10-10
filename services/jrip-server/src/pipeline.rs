@@ -130,6 +130,14 @@ pub(crate) async fn detail(
     authorize(&app, &headers, "jobs:read")?;
     Ok(Json(app.repo.pipeline(id).await?))
 }
+pub(crate) async fn ticket(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    authorize(&app, &headers, "jobs:read")?;
+    Ok(Json(app.repo.pipeline_ticket(id).await?))
+}
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Resume {

@@ -1,0 +1,47 @@
+# Remote MCP / リモートMCP / 远程MCP
+
+## 日本語
+
+`jrip-mcp-http` はMCP 2025-11-25 Streamable HTTPを単一 `/mcp` エンドポイントで提供する。従来の `cargo run --locked -p jrip-mcp` はstdioのまま利用できる。
+
+```sh
+cargo run --locked -p jrip-mcp --bin jrip-mcp-http
+```
+
+Print APIと同じ `JRIP_DATA_ROOT`、24文字以上の `JRIP_API_TOKEN`、任意の `JRIP_AUTH_POLICY` を設定する。`JRIP_MCP_LISTEN` は既定 `127.0.0.1:8091`。外部接続にはHTTPSリバースプロキシを使用し、Bearer・MCPヘッダーを維持してSSEをバッファしない。`JRIP_MCP_ALLOWED_ORIGINS` は許可するOriginの完全一致リスト（カンマ区切り）。既定は空で、Originヘッダー付き要求は拒否する。ヘッダーのない認証済みネイティブクライアントは利用できる。自動CORS対応は提供しない。
+
+1. `POST /mcp` にinitialize JSON-RPCを送る。Authorization: Bearer、Content-Type:application/json、Accept:application/json,text/event-streamが必要。応答JSONと `MCP-Session-Id` を保存する。
+2. 同じBearer・session ID、`MCP-Protocol-Version:2025-11-25` でnotifications/initializedをPOSTし、202・空bodyを確認する。
+3. tools/list、tools/call、resources/read/subscribe/unsubscribeをPOSTする。要求にはJSONで応答し、受理した通知には202で応答する。複数メッセージの配列やJSON-RPC response入力は受け付けない。後続のprotocolヘッダー省略時も保存済みの2025-11-25セッションを使用する。
+4. 同じBearer・session ID・protocolヘッダーとAccept:text/event-streamで `GET /mcp` を開く。`message` イベントのdataに標準JSON-RPC更新通知が届く。最初の空data/retryはJSONとして処理しない。
+5. `DELETE /mcp` でセッションを終了する（204）。これは投入済み印刷や検査を取り消さない。取消にはそれぞれのMCP操作を明示的に使う。
+
+セッションは作成時のBearerトークンに固定され、別の認証済みトークンでも共有できない。作成から900秒で失効し、プロセス再起動後も404となる。404時は再初期化して購読を再登録する。セッションIDがない後続要求は400、認証失敗は401、scope不足や不正Originは403。作成時のscopeによりツールが絞られ、実行時にもPrint APIが権限を検査する。MCP操作監査はstdioと同じ永続監査を使う。認証設定の反映は再起動時。
+
+接続セッションは同一プロセスで64件まで（超過503）、通知ストリームは1セッション1本（追加GETは409）、購読は32件まで、POST本文は64 KiBまで。通知は約1秒ごとの内部確認で、15秒ごとのkeep-aliveコメントも返す。切断は操作の取消にならず、同じセッションでGETを再開できる。GET再接続時に既存履歴の更新ヒントを再通知するため、クライアントは重複ヒントを許容する。
+
+通知SSEにはevent IDを付けず、Last-Event-IDによる通知再配送は提供しない（指定時400）。イベント本体のsequence/nextAfter/nextCursorをクライアントが保存し、通知後や再接続時に履歴toolから差分取得する。これにより通知の欠落や重複を印刷の再実行として扱わない。通知配送は厳密な一度だけの保証ではない。
+
+remoteセッションはサーバーのfilesystem inboxを持たず、`JRIP_INPUT_ROOT` も適用しない。原稿は認証済みPrint APIで投入してからjob IDを参照する。任意のサーバーパスやURLの取得権限は付与しない。原稿inboxを使うstdioツールとは公開範囲が異なる。OAuth discovery・動的クライアント登録・一般的なOAuthログイン・旧HTTP+SSE transportは未実装。現在は設定済みBearerトークンを渡せるクライアント向けのtransport。
+
+## English
+
+Run `cargo run --locked -p jrip-mcp --bin jrip-mcp-http` for a single `/mcp` Streamable HTTP endpoint. The default executable remains stdio. Use the Print API data root and authorization policy. The listener defaults to 127.0.0.1:8091; configure JRIP_MCP_LISTEN explicitly and use an HTTPS reverse proxy for external clients. Preserve Bearer/MCP headers and disable SSE buffering. Present Origin headers must exactly match the comma-separated JRIP_MCP_ALLOWED_ORIGINS allowlist, which is empty by default. Automatic CORS is not provided.
+
+POST one JSON-RPC message with JSON content type and Accept listing both application/json and text/event-stream. Initialize first, retain MCP-Session-Id, then POST notifications/initialized. Subsequent requests use the same Bearer token, session ID and MCP-Protocol-Version:2025-11-25. Requests return JSON, accepted notifications return empty 202 responses. Open GET with Accept:text/event-stream for standard JSON-RPC notifications in message events; ignore initial empty data/retry. DELETE returns 204 and terminates transport state without cancelling accepted print work.
+
+Sessions are bound to the creating token, expire after 900 seconds, and are lost on restart. Reinitialize and restore subscriptions after 404. Missing session IDs return 400. Unknown tokens return 401; invalid Origins and denied scopes are rejected. Tool access and durable audit reuse existing MCP/Print API policy. Sessions share a 64-process limit, each session has one GET stream (additional GET returns 409), subscriptions are capped at 32 and POST bodies at 64 KiB. Keep-alive comments occur every 15 seconds; notification polling is internal every second. Disconnect releases the stream but leaves the session available until expiry.
+
+Reconnect GET reannounces existing history hints. Notification streams have no event IDs or Last-Event-ID replay (that header returns 400). Persist durable history cursors and fetch deltas through tools after reconnect and notifications; hints may repeat and are not exactly-once delivery. Remote sessions receive no filesystem inbox, even when JRIP_INPUT_ROOT is set. Submit documents through the authenticated Print API and reference job IDs. OAuth discovery/login, dynamic client registration, automatic CORS and the legacy HTTP+SSE transport are not implemented; clients must support configured Bearer tokens.
+
+## 简体中文
+
+运行 `cargo run --locked -p jrip-mcp --bin jrip-mcp-http`，在单一 `/mcp` 提供Streamable HTTP；默认可执行程序仍使用stdio。沿用Print API的数据目录和授权配置。默认监听127.0.0.1:8091，可通过JRIP_MCP_LISTEN配置；外部连接使用HTTPS反向代理，保留Bearer/MCP头并关闭SSE缓冲。Origin头必须完全匹配JRIP_MCP_ALLOWED_ORIGINS逗号分隔列表；默认空列表。不会自动提供CORS。
+
+POST一次一个JSON-RPC消息，使用JSON内容类型，Accept同时列出application/json和text/event-stream。先initialize并保存MCP-Session-Id，再POST notifications/initialized。后续请求携带相同Bearer、session ID和MCP-Protocol-Version:2025-11-25。请求返回JSON，接受的通知返回202空body。GET使用Accept:text/event-stream接收message事件中的标准JSON-RPC通知；忽略初始空data/retry。DELETE返回204，结束传输会话但不取消已接受的打印任务。
+
+会话绑定创建时的token，900秒后过期，重启后丢失；404时重新初始化并注册订阅。后续请求缺少session ID返回400，无效token返回401，不合法Origin或权限不足会拒绝。沿用MCP/Print API权限与持久审计。每进程最多64会话，每会话一个GET流（额外GET返回409），最多32订阅，POST上限64 KiB。每15秒keep-alive，每秒内部检查通知。断开会释放流但在到期前保留会话。
+
+重新GET会再次提示已有历史更新；通知可能重复，不保证严格一次配送。不提供通知event ID或Last-Event-ID重放（该头返回400）。客户端保存持久历史cursor，在通知或重连后通过tool增量读取。远程会话没有服务器文件inbox，也不使用JRIP_INPUT_ROOT；通过认证Print API提交原稿后引用job ID。尚未实现OAuth发现/登录、动态客户端注册、自动CORS及旧HTTP+SSE传输；客户端需支持配置的Bearer token。
+
+Reference / 参照 / 参考: [MCP 2025-11-25 Streamable HTTP transport](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports).

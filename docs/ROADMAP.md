@@ -65,8 +65,12 @@
 - 🟢 [Done] RIP・色・delivery・workflowの統合timeline、原子trigger索引、永続sequence差分取得、既存履歴の一度だけの明示的取り込み、MCP照会を実装。 / Unified persistent stage timeline / 统一持久化阶段timeline。
 - 🟢 [Done] 統合timelineのMCP resource・購読・標準更新通知・解除。1秒の内部確認、32購読上限、jobs:read制御、保存cursorによる再接続後の差分取得に対応。 / MCP timeline update notifications / MCP timeline更新通知。
 - 🟢 [Done] 実機向けPrintIntentのlive能力照合、digest・原稿hash・主体・期限を拘束したpreflight、一括commit、RIP待機から実機送信までの接続、MCPを実装。Docker MuPDFと偽IPPデバイスで完了を検証。 / Bound physical preflight and RIP-to-device workflow verified with Docker/fake IPP / 绑定实体预检与RIP到设备流程，已通过Docker与模拟IPP验证。
-- 🟠 [Next] 共通JobTicketへの物理契約統合、原稿検査のHTTP/MCP非同期受付・trusted worker、強制終了時の検査snapshot回収。 / Unified physical JobTicket, asynchronous inspection queue/worker and snapshot recovery / 统一实体JobTicket、异步检查队列/worker及snapshot回收。
-- 🔴 [Later] HTTP SSEとremote MCP transportのpush通知。 / HTTP SSE and remote MCP push / HTTP SSE与remote MCP push。部数・両面・面付け等の表現対応は実行対応と区別する。 / Cross-stage physical negotiation and execution / 跨阶段实体协商及执行。
+- 🟢 [Done] 全工程JobTicket照会をREST/MCPに追加。RIP・登録・色処理・実機契約を単一読取snapshotで統合し、原稿・出力先の一致、契約hashと実行状態の分離、未確定・旧証跡欠落・UNKNOWNを明示。 / Unified pipeline contract reads with bound evidence and separate execution state / 统一流程契约查询，绑定证据并分离运行状态。
+- 🟢 [Done] 検査状態と原子的なイベント保存、所有者限定REST/MCP差分取得、再起動保持、MCP resource購読・更新通知・解除。 / Transactional inspection history and owner-bound MCP notifications / 事务性检查历史与所有者限定MCP通知。
+- 🟢 [Done] 全工程timeline・所有者限定検査履歴のHTTP SSE、Last-Event-ID再開、ページ単位の背圧、接続制限・切断解放・keep-alive。 / Bounded authenticated REST SSE with durable replay / 有界认证REST SSE及持久重放。
+- 🟢 [Done] remote MCP Streamable HTTPのPOST操作・GET通知・DELETE終了、token拘束セッション、Origin検証・期限・容量制限、再接続時の更新ヒント。 / Authenticated stateful remote MCP and notification streams / 认证有状态远程MCP与通知流。詳細：[MCP-HTTP.md](MCP-HTTP.md)。
+- 🔴 [Later] MCP OAuth discovery・認証フローと外部クライアントの相互運用試験。 / MCP OAuth discovery and external client interoperability / MCP OAuth发现与外部客户端互操作测试。
+- 🔴 [Later] 部数・両面・面付け等の実行対応。表現対応とは区別する。 / Execute copies, duplex and imposition settings / 执行份数、双面与拼版设置。
 
 - 🟢 [Done] 認証付きTIFFダウンロードとページ単位の公開後整合性検査を追加。サイズ・SHA-256不一致は409、未登録ページは404。検証済み非公開スナップショットを逐次配信し、検証後の元ファイル変更でも配信内容を固定する。
 - 🟢 [Done] 単一HTTP RangeとETagによるIf-Rangeを実装。一時スナップショットはプロセスごとに合計1 GiBを予約し、配信終了・切断で解放。予算不足は503。
@@ -74,13 +78,19 @@
 
 - 🟢 [Done] ワーカーがTIFFページを逐次hash計算し、ページ順・名前・サイズ・SHA-256を完了状態と同じトランザクションで保存。結果Receiptにも結び付け、認証付き成果物一覧APIを追加。hash計算中もleaseを更新する。
 - 🟢 [Done] dry-run既定の保持期限CLI、終端ジョブと既知の孤立ファイル清掃、処理中／UNKNOWN除外、途中終了後の再開、履歴・Receipt保持。詳細は[MAINTENANCE.md](MAINTENANCE.md)。 / Resumable opt-in retention / 可恢复的可选保留期限清理。
-- 🟠 [Next] 未登録アップロード残骸のwriter-lock連携清掃、分散予算・監査アーカイブの保持期限。
+- 🟢 [Done] 未登録アップロード残骸のwriter-lock連携清掃。REST・IPP・MCP投入/commit/retryを保護し、登録証跡・期限を再確認し、永続journalで中断復旧、dry-runと監査付き適用を追加。 / Writer-locked orphan upload reclamation with durable recovery / writer lock保护的孤立上传回收与持久恢复。
+- 🟠 [Next] 分散予算・監査アーカイブの保持期限。 / Distributed budgets and audit archive retention / 分布式预算及审计归档保留期限。
 
 - 🟢 [Done] commit経由ジョブの終端状態と同一トランザクションでACX結果Receiptを保存。完了・失敗・取消・lease失効を記録し、結果JSONのSHA-256と受付Receiptを関連付ける。認証付き `GET /api/v1/jobs/{id}/result-receipt` で取得でき、ジョブ削除後も保持する。
 - 🟢 [Done] 新ワーカーの結果JSONに成果物のページ数・サイズ・SHA-256一覧を含めた。resultHashはこの結果JSONを対象とする。
 
 - 🟢 [Done] commitと同一トランザクションでACX 0.1受付Receiptを永続化し、認証付き取得APIとreceiptUrlを追加。ticket hash、原稿hash、preflight digest、job-idを関連付け、再起動・ジョブ削除後も同じ受付証跡を保持する。
-- 🟠 [Next] Receipt署名profileと保持期限の清掃。結果Receiptと成果物hashは実装済み。
+- 🟢 [Done] 任意のEd25519署名付き受付・ラスター結果Receipt、トランザクション保存、公開鍵を指定したオフライン検証、鍵交換と再起動後の証跡保持。[RECEIPT-SIGNING.md](RECEIPT-SIGNING.md)。 / Optional signed receipts / 可选签名回执。
+- 🟢 [Done] jobs:read限定のReceipt公開鍵一覧APIとMCP鍵・受付・結果取得。起動登録した公開鍵履歴を鍵交換後も保持し、cursor取得と独立key pinningを明示。 / Public-key discovery and MCP receipt reads / 公钥发现与MCP回执读取。
+- 🟢 [Done] 管理者API/MCPで署名鍵を恒久失効、成功監査と原子保存、同理由の再送、実行中writerの保存時確認。失効鍵の受付は拒否し、終端結果は署名不能を明示して保存。現在状態を確認する検証CLIも追加。 / Durable key revocation / 持久密钥撤销。
+- 🟢 [Done] 配送の完了・取消・中止・拒否を状態／イベントと同じトランザクションでReceipt保存。実機job-id、配送／実機契約、ラスター結果hashと署名を結び付け、jobs:read限定のAPI/MCPで取得。UNKNOWN／受付済みは完了と扱わない。 / Atomic delivery result receipts / 原子投递结果回执。
+- 🟢 [Done] 制限付きRFC 8785共通digest crate／厳密parser／CLI、JCS署名v2と旧v1検証、共通ticketの追加portableDigest。既存hashを変更せずRust／Nodeで相互検証。[CANONICAL-DIGEST.md](CANONICAL-DIGEST.md)。 / Portable bounded JCS digest / 可移植有界JCS摘要。
+- 🟠 [Next] KMS、事前承認digestのversion移行、監査証跡のarchive。
 
 - 🟢 [Done] preflight digest、原稿SHA-256、形式、有効期限を検証するmultipart commit APIを実装。保存済みticketからジョブを登録し、SQLiteトランザクションで同一preflightの同時再送を重複排除する。共通Bearerトークンによる認可を使用。
 - 🟠 [Next] 主体別scope・認可証跡、原稿構造全体の検証、Receipt、期限切れpreflightと孤立ファイルの清掃を追加する。
@@ -174,7 +184,7 @@ Printer
 - 🟢 [Done] MCP保留・再開・取消tool：jobIdとexpectedRevision必須。RESTのrevisionヘッダー検証と既存SQLiteの楽観的更新を共有し、古い状態への操作を409として拒否する。 / Hold, release and cancel with revision checks / 带版本检查的暂停、恢复和取消。
 - 🟢 [Done] API／本番stdio MCPの永続監査、管理者監査API、ジョブ・manifest・成果物一覧resources。詳細は[AGENT-CONTROL.md](AGENT-CONTROL.md)。 / Durable audit and JSON resources / 持久化审计与JSON资源。
 - 🟢 [Done] 実機出力承認ポリシー：主体・revision・attempt・出力先profile・用紙に固定した5分間の承認、取消、enqueue時の原子的再検査。 / Bound physical-delivery approvals / 绑定实体投递审批。
-- 🟠 [Next] 削除／永続設定の承認、リモートtransport、個別バイナリresource。 / Deletion/settings approval, remote transport and binary resources / 删除及设置审批、远程传输与二进制资源。
+- 🟠 [Next] 削除／永続設定の承認、個別バイナリresource。remote transportは実装済み。 / Deletion/settings approval and binary resources; remote transport implemented / 删除及设置审批、二进制资源；远程传输已实现。
 
 - 🟢 [Done] 再試行はFAILED/CANCELLED限定、expectedRevisionとUUID requestId必須。永続preflight/commitに同一操作を結び、同時要求・再起動後の再送を同じ新規ジョブへ収束させる。原稿SHA-256を再検証し、元ジョブ・設定・Receiptは保持する。
 - 🟢 [Done] JRIP_AUTH_POLICYのidentityとscopeをAPI/MCP共通で検査。jobs:read、jobs:submit、jobs:control、artifacts:read、admin。再試行はsubmitとcontrolの両方が必要。設定済みポリシー外のトークンは拒否する。
@@ -197,3 +207,5 @@ Printer
 - 🟢 [Done] multipart一括受付APIとMCP print_submit_pipeline。原稿検証後にjob/JobTicket/workflow/受付イベントを同じDBトランザクションで保存し、並行再送は同じjobIdへ対応付ける。競合・不正原稿・不正出力条件は新規ジョブを残さない。 / Atomic source/workflow API and inbox-bound MCP tool, transactional acceptance and idempotent concurrent replay. / 源文档与流程原子接收API及inbox限定MCP工具，事务接收与并发幂等重放。
 
 - 🟢 [Done] 信頼されたPDF検査CLI、Docker MuPDFの内容解釈・実効寸法検査、原稿hash・主体に拘束した保存結果、API/MCP読取、inspectionId指定時の用紙照合とcommit固定を実装。継承CropBox/回転/UserUnitと修復PDFの拒否、検査から偽IPP完了までを検証。 / Trusted PDF inspection CLI and opt-in bound evidence, verified geometry and end-to-end fake device output / 信任PDF检查CLI与可选绑定证据，已验证尺寸及模拟设备完整输出。
+
+- 🟢 [Done] HTTP/MCPのPDF検査非同期受付、主体・原稿hash固定の並行再送、状態照会・revision付き待機中取消、32件/256 MiB制限、trusted worker、成功状態と証跡の原子的保存、中断時FAILED、永続cleanupと孤立原稿・新CLI snapshot回収。Dockerで処理・中断復旧・lock保護・清掃を検証。 / Async bounded PDF inspection queue, MCP controls, trusted worker and durable recovery/cleanup / 有界异步PDF检查队列、MCP控制、可信worker与持久恢复/清理。

@@ -25,6 +25,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::Builder::new()
         .prefix("inspection-")
         .tempdir_in(&app.root)?;
+    let id = uuid::Uuid::new_v4();
+    let lease = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(directory.path().join("upload.lock"))?;
+    lease.lock()?;
+    std::fs::write(directory.path().join("inspection-attempt"), id.to_string())?;
     let mut source = tokio::fs::File::open(path)
         .await?
         .take(rip_jobs::MAX_DOCUMENT_BYTES + 1);
@@ -36,7 +45,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if bytes > rip_jobs::MAX_DOCUMENT_BYTES {
         return Err("document_too_large".into());
     }
-    let id = uuid::Uuid::new_v4();
     let manifest = rip_core::Manifest {
         name: "inspection".into(),
         format: rip_core::DocumentFormat::Pdf,
@@ -46,18 +54,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         engine: rip_core::EnginePreference::MuPdf,
     };
     let (job, _) = rip_jobs::prepare_staged(directory.path(), id, manifest, None).await?;
-    let mut report = match rip_interpreter::inspect_pdf(&directory.path().join("document")).await {
-        Ok(value) => value,
-        Err(error) => {
-            if matches!(
-                &error,
-                rip_interpreter::InterpreterError::Rejected("container_cleanup_failed")
-            ) {
-                eprintln!("snapshot retained: {}", directory.keep().display());
+    let mut report =
+        match rip_interpreter::inspect_pdf_attempt(&directory.path().join("document"), id).await {
+            Ok(value) => value,
+            Err(error) => {
+                if matches!(
+                    &error,
+                    rip_interpreter::InterpreterError::Rejected("container_cleanup_failed")
+                ) {
+                    eprintln!("snapshot retained: {}", directory.keep().display());
+                }
+                return Err(error.into());
             }
-            return Err(error.into());
-        }
-    };
+        };
     report["inspectionId"] = serde_json::json!(id);
     report["sourceSha256"] = serde_json::json!(job.source_sha256);
     report["sourceBytes"] = serde_json::json!(bytes);

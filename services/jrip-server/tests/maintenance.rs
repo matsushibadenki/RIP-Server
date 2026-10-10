@@ -298,3 +298,121 @@ async fn abandoned_color_stages_are_cleaned_only_when_writer_lock_is_free() {
         .unwrap();
     assert!(!active.exists());
 }
+
+#[tokio::test]
+async fn orphan_upload_cleanup_protects_live_legacy_registered_and_recent_sources() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = jrip_server::open(dir.path().into(), String::new())
+        .await
+        .unwrap();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3 * 86400);
+    let make = |marked: bool, old_directory: bool| {
+        let id = Uuid::new_v4();
+        let path = app.root.join("jobs").join(id.to_string());
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("source.part"), b"%PDF-1.4 partial").unwrap();
+        if marked {
+            let guard = rip_jobs::upload_guard(&path).unwrap();
+            drop(guard);
+        }
+        if old_directory {
+            std::fs::File::open(&path)
+                .unwrap()
+                .set_times(std::fs::FileTimes::new().set_modified(old))
+                .unwrap();
+        }
+        (id, path)
+    };
+    let (abandoned, abandoned_path) = make(true, true);
+    let (active, active_path) = make(true, true);
+    let (_legacy, legacy_path) = make(false, true);
+    let (_recent, recent_path) = make(true, false);
+    let writer = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(active_path.join("upload-writer.lock"))
+        .unwrap();
+    writer.lock().unwrap();
+    let registered = seed(&app, JobState::Queued, 3 * 86400).await;
+    let path = app.root.join("jobs").join(registered.id.to_string());
+    drop(rip_jobs::upload_guard(&path).unwrap());
+    std::fs::File::open(&path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(old))
+        .unwrap();
+    #[cfg(unix)]
+    {
+        let linked = app.root.join("jobs").join(Uuid::new_v4().to_string());
+        std::os::unix::fs::symlink(&abandoned_path, linked).unwrap();
+    }
+    let cutoff = rip_storage::now() - 86400;
+    let dry = jrip_server::maintenance::run(&app, cutoff, false)
+        .await
+        .unwrap();
+    assert_eq!(dry["abandonedUploads"], serde_json::json!([abandoned]));
+    assert!(abandoned_path.exists());
+    let applied = jrip_server::maintenance::run(&app, cutoff, true)
+        .await
+        .unwrap();
+    assert_eq!(applied["abandonedUploads"], serde_json::json!([abandoned]));
+    assert!(!abandoned_path.exists());
+    for path in [&active_path, &legacy_path, &recent_path, &path] {
+        assert!(path.exists());
+    }
+    drop(writer);
+    let next = jrip_server::maintenance::run(&app, cutoff, true)
+        .await
+        .unwrap();
+    assert_eq!(next["abandonedUploads"], serde_json::json!([active]));
+    assert!(!active_path.exists());
+    assert!(
+        jrip_server::maintenance::run(&app, cutoff, true)
+            .await
+            .unwrap()["abandonedUploads"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn orphan_upload_claim_resumes_even_after_marker_removal() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = jrip_server::open(dir.path().into(), String::new())
+        .await
+        .unwrap();
+    let id = Uuid::new_v4();
+    let path = app.root.join("jobs").join(id.to_string());
+    std::fs::create_dir(&path).unwrap();
+    drop(rip_jobs::upload_guard(&path).unwrap());
+    std::fs::write(path.join("source.part"), b"partial").unwrap();
+    app.repo.claim_upload_retention(id).await.unwrap();
+    assert!(app.repo.claim_upload_retention(id).await.is_err());
+    std::fs::remove_file(path.join("upload-writer.lock")).unwrap();
+    let reopened = jrip_server::open(app.root.clone(), String::new())
+        .await
+        .unwrap();
+    let result = jrip_server::maintenance::run(&reopened, rip_storage::now() - 86400, true)
+        .await
+        .unwrap();
+    assert_eq!(result["purgedJobs"], serde_json::json!([id]));
+    assert!(!path.exists());
+    assert!(reopened.repo.pending_retention().await.unwrap().is_empty());
+    let registered = seed(&reopened, JobState::Completed, 3 * 86400).await;
+    assert!(
+        reopened
+            .repo
+            .claim_upload_retention(registered.id)
+            .await
+            .is_err()
+    );
+    reopened.repo.delete(registered.clone()).await.unwrap();
+    // Historical registration remains protected even after metadata deletion.
+    assert!(
+        reopened
+            .repo
+            .claim_upload_retention(registered.id)
+            .await
+            .is_err()
+    );
+}

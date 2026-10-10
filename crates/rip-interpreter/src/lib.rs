@@ -371,6 +371,12 @@ pub async fn cleanup_abandoned_source(source: &Path) -> Result<(), InterpreterEr
 
 /// Trusted CLI/worker only; the HTTP server never calls this method.
 pub async fn inspect_pdf(source: &Path) -> Result<serde_json::Value, InterpreterError> {
+    inspect_pdf_attempt(source, uuid::Uuid::new_v4()).await
+}
+pub async fn inspect_pdf_attempt(
+    source: &Path,
+    id: uuid::Uuid,
+) -> Result<serde_json::Value, InterpreterError> {
     let source = tokio::fs::canonicalize(source).await?;
     let config = SandboxConfig {
         image: "jrip-mupdf:local".into(),
@@ -386,7 +392,7 @@ pub async fn inspect_pdf(source: &Path) -> Result<serde_json::Value, Interpreter
         priority: 50,
         engine: rip_core::EnginePreference::MuPdf,
     };
-    let name = format!("jrip-inspection-{}", uuid::Uuid::new_v4());
+    let name = format!("jrip-inspection-{id}");
     let mut args = config.arguments(
         EngineKind::MuPdf,
         &source,
@@ -457,6 +463,46 @@ pub async fn inspect_pdf(source: &Path) -> Result<serde_json::Value, Interpreter
     result.map_err(|_| InterpreterError::Rejected("inspection_timeout"))?
 }
 
+/// Distinguish a missing container from an unavailable Docker daemon before reclaiming source files.
+pub async fn cleanup_inspection(id: uuid::Uuid) -> Result<(), InterpreterError> {
+    let name = format!("jrip-inspection-{id}");
+    let operation = async {
+        let found = Command::new("docker")
+            .args([
+                "ps",
+                "-a",
+                "--filter",
+                &format!("name=^/{name}$"),
+                "--format",
+                "{{.Names}}",
+            ])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .output()
+            .await?;
+        if !found.status.success() {
+            return Err(InterpreterError::Rejected("container_cleanup_failed"));
+        }
+        if !found.stdout.is_empty() {
+            let status = Command::new("docker")
+                .args(["rm", "-f", &name])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .status()
+                .await?;
+            if !status.success() {
+                return Err(InterpreterError::Rejected("container_cleanup_failed"));
+            }
+        }
+        Ok(())
+    };
+    tokio::time::timeout(Duration::from_secs(10), operation)
+        .await
+        .map_err(|_| InterpreterError::Rejected("container_cleanup_failed"))?
+}
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -794,6 +794,10 @@ async fn pipeline_recovers_and_tracks_device_completion_without_duplicate_delive
             StatusCode::ACCEPTED
         );
     }
+    let pending = app.repo.pipeline_ticket(id).await.unwrap();
+    assert_eq!(pending["contractFinalized"], false);
+    assert_eq!(pending["execution"]["completed"], false);
+    assert_eq!(pending["rasterEvidenceAvailable"], false);
     assert!(app.repo.delete(job.clone()).await.is_err());
     assert_eq!(
         app.repo.pipeline_events(id, 0, 100).await.unwrap()["events"]
@@ -804,6 +808,9 @@ async fn pipeline_recovers_and_tracks_device_completion_without_duplicate_delive
     );
     jrip_server::pipeline::tick(&app).await.unwrap();
     assert_eq!(app.repo.pipeline(id).await.unwrap()["state"], "DELIVERY");
+    let prepared = app.repo.pipeline_ticket(id).await.unwrap();
+    assert_eq!(prepared["contractFinalized"], true);
+    assert_eq!(prepared["execution"]["completed"], false);
     let mut reopened = jrip_server::open(app.root.clone(), "token".into())
         .await
         .unwrap();
@@ -816,6 +823,57 @@ async fn pipeline_recovers_and_tracks_device_completion_without_duplicate_delive
     jrip_server::pipeline::tick(&reopened).await.unwrap();
     assert_eq!(app.repo.pipeline(id).await.unwrap()["state"], "COMPLETED");
     assert_eq!(f.prints.load(Ordering::SeqCst), 1);
+    let complete = reopened.repo.pipeline_ticket(id).await.unwrap();
+    assert_eq!(complete["execution"]["completed"], true);
+    let receipt = app.repo.delivery_result_receipt(id).await.unwrap();
+    assert_eq!(receipt["status"], "succeeded");
+    assert_eq!(
+        receipt["proof"]["result"]["deviceJobId"],
+        complete["execution"]["deviceJobId"]
+    );
+    assert_eq!(
+        receipt["proof"]["result"]["completionMeaning"],
+        "device-confirmed"
+    );
+    assert_eq!(
+        receipt["proof"]["result"]["printedAppearanceVerified"],
+        false
+    );
+
+    assert_eq!(complete["ticketSha256"], prepared["ticketSha256"]);
+    assert_eq!(complete["portableDigest"]["available"], true);
+    assert_eq!(
+        complete["portableDigest"]["profile"],
+        "org.jrip.jcs-safe-v1"
+    );
+    assert_eq!(complete["portableDigest"], prepared["portableDigest"]);
+
+    assert_eq!(
+        complete["ticket"]["physical"]["ticket"]["jobId"],
+        job.id.to_string()
+    );
+    let ticket_url = format!("/api/v1/pipelines/{id}/ticket");
+    let response = jrip_server::router(reopened.clone())
+        .oneshot(
+            Request::get(&ticket_url)
+                .header("authorization", "Bearer token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let read: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(read, complete);
+    assert_eq!(
+        jrip_server::router(reopened.clone())
+            .oneshot(Request::get(&ticket_url).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
     let history = reopened.repo.pipeline_events(id, 0, 100).await.unwrap();
     let timeline = reopened
         .repo
@@ -911,6 +969,53 @@ async fn pipeline_recovers_and_tracks_device_completion_without_duplicate_delive
             .unwrap()
             .status(),
         StatusCode::UNAUTHORIZED
+    );
+    reopened.repo.delete(job).await.unwrap();
+    assert_eq!(reopened.repo.pipeline_ticket(id).await.unwrap(), complete);
+    task.abort();
+}
+#[tokio::test]
+async fn unified_ticket_rejects_unrelated_attempt_with_same_id() {
+    let (_dir, app, job, _, task) = fixture(false).await;
+    let mut other = job.clone();
+    other.id = Uuid::new_v4();
+    app.repo.insert(&other).await.unwrap();
+    let id = Uuid::new_v4();
+    assert_eq!(pipeline_request(&app, &format!("/api/v1/jobs/{}/pipelines", job.id),
+        serde_json::json!({"requestId":id,"expectedRevision":job.revision,"printerId":"test","media":"custom_square_25.4x25.4mm"})).await.0, StatusCode::ACCEPTED);
+    app.repo
+        .enqueue_approved_delivery(
+            id,
+            rip_storage::delivery::DeliveryTicket {
+                source_job: other.id,
+                color_attempt_id: None,
+                printer_id: "test".into(),
+                artifact_sha256: "a".repeat(64),
+                artifact_bytes: 1,
+                dpi: 72,
+                document_type: "rgb_8".into(),
+                media: "custom_square_25.4x25.4mm".into(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        app.repo.pipeline_ticket(id).await,
+        Err(rip_storage::StorageError::Conflict)
+    ));
+    assert_eq!(
+        jrip_server::router(app)
+            .oneshot(
+                Request::get(format!("/api/v1/pipelines/{id}/ticket"))
+                    .header("authorization", "Bearer token")
+                    .body(Body::empty())
+                    .unwrap()
+            )
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
     );
     task.abort();
 }
@@ -1071,6 +1176,10 @@ async fn pipeline_unknown_is_not_automatically_retried() {
         jrip_server::delivery::tick(&app).await.unwrap();
     }
     assert_eq!(app.repo.pipeline(id).await.unwrap()["state"], "UNKNOWN");
+    assert_eq!(
+        app.repo.pipeline_ticket(id).await.unwrap()["execution"]["completed"],
+        false
+    );
     assert_eq!(f.prints.load(Ordering::SeqCst), 1);
     assert!(app.repo.delete(job).await.is_err());
     task.abort();
@@ -1280,6 +1389,13 @@ async fn atomic_submission_replays_and_rolls_back_conflicts() {
     assert_eq!(a.1, b.1);
     assert_eq!(app.repo.list(100, 0).await.unwrap().len(), baseline + 1);
     let job_id = Uuid::parse_str(a.1["jobId"].as_str().unwrap()).unwrap();
+    let unified = app.repo.pipeline_ticket(id).await.unwrap();
+    assert_eq!(unified["rasterEvidenceAvailable"], true);
+    assert_eq!(unified["ticket"]["raster"]["jobId"], job_id.to_string());
+    assert_eq!(
+        unified["ticket"]["raster"]["document"]["sha256"],
+        unified["ticket"]["registration"]["sourceSha256"]
+    );
     assert_eq!(
         app.repo.job_ticket(job_id).await.unwrap().job_id,
         Some(job_id)
@@ -1295,6 +1411,7 @@ async fn atomic_submission_replays_and_rolls_back_conflicts() {
         .await
         .unwrap();
     reopened.printers = app.printers.clone();
+    assert_eq!(reopened.repo.pipeline_ticket(id).await.unwrap(), unified);
     Box::pin(jrip_server::pipeline::tick(&reopened))
         .await
         .unwrap();
@@ -1546,6 +1663,22 @@ async fn physical_intent_real_rip_reaches_device_confirmed_completion() {
         "COMPLETED"
     );
     assert_eq!(fake.prints.load(Ordering::SeqCst), 1);
+    let receipt = app.repo.delivery_result_receipt(workflow).await.unwrap();
+    assert_eq!(receipt["status"], "succeeded");
+    assert!(receipt["proof"]["result"]["request"]["physicalContract"].is_object());
+    let raster = app
+        .repo
+        .get_result_receipt(Uuid::parse_str(accepted.1["jobId"].as_str().unwrap()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        receipt["proof"]["result"]["rasterResultReceiptSha256"],
+        format!(
+            "sha256:{:x}",
+            Sha256::digest(serde_json::to_vec(&raster).unwrap())
+        )
+    );
+
     task.abort();
 }
 

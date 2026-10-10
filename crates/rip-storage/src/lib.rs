@@ -2,8 +2,11 @@ pub mod approvals;
 pub mod audit;
 pub mod color;
 pub mod delivery;
+pub mod delivery_receipt;
+pub mod inspection;
 pub mod maintenance;
 pub mod pipeline;
+pub mod receipts;
 pub mod unified;
 use rip_core::{Artifact, Job, JobState};
 use sha2::{Digest, Sha256};
@@ -20,6 +23,10 @@ pub enum StorageError {
     Db(#[from] sqlx::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    #[error("receipt_signing_key_revoked")]
+    ReceiptKeyRevoked,
+    #[error("invalid_receipt_signing_key")]
+    ReceiptKey,
     #[error("job_not_found")]
     NotFound,
     #[error("state_conflict")]
@@ -28,9 +35,22 @@ pub enum StorageError {
 #[derive(Clone)]
 pub struct Repository {
     pool: SqlitePool,
+    receipt_signer: Option<std::sync::Arc<receipts::ReceiptSigner>>,
 }
 impl Repository {
     pub async fn open(path: &Path) -> Result<Self, StorageError> {
+        let signer = match std::env::var_os("JRIP_RECEIPT_SIGNING_KEY") {
+            Some(path) => Some(receipts::ReceiptSigner::from_pkcs8(
+                &std::fs::read(path).map_err(|_| StorageError::ReceiptKey)?,
+            )?),
+            None => None,
+        };
+        Self::open_with_receipt_signer(path, signer).await
+    }
+    pub async fn open_with_receipt_signer(
+        path: &Path,
+        signer: Option<receipts::ReceiptSigner>,
+    ) -> Result<Self, StorageError> {
         let pool = SqlitePoolOptions::new()
             .max_connections(4)
             .connect_with(
@@ -53,6 +73,7 @@ impl Repository {
         sqlx::query("CREATE TABLE IF NOT EXISTS print_receipts (job_id TEXT PRIMARY KEY, payload TEXT NOT NULL)").execute(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS print_result_receipts (job_id TEXT PRIMARY KEY, payload TEXT NOT NULL)").execute(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS job_artifacts (job_id TEXT PRIMARY KEY, payload TEXT NOT NULL)").execute(&pool).await?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS delivery_result_receipts(delivery_id TEXT PRIMARY KEY,payload TEXT NOT NULL)").execute(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS deliveries (id TEXT PRIMARY KEY,payload TEXT NOT NULL,state TEXT NOT NULL,revision INTEGER NOT NULL,lease_until INTEGER,created_at INTEGER NOT NULL)").execute(&pool).await?;
         sqlx::query("CREATE INDEX IF NOT EXISTS delivery_queue ON deliveries(state,created_at,id)")
             .execute(&pool)
@@ -83,6 +104,9 @@ impl Repository {
         .execute(&pool)
         .await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS delivery_contracts(delivery_id TEXT PRIMARY KEY,payload TEXT NOT NULL)").execute(&pool).await?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS inspection_requests(id TEXT PRIMARY KEY,actor TEXT NOT NULL,source_hash TEXT NOT NULL,source_bytes INTEGER NOT NULL,directory TEXT NOT NULL UNIQUE,payload TEXT NOT NULL,state TEXT NOT NULL,revision INTEGER NOT NULL,cleanup INTEGER NOT NULL DEFAULT 1)").execute(&pool).await?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS inspection_events(sequence INTEGER PRIMARY KEY AUTOINCREMENT,inspection_id TEXT NOT NULL,revision INTEGER NOT NULL,payload TEXT NOT NULL,UNIQUE(inspection_id,revision))").execute(&pool).await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS inspection_event_cursor ON inspection_events(inspection_id,sequence)").execute(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS document_inspections(id TEXT PRIMARY KEY,actor TEXT NOT NULL,payload TEXT NOT NULL)").execute(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS print_pipelines(id TEXT PRIMARY KEY,source_job TEXT NOT NULL,ticket TEXT NOT NULL,payload TEXT NOT NULL,state TEXT NOT NULL,revision INTEGER NOT NULL,created_at INTEGER NOT NULL)").execute(&pool).await?;
         sqlx::query(
@@ -96,8 +120,12 @@ impl Repository {
         sqlx::query("CREATE TABLE IF NOT EXISTS pipeline_events(sequence INTEGER PRIMARY KEY AUTOINCREMENT,pipeline_id TEXT NOT NULL,payload TEXT NOT NULL)").execute(&pool).await?;
         sqlx::query("CREATE INDEX IF NOT EXISTS pipeline_event_cursor ON pipeline_events(pipeline_id,sequence)").execute(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS delivery_event_details(sequence INTEGER PRIMARY KEY,payload TEXT NOT NULL)").execute(&pool).await?;
+        receipts::install(&pool, signer.as_ref()).await?;
         unified::install(&pool).await?;
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            receipt_signer: signer.map(std::sync::Arc::new),
+        })
     }
     pub async fn events(
         &self,
@@ -312,7 +340,7 @@ impl Repository {
             let row = sqlx::query("SELECT payload, strftime('%Y-%m-%dT%H:%M:%SZ', ?, 'unixepoch') AS issued_at FROM print_preflights WHERE id=?")
                 .bind(job.created_at).bind(id.to_string()).fetch_one(&mut *tx).await?;
             let pf: serde_json::Value = serde_json::from_str(row.get("payload"))?;
-            let receipt = serde_json::json!({
+            let mut receipt = serde_json::json!({
                 "acx":"0.1", "receiptId":job.id.to_string(),
                 "capability":pf["capability"], "provider":"urn:acx:provider:jrip-local",
                 "status":"accepted", "issuedAt":row.get::<String,_>("issued_at"),
@@ -326,6 +354,9 @@ impl Repository {
                     "workflowId":pf["workflowRequest"]["requestId"],
                     "workflowCompletionMeaning":if pf["profile"] == "org.jrip.pipeline-preflight-v1" {Some("device-confirmed")}else{None}}
             });
+            if let Some(signer) = &self.receipt_signer {
+                receipts::sign_stored(&mut tx, signer, &mut receipt, true).await?;
+            }
             sqlx::query("INSERT INTO print_receipts(job_id,payload) VALUES(?,?)")
                 .bind(job.id.to_string())
                 .bind(serde_json::to_string(&receipt)?)
@@ -475,7 +506,7 @@ impl Repository {
                 if changed.rows_affected() == 1 {
                     store_job_event(&mut tx, &job).await?;
                     recovered.push(job.id);
-                    store_result_receipt(&mut tx, &job).await?;
+                    store_result_receipt(&mut tx, &job, self.receipt_signer.as_deref()).await?;
                 }
             }
             sqlx::query("DELETE FROM worker_leases WHERE job_id=? AND run_id=? AND expires_at<=?")
@@ -562,7 +593,7 @@ impl Repository {
                 .execute(&mut *tx)
                 .await?;
         }
-        store_result_receipt(&mut tx, &job).await?;
+        store_result_receipt(&mut tx, &job, self.receipt_signer.as_deref()).await?;
         tx.commit().await?;
         Ok(job)
     }
@@ -585,6 +616,7 @@ impl Repository {
 async fn store_result_receipt(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     job: &Job,
+    signer: Option<&receipts::ReceiptSigner>,
 ) -> Result<(), StorageError> {
     if !job.state.terminal() {
         return Ok(());
@@ -607,13 +639,16 @@ async fn store_result_receipt(
     let result = serde_json::json!({"jobId":job.id,"state":job.state,"revision":job.revision,
         "errorCode":job.error_code,"selectedEngine":job.selected_engine,"sourceSha256":job.source_sha256,
         "completionMeaning":"raster_export","artifactHashesVerified":artifacts.is_some(),"pageCount":artifacts.as_ref().and_then(|v| v.as_array()).map(Vec::len),"artifacts":artifacts});
-    let receipt = serde_json::json!({"acx":"0.1","receiptId":format!("{}:result",job.id),
+    let mut receipt = serde_json::json!({"acx":"0.1","receiptId":format!("{}:result",job.id),
         "provider":accepted["provider"],"capability":accepted["capability"],"requestHash":accepted["requestHash"],
         "status":status,"issuedAt":row.get::<String,_>("issued_at"),
         "resultHash":format!("sha256:{:x}",Sha256::digest(serde_json::to_vec(&result)?)),
         "effects":if job.state == JobState::Completed { vec!["raster-export-completed"] } else { vec!["job-terminated"] },
         "proof":{"type":"plain-provider-record","signed":false,"profile":"org.jrip.result-receipt-v1",
         "digestProfile":"org.jrip.serde-json-v1","acceptanceReceiptId":accepted["receiptId"],"result":result}});
+    if let Some(signer) = signer {
+        receipts::sign_stored(tx, signer, &mut receipt, false).await?;
+    }
     sqlx::query("INSERT INTO print_result_receipts(job_id,payload) VALUES(?,?)")
         .bind(job.id.to_string())
         .bind(serde_json::to_string(&receipt)?)
@@ -673,6 +708,170 @@ async fn store_job_event(
 mod tests {
     use super::*;
     use rip_core::{ColorMode, DocumentFormat, Manifest};
+    #[tokio::test]
+    async fn signed_receipts_survive_restart_and_key_rotation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jobs.db");
+        let doc = ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+            .unwrap();
+        let signer = receipts::ReceiptSigner::from_pkcs8(doc.as_ref()).unwrap();
+        let key = signer.public_key().to_vec();
+        let repo = Repository::open_with_receipt_signer(&path, Some(signer))
+            .await
+            .unwrap();
+        let j = Job {
+            id: Uuid::new_v4(),
+            manifest: Manifest {
+                name: "日本語.ps".into(),
+                format: DocumentFormat::Postscript,
+                dpi: 600,
+                color_mode: ColorMode::Cmyk,
+                priority: 50,
+                engine: Default::default(),
+            },
+            state: JobState::Queued,
+            source_sha256: "hash".into(),
+            created_at: now(),
+            updated_at: now(),
+            revision: 0,
+            error_code: None,
+            selected_engine: None,
+            worker_run_id: None,
+        };
+        let pf = Uuid::new_v4();
+        repo.save_preflight(
+            pf,
+            &serde_json::json!({"capability":"print","requestHash":"sha256:test"}),
+            now() + 60,
+        )
+        .await
+        .unwrap();
+        repo.insert_with_preflight(&j, Some(pf)).await.unwrap();
+        let accepted = repo.get_print_receipt(j.id).await.unwrap();
+        assert!(receipts::verify(&accepted, &key));
+        let rotated =
+            ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+                .unwrap();
+        let signer = receipts::ReceiptSigner::from_pkcs8(rotated.as_ref()).unwrap();
+        let rotated_key = signer.public_key().to_vec();
+        let repo = Repository::open_with_receipt_signer(&path, Some(signer))
+            .await
+            .unwrap();
+        assert_eq!(repo.get_print_receipt(j.id).await.unwrap(), accepted);
+        repo.transition(j.clone(), JobState::Cancelled, None)
+            .await
+            .unwrap();
+        let result = repo.get_result_receipt(j.id).await.unwrap();
+        assert!(receipts::verify(&result, &rotated_key));
+        assert!(!receipts::verify(&result, &key));
+        let reopened = Repository::open_with_receipt_signer(&path, None)
+            .await
+            .unwrap();
+        assert_eq!(reopened.get_result_receipt(j.id).await.unwrap(), result);
+        let keys = reopened.receipt_keys("", 1).await.unwrap();
+        assert_eq!(keys["hasMore"], true);
+        assert_eq!(keys["trustEstablished"], false);
+        assert_eq!(keys["signingEnabledForThisProcess"], false);
+        let second = reopened
+            .receipt_keys(keys["nextAfter"].as_str().unwrap(), 1)
+            .await
+            .unwrap();
+        assert_eq!(second["hasMore"], false);
+        assert_ne!(keys["keys"][0]["keyId"], second["keys"][0]["keyId"]);
+        assert_eq!(
+            repo.receipt_keys("", 100).await.unwrap()["keys"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|k| k["activeForThisProcess"] == true)
+                .count(),
+            1
+        );
+        assert!(reopened.receipt_keys("", 101).await.is_err());
+        assert!(
+            reopened
+                .verify_receipt_current(&result, &rotated_key)
+                .await
+                .unwrap()
+        );
+        let revoked_id = result["signature"]["keyId"].as_str().unwrap();
+        let record = reopened
+            .revoke_receipt_key(revoked_id, "compromised", "admin")
+            .await
+            .unwrap();
+        assert_eq!(record["replayed"], false);
+        let repeat = reopened
+            .revoke_receipt_key(revoked_id, "compromised", "other-admin")
+            .await
+            .unwrap();
+        assert_eq!(repeat["replayed"], true);
+        assert_eq!(repeat["actor"], "admin");
+        assert!(matches!(
+            reopened
+                .revoke_receipt_key(revoked_id, "retired", "admin")
+                .await,
+            Err(StorageError::Conflict)
+        ));
+        let audit = reopened.audit_records(0, 100).await.unwrap();
+        assert_eq!(audit["records"].as_array().unwrap().len(), 1);
+        assert_eq!(audit["records"][0]["target"], revoked_id);
+        let catalog = repo.receipt_keys("", 100).await.unwrap();
+        assert_eq!(catalog["signingEnabledForThisProcess"], false);
+        assert_eq!(catalog["signingBlockedReason"], "KEY_REVOKED");
+        assert_eq!(reopened.get_result_receipt(j.id).await.unwrap(), result);
+        assert!(
+            !reopened
+                .verify_receipt_current(&result, &rotated_key)
+                .await
+                .unwrap()
+        );
+        assert!(receipts::verify(&result, &rotated_key)); // Cryptography is separate from current trust.
+        let mut pending = j.clone();
+        pending.id = Uuid::new_v4();
+        let pf2 = Uuid::new_v4();
+        repo.save_preflight(
+            pf2,
+            &serde_json::json!({"capability":"print","requestHash":"sha256:test"}),
+            now() + 60,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            repo.insert_with_preflight(&pending, Some(pf2)).await,
+            Err(StorageError::ReceiptKeyRevoked)
+        ));
+        assert!(matches!(
+            repo.get(pending.id).await,
+            Err(StorageError::NotFound)
+        ));
+        assert_eq!(repo.committed_job(pf2).await.unwrap(), None);
+        // A process opened before revocation sees DB state without restart.
+        let accepted_before = receipts::ReceiptSigner::from_pkcs8(doc.as_ref()).unwrap();
+        let old_repo = Repository::open_with_receipt_signer(&path, Some(accepted_before))
+            .await
+            .unwrap();
+        old_repo
+            .insert_with_preflight(&pending, Some(pf2))
+            .await
+            .unwrap();
+        repo.transition(pending.clone(), JobState::Cancelled, None)
+            .await
+            .unwrap();
+        let unsigned = repo.get_result_receipt(pending.id).await.unwrap();
+        assert_eq!(unsigned["proof"]["signed"], false);
+        assert_eq!(unsigned["proof"]["signingBlocked"]["code"], "KEY_REVOKED");
+        assert!(unsigned.get("signature").is_none());
+        let restarted = Repository::open_with_receipt_signer(
+            &path,
+            Some(receipts::ReceiptSigner::from_pkcs8(rotated.as_ref()).unwrap()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            restarted.receipt_keys("", 100).await.unwrap()["signingEnabledForThisProcess"],
+            false
+        );
+    }
     #[tokio::test]
     async fn durable_and_optimistic_transitions() {
         let dir = tempfile::tempdir().unwrap();

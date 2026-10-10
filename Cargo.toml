@@ -8,7 +8,7 @@ edition = "2024"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
 tokio = { version = "1", features = ["full"] }
 thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
@@ -22,3 +22,5 @@ rip-acx = { path = "crates/rip-acx" }
 rip-printer = { path = "crates/rip-printer" }
 rip-raster = { path = "crates/rip-raster" }
 rip-color = { path = "crates/rip-color" }
+
+rip-digest = { path = "crates/rip-digest" }

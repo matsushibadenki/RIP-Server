@@ -52,6 +52,7 @@ pub async fn retry(
     let id = Uuid::new_v4();
     let directory = app.root.join("jobs").join(id.to_string());
     tokio::fs::create_dir(&directory).await.map_err(internal)?;
+    let _writer = rip_jobs::upload_guard(&directory).map_err(internal)?;
     let result = async {
         let mut file = file.take(MAX_DOCUMENT_BYTES as u64 + 1);
         let mut output = tokio::fs::File::create(directory.join("source.part"))

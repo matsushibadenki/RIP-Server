@@ -394,6 +394,7 @@ impl Repository {
             return Err(StorageError::Conflict);
         }
         event(&mut tx, &delivery).await?;
+        super::delivery_receipt::store(&mut tx, &delivery, self.receipt_signer.as_deref()).await?;
         tx.commit().await?;
         Ok(delivery)
     }
@@ -462,6 +463,99 @@ mod tests {
             media: "iso_a4_210x297mm".into(),
         };
         (dir, repo, ticket)
+    }
+    #[tokio::test]
+    async fn terminal_receipts_are_signed_immutable_and_unknown_is_not_completion() {
+        let (dir, _repo, ticket) = fixture().await;
+        let doc = ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+            .unwrap();
+        let signer = crate::receipts::ReceiptSigner::from_pkcs8(doc.as_ref()).unwrap();
+        let public = signer.public_key().to_vec();
+        let repo = Repository::open_with_receipt_signer(&dir.path().join("queue.db"), Some(signer))
+            .await
+            .unwrap();
+        let id = Uuid::new_v4();
+        repo.enqueue_delivery(id, ticket.clone()).await.unwrap();
+        assert!(matches!(
+            repo.delivery_result_receipt(id).await,
+            Err(StorageError::NotFound)
+        ));
+        let run = Uuid::new_v4();
+        repo.claim_delivery(id, 0, run).await.unwrap();
+        let uncertain = repo
+            .finish_delivery(
+                id,
+                run,
+                DeliveryState::Unknown,
+                None,
+                Some("NETWORK_UNCERTAIN".into()),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            repo.delivery_result_receipt(id).await,
+            Err(StorageError::NotFound)
+        ));
+        repo.reconcile_delivery(id, uncertain.revision, 42, DeliveryState::Completed)
+            .await
+            .unwrap();
+        let receipt = repo.delivery_result_receipt(id).await.unwrap();
+        assert!(crate::receipts::verify(&receipt, &public));
+        assert_eq!(receipt["status"], "succeeded");
+        assert_eq!(
+            receipt["proof"]["result"]["completionMeaning"],
+            "device-confirmed"
+        );
+        assert_eq!(
+            receipt["proof"]["result"]["confirmationSource"],
+            "remote-job-reconciliation"
+        );
+        assert_eq!(
+            receipt["proof"]["result"]["printedAppearanceVerified"],
+            false
+        );
+        assert!(
+            repo.reconcile_delivery(id, uncertain.revision, 42, DeliveryState::Cancelled)
+                .await
+                .is_err()
+        );
+        let reopened = Repository::open_with_receipt_signer(&dir.path().join("queue.db"), None)
+            .await
+            .unwrap();
+        assert_eq!(reopened.delivery_result_receipt(id).await.unwrap(), receipt);
+        let denied = Uuid::new_v4();
+        repo.enqueue_delivery(denied, ticket.clone()).await.unwrap();
+        let run = Uuid::new_v4();
+        repo.claim_delivery(denied, 0, run).await.unwrap();
+        repo.finish_delivery(
+            denied,
+            run,
+            DeliveryState::Rejected,
+            None,
+            Some("REMOTE_REJECTED".into()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            repo.delivery_result_receipt(denied).await.unwrap()["status"],
+            "failed"
+        );
+        repo.revoke_receipt_key(
+            receipt["signature"]["keyId"].as_str().unwrap(),
+            "compromised",
+            "admin",
+        )
+        .await
+        .unwrap();
+        let cancelled = Uuid::new_v4();
+        repo.enqueue_delivery(cancelled, ticket).await.unwrap();
+        repo.request_delivery_cancel(cancelled, 0).await.unwrap();
+        let unsigned = repo.delivery_result_receipt(cancelled).await.unwrap();
+        assert_eq!(unsigned["status"], "cancelled");
+        assert_eq!(unsigned["proof"]["signed"], false);
+        assert_eq!(unsigned["proof"]["signingBlocked"]["code"], "KEY_REVOKED");
+        assert!(unsigned.get("signature").is_none());
+        assert_eq!(repo.delivery_result_receipt(id).await.unwrap(), receipt);
     }
     #[tokio::test]
     async fn persistent_idempotency_single_sender_and_completion_are_separate() {

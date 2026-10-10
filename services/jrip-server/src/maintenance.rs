@@ -12,13 +12,14 @@ pub async fn run(
     let pending = app.repo.pending_retention().await?;
     let abandoned_snapshots = sweep_snapshots(&app.root, false)?;
     let abandoned_color_stages = sweep_color_stages(&app.root, false)?;
+    let abandoned_uploads = sweep_uploads(app, cutoff, false).await?;
     let admissions = app
         .repo
         .prune_expired_admissions(rip_storage::now(), false)
         .await?;
     if !apply {
         return Ok(
-            serde_json::json!({"candidateJobs":candidates,"pendingPurges":pending,"admissions":admissions,"abandonedSnapshots":abandoned_snapshots,"abandonedColorStages":abandoned_color_stages,"applied":false}),
+            serde_json::json!({"candidateJobs":candidates,"pendingPurges":pending,"admissions":admissions,"abandonedSnapshots":abandoned_snapshots,"abandonedColorStages":abandoned_color_stages,"abandonedUploads":abandoned_uploads,"applied":false}),
         );
     }
     let sequence = app
@@ -28,6 +29,7 @@ pub async fn run(
     let result = async {
         let abandoned_snapshots=sweep_snapshots(&app.root,true)?;
         let abandoned_color_stages=sweep_color_stages(&app.root,true)?;
+        let abandoned_uploads=sweep_uploads(app,cutoff,true).await?;
         let admissions = app
             .repo
             .prune_expired_admissions(rip_storage::now(), true)
@@ -91,7 +93,7 @@ pub async fn run(
             purged.push(id);
         }
         Ok::<_, Box<dyn std::error::Error>>(
-            serde_json::json!({"purgedJobs":purged,"admissions":admissions,"abandonedSnapshots":abandoned_snapshots,"abandonedColorStages":abandoned_color_stages,"applied":true}),
+            serde_json::json!({"purgedJobs":purged,"admissions":admissions,"abandonedSnapshots":abandoned_snapshots,"abandonedColorStages":abandoned_color_stages,"abandonedUploads":abandoned_uploads,"applied":true}),
         )
     }
     .await;
@@ -99,6 +101,70 @@ pub async fn run(
         .finish_audit(sequence, if result.is_ok() { 200 } else { 500 })
         .await?;
     result
+}
+async fn sweep_uploads(
+    app: &App,
+    cutoff: i64,
+    apply: bool,
+) -> Result<Vec<Uuid>, Box<dyn std::error::Error>> {
+    let root = app.root.join("jobs");
+    if std::fs::canonicalize(&root)? != root {
+        return Err("invalid jobs directory".into());
+    }
+    let cutoff = std::time::UNIX_EPOCH + std::time::Duration::from_secs(cutoff as u64);
+    let mut reclaimed = vec![];
+    for entry in std::fs::read_dir(&root)?.take(4096) {
+        let entry = entry?;
+        let Ok(id) = Uuid::parse_str(&entry.file_name().to_string_lossy()) else {
+            continue;
+        };
+        let result = async {
+            let metadata = std::fs::symlink_metadata(entry.path())?;
+            if !metadata.is_dir() || metadata.modified()? > cutoff {
+                return Ok(false);
+            }
+            let marker = entry.path().join("upload-writer.lock");
+            if !std::fs::symlink_metadata(&marker)?.is_file() {
+                return Ok(false);
+            }
+            let writer = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(marker)?;
+            match writer.try_lock() {
+                Ok(()) => {}
+                Err(std::fs::TryLockError::WouldBlock) => return Ok(false),
+                Err(error) => return Err(error.into()),
+            }
+            if app.repo.upload_has_registration(id).await?
+                || std::fs::symlink_metadata(entry.path())?.modified()? > cutoff
+            {
+                return Ok(false);
+            }
+            if apply {
+                match app.repo.claim_upload_retention(id).await {
+                    Ok(()) => {}
+                    Err(StorageError::Conflict) => return Ok(false),
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            Ok::<_, Box<dyn std::error::Error>>(true)
+        }
+        .await;
+        match result {
+            Ok(true) => reclaimed.push(id),
+            Ok(false) => {}
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) => {}
+            Err(error) => return Err(error),
+        }
+        if reclaimed.len() == 128 {
+            break;
+        }
+    }
+    Ok(reclaimed)
 }
 
 fn sweep_color_stages(

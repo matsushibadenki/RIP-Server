@@ -20,6 +20,8 @@ mod authorization;
 pub mod color;
 pub mod delivery;
 pub mod dispatch;
+mod event_stream;
+pub mod inspection;
 pub mod maintenance;
 pub mod pipeline;
 mod pipeline_preflight;
@@ -41,6 +43,7 @@ pub struct App {
     pub printer_security: Vec<delivery::PrinterSecurity>,
     pub delivery_preparation: Arc<tokio::sync::Semaphore>,
     pub artifact_budget: Arc<tokio::sync::Semaphore>,
+    pub event_streams: Arc<tokio::sync::Semaphore>,
 }
 pub async fn open(root: PathBuf, token: String) -> Result<App, Box<dyn std::error::Error>> {
     tokio::fs::create_dir_all(root.join("jobs")).await?;
@@ -60,6 +63,7 @@ pub async fn open(root: PathBuf, token: String) -> Result<App, Box<dyn std::erro
         token: token.into(),
         credentials: authorization::load()?,
         artifact_budget: Arc::new(tokio::sync::Semaphore::new(1024)),
+        event_streams: Arc::new(tokio::sync::Semaphore::new(64)),
     })
 }
 pub fn router(app: App) -> Router {
@@ -94,6 +98,11 @@ pub fn router(app: App) -> Router {
         .route("/api/v1/print/submissions", post(submit_pipeline))
         .route("/api/v1/jobs/{id}/pipelines", post(pipeline::create))
         .route("/api/v1/pipelines/{id}", get(pipeline::detail))
+        .route(
+            "/api/v1/pipelines/{id}/timeline/stream",
+            get(event_stream::pipeline),
+        )
+        .route("/api/v1/pipelines/{id}/ticket", get(pipeline::ticket))
         .route("/api/v1/pipelines/{id}/events", get(pipeline::events))
         .route(
             "/api/v1/pipelines/{id}/timeline",
@@ -111,6 +120,22 @@ pub fn router(app: App) -> Router {
             post(print::validate_ticket),
         )
         .route("/api/v1/jobs/{id}/ticket", get(print::ticket))
+        .route(
+            "/api/v1/print/document-inspection-requests/{id}/events/stream",
+            get(event_stream::inspection),
+        )
+        .route(
+            "/api/v1/print/document-inspection-requests/{id}/events",
+            get(inspection::events),
+        )
+        .route(
+            "/api/v1/print/document-inspection-requests/{id}/cancel",
+            post(inspection::cancel),
+        )
+        .route(
+            "/api/v1/print/document-inspection-requests/{id}",
+            post(inspection::submit).get(inspection::detail),
+        )
         .route(
             "/api/v1/print/document-inspections/{id}",
             get(pipeline_preflight::inspection),
@@ -141,12 +166,21 @@ pub fn router(app: App) -> Router {
             "/api/v1/jobs/{id}/delivery-preview",
             post(delivery::preview),
         )
+        .route(
+            "/api/v1/deliveries/{id}/result-receipt",
+            get(delivery::result_receipt),
+        )
         .route("/api/v1/deliveries/{id}/ticket", get(delivery::contract))
         .route("/api/v1/deliveries/{id}", get(delivery::detail))
         .route("/api/v1/deliveries/{id}/cancel", post(delivery::cancel))
         .route(
             "/api/v1/deliveries/{id}/reconcile",
             post(delivery::reconcile),
+        )
+        .route("/api/v1/print/receipt-keys", get(preflight::receipt_keys))
+        .route(
+            "/api/v1/print/receipt-keys/{key_id}/revoke",
+            post(preflight::revoke_receipt_key),
         )
         .route("/api/v1/jobs/{id}/receipt", get(preflight::receipt))
         .route("/api/v1/jobs/{id}/artifacts", get(preflight::artifacts))
@@ -281,6 +315,10 @@ impl From<StorageError> for ApiError {
         match e {
             StorageError::NotFound => Self(StatusCode::NOT_FOUND, "not_found"),
             StorageError::Conflict => Self(StatusCode::CONFLICT, "state_conflict"),
+            StorageError::ReceiptKeyRevoked => Self(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "receipt_signing_key_revoked",
+            ),
             e => {
                 tracing::error!(error=%e,"storage failure");
                 Self(StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
@@ -349,6 +387,7 @@ async fn upload(
     let id = Uuid::new_v4();
     let directory = app.root.join("jobs").join(id.to_string());
     tokio::fs::create_dir(&directory).await.map_err(internal)?;
+    let _writer = rip_jobs::upload_guard(&directory).map_err(internal)?;
     let result = receive(&app, id, &directory, &mut multipart).await;
     if result.is_err() {
         let _ = tokio::fs::remove_dir_all(&directory).await;
@@ -501,6 +540,7 @@ async fn submit_pipeline(
     let id = Uuid::new_v4();
     let directory = app.root.join("jobs").join(id.to_string());
     tokio::fs::create_dir(&directory).await.map_err(internal)?;
+    let _writer = rip_jobs::upload_guard(&directory).map_err(internal)?;
     let mut committed = false;
     let result = async {
         let (manifest, request) = stage_upload(&directory, &mut multipart, true).await?;

@@ -205,6 +205,8 @@ English: The authenticated events endpoint returns state history ordered by pers
 
 ### Local MCP / ローカルMCP / 本地MCP
 
+remote MCPのHTTP操作と通知配信は [MCP-HTTP.md](docs/MCP-HTTP.md) を参照してください。 / Remote HTTP operations and notifications: see MCP-HTTP.md / 远程HTTP操作与通知见MCP-HTTP.md。
+
 `cargo run --locked -p jrip-mcp` でstdio MCPサーバーを起動します。API・Dispatcherと同じ `JRIP_DATA_ROOT`、24文字以上の `JRIP_API_TOKEN` を設定してください。stdoutはJSON-RPC専用、操作ログはstderrです。MCP 2025-11-25のinitializeとnotifications/initialized後に利用します。入力上限64 KiB、API応答上限4 MiBです。
 
 読み取り5種、保留・再開・取消3種に加え、`print_create_preflight`、`rip_submit`、`rip_retry_job` を提供します。投入は事前確認IDを冪等キーとし、原稿をSHA-256照合して32 MiBまで受け付けます。原稿は管理者が設定した `JRIP_INPUT_ROOT` の直下へ置き、toolには `sourceName` だけを渡します。絶対パス、親ディレクトリ、シンボリックリンクは拒否します。root未設定時は投入toolを公開しません。原稿・TIFFをMCPメッセージへ埋め込みません。再試行は失敗・取消済みジョブに限定し、元の原稿・設定を使用して新しいjob-idを返します。`requestId` は再送でも同じUUID、`expectedRevision` は元ジョブのrevisionを指定します。設定変更やエンジン変更を伴う実行は新しい事前確認で行ってください。

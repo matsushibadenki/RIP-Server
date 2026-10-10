@@ -24,6 +24,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 futures-util = "0.3"
 tempfile = "3"
 [dev-dependencies]
+ring = "0.17"
 lcms2 = { version = "=6.2.0", features = ["static"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

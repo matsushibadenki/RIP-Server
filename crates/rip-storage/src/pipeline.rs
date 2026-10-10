@@ -23,6 +23,95 @@ async fn record(
     Ok(())
 }
 impl Repository {
+    /// One SQLite read snapshot joins immutable contracts and observed attempt states.
+    /// Missing historical evidence remains null; it is never inferred from job metadata.
+    pub async fn pipeline_ticket(&self, id: Uuid) -> Result<Value, StorageError> {
+        let mut tx = self.pool.begin().await?;
+        let workflow: String = sqlx::query_scalar("SELECT payload FROM print_pipelines WHERE id=?")
+            .bind(id.to_string())
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(StorageError::NotFound)?;
+        let workflow: Value = serde_json::from_str(&workflow)?;
+        let source = workflow["sourceJob"]
+            .as_str()
+            .ok_or(StorageError::Conflict)?;
+        let raster: Option<String> =
+            sqlx::query_scalar("SELECT payload FROM job_tickets WHERE job_id=?")
+                .bind(source)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let color: Option<String> =
+            sqlx::query_scalar("SELECT payload FROM color_attempts WHERE id=?")
+                .bind(id.to_string())
+                .fetch_optional(&mut *tx)
+                .await?;
+        let delivery: Option<String> =
+            sqlx::query_scalar("SELECT payload FROM deliveries WHERE id=?")
+                .bind(id.to_string())
+                .fetch_optional(&mut *tx)
+                .await?;
+        let contract: Option<String> =
+            sqlx::query_scalar("SELECT payload FROM delivery_contracts WHERE delivery_id=?")
+                .bind(id.to_string())
+                .fetch_optional(&mut *tx)
+                .await?;
+        tx.commit().await?;
+        fn parse(text: Option<String>) -> Result<Value, StorageError> {
+            Ok(text
+                .map(|text| serde_json::from_str(&text))
+                .transpose()?
+                .unwrap_or(Value::Null))
+        }
+        let raster = parse(raster)?;
+        let color = parse(color)?;
+        let delivery = parse(delivery)?;
+        let contract = parse(contract)?;
+        if (!color.is_null() && color["sourceJob"] != source)
+            || (!delivery.is_null()
+                && (delivery["ticket"]["sourceJob"] != source
+                    || delivery["ticket"]["printerId"]
+                        != workflow["ticket"]["request"]["printerId"]
+                    || delivery["ticket"]["media"] != workflow["ticket"]["request"]["media"]))
+        {
+            return Err(StorageError::Conflict);
+        }
+        if !raster.is_null()
+            && (raster["jobId"] != source
+                || raster["document"]["sha256"] != workflow["ticket"]["sourceSha256"])
+        {
+            return Err(StorageError::Conflict);
+        }
+        if !contract.is_null()
+            && (contract["ticket"]["jobId"] != source
+                || contract["ticket"]["attemptId"] != id.to_string()
+                || contract["ticket"]["sourceSha256"] != workflow["ticket"]["sourceSha256"]
+                || contract["ticket"]["printerConfigSha256"]
+                    != workflow["ticket"]["printerConfigSha256"])
+        {
+            return Err(StorageError::Conflict);
+        }
+        let ticket = json!({"schemaVersion":1,"version":"0.1","profile":"org.jrip.print.unified-ticket-v1",
+            "pipelineId":id,"sourceJob":source,"raster":raster,"registration":workflow["ticket"],
+            "color":color["ticket"],"physical":contract,"completionMeaning":"device-confirmed"});
+        let digest = format!("{:x}", sha2::Sha256::digest(serde_json::to_vec(&ticket)?));
+        let portable = match rip_digest::digest(&ticket) {
+            Ok(hash) => json!({"profile":rip_digest::PROFILE,"sha256":hash,"available":true}),
+            Err(_) => {
+                json!({"profile":rip_digest::PROFILE,"sha256":null,"available":false,"reason":"CANONICAL_INPUT_UNSUPPORTED"})
+            }
+        };
+        Ok(
+            json!({"ticket":ticket,"portableDigest":portable,"ticketSha256":digest,"digestProfile":"org.jrip.serde-json-v1",
+            "contractFinalized":!contract.is_null(),"rasterEvidenceAvailable":!raster.is_null(),
+            "execution":{"pipelineState":workflow["state"],"pipelineRevision":workflow["revision"],
+                "colorState":color["state"],"colorRevision":color["revision"],
+                "deliveryState":delivery["state"],"deliveryRevision":delivery["revision"],
+                "deviceJobId":delivery["deviceJobId"],
+                "completed":workflow["state"] == "COMPLETED" && delivery["state"] == "COMPLETED" && !contract.is_null()},
+            "authorizationGranted":false}),
+        )
+    }
     pub async fn create_pipeline(
         &self,
         id: Uuid,

@@ -111,6 +111,7 @@ pub async fn commit(
     let id = Uuid::new_v4();
     let directory = app.root.join("jobs").join(id.to_string());
     tokio::fs::create_dir(&directory).await.map_err(internal)?;
+    let _writer = rip_jobs::upload_guard(&directory).map_err(internal)?;
     let result = async {
         stage_document(&directory, &mut multipart).await?;
         rip_jobs::publish_bound(
@@ -213,4 +214,73 @@ pub(crate) async fn stage_document(
         return Err(bad("missing_document"));
     }
     Ok(())
+}
+
+#[derive(serde::Deserialize)]
+pub struct ReceiptKeysQuery {
+    #[serde(default)]
+    after: String,
+    limit: Option<i64>,
+}
+pub async fn receipt_keys(
+    State(app): State<App>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<ReceiptKeysQuery>,
+) -> Result<Json<Value>, ApiError> {
+    authorize(&app, &headers, "jobs:read")?;
+    let limit = query.limit.unwrap_or(50);
+    if !(1..=100).contains(&limit)
+        || (!query.after.is_empty()
+            && (query.after.len() != 71
+                || !query.after.starts_with("sha256:")
+                || !query.after.as_bytes()[7..]
+                    .iter()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))))
+    {
+        return Err(ApiError(
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid_receipt_key_cursor",
+        ));
+    }
+    Ok(Json(app.repo.receipt_keys(&query.after, limit).await?))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReceiptKeyRevocation {
+    reason: String,
+}
+pub async fn revoke_receipt_key(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(key_id): Path<String>,
+    Json(req): Json<ReceiptKeyRevocation>,
+) -> Result<Json<Value>, ApiError> {
+    authorize(&app, &headers, "admin")?;
+    if !rip_storage::receipts::valid_key_id(&key_id)
+        || !matches!(
+            req.reason.as_str(),
+            "compromised" | "retired" | "operator-request"
+        )
+    {
+        return Err(ApiError(
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid_receipt_key_revocation",
+        ));
+    }
+    let actor = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .and_then(|t| app.access(t))
+        .map(|(id, _)| id)
+        .ok_or(ApiError(
+            axum::http::StatusCode::UNAUTHORIZED,
+            "unauthorized",
+        ))?;
+    Ok(Json(
+        app.repo
+            .revoke_receipt_key(&key_id, &req.reason, &actor)
+            .await?,
+    ))
 }

@@ -5,6 +5,16 @@ use sha2::{Digest, Sha256};
 use std::path::Path;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
+/// Hold through writes, database publication and failure cleanup.
+pub fn upload_guard(directory: &Path) -> Result<std::fs::File, std::io::Error> {
+    let file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(directory.join("upload-writer.lock"))?;
+    file.lock()?;
+    Ok(file)
+}
 
 pub const MAX_DOCUMENT_BYTES: u64 = 32 * 1024 * 1024;
 #[derive(Debug, thiserror::Error)]
@@ -106,6 +116,7 @@ pub async fn submit_bytes(
     let id = Uuid::new_v4();
     let dir = root.join("jobs").join(id.to_string());
     tokio::fs::create_dir(&dir).await?;
+    let _writer = upload_guard(&dir)?;
     let result = async {
         let mut file = tokio::fs::File::create(dir.join("source.part")).await?;
         file.write_all(document).await?;
