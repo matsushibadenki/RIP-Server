@@ -865,6 +865,7 @@ dependencies = [
  "rip-acx",
  "rip-color",
  "rip-core",
+ "rip-digest",
  "rip-interpreter",
  "rip-ipp",
  "rip-jobs",

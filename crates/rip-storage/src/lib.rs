@@ -345,14 +345,15 @@ impl Repository {
                 "capability":pf["capability"], "provider":"urn:acx:provider:jrip-local",
                 "status":"accepted", "issuedAt":row.get::<String,_>("issued_at"),
                 "requestHash":pf["requestHash"],
-                "effects":if pf["profile"] == "org.jrip.pipeline-preflight-v1" {serde_json::json!(["job-queued","source-stored","workflow-queued"])} else {serde_json::json!(["job-queued","source-stored"])},
+                "effects":if matches!(pf["profile"].as_str(),Some("org.jrip.pipeline-preflight-v1"|"org.jrip.pipeline-preflight-v2")) {serde_json::json!(["job-queued","source-stored","workflow-queued"])} else {serde_json::json!(["job-queued","source-stored"])},
                 "recovery":{"reversible":false,"cancelUntil":"terminal","note":"Cancellation can discard output; consumed compute cannot be undone."},
                 "proof":{"type":"plain-provider-record","profile":"org.jrip.acceptance-receipt-v1",
                     "jobId":job.id,"preflightId":id,"preflightDigest":pf["preflightDigest"],
                     "sourceSha256":job.source_sha256,"completionMeaning":"raster_export",
+                    "requestHashDigestProfile":if pf.get("retrySource").is_some() {serde_json::json!("org.jrip.serde-json-v1")}else{pf["digestProfile"].clone()},"preflightDigestProfile":pf["digestProfile"],
                     "authorization":"shared-bearer","signed":false,
                     "workflowId":pf["workflowRequest"]["requestId"],
-                    "workflowCompletionMeaning":if pf["profile"] == "org.jrip.pipeline-preflight-v1" {Some("device-confirmed")}else{None}}
+                    "workflowCompletionMeaning":if matches!(pf["profile"].as_str(),Some("org.jrip.pipeline-preflight-v1"|"org.jrip.pipeline-preflight-v2")) {Some("device-confirmed")}else{None}}
             });
             if let Some(signer) = &self.receipt_signer {
                 receipts::sign_stored(&mut tx, signer, &mut receipt, true).await?;
@@ -645,7 +646,7 @@ async fn store_result_receipt(
         "resultHash":format!("sha256:{:x}",Sha256::digest(serde_json::to_vec(&result)?)),
         "effects":if job.state == JobState::Completed { vec!["raster-export-completed"] } else { vec!["job-terminated"] },
         "proof":{"type":"plain-provider-record","signed":false,"profile":"org.jrip.result-receipt-v1",
-        "digestProfile":"org.jrip.serde-json-v1","acceptanceReceiptId":accepted["receiptId"],"result":result}});
+        "digestProfile":"org.jrip.serde-json-v1","requestHashDigestProfile":accepted["proof"]["requestHashDigestProfile"],"acceptanceReceiptId":accepted["receiptId"],"result":result}});
     if let Some(signer) = signer {
         receipts::sign_stored(tx, signer, &mut receipt, false).await?;
     }

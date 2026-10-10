@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 [dependencies]
 rip-core.workspace = true
+rip-digest.workspace = true
 rip-storage.workspace = true
 rip-interpreter.workspace = true
 rip-jobs.workspace = true

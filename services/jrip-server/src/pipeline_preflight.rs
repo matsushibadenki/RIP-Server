@@ -4,7 +4,7 @@ use rip_acx::intent::{Destination, Mode, PrintIntent, Requirement};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-const PROFILE: &str = "org.jrip.pipeline-preflight-v1";
+const PROFILE: &str = "org.jrip.pipeline-preflight-v2";
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Request {
@@ -40,6 +40,7 @@ pub async fn create(
     Json(mut req): Json<Request>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     pipeline::scopes(&app, &headers)?;
+    let digest_profile = preflight::selected_digest(&headers)?;
     if req.intent.output.destination != Destination::Printer {
         return Err(bad("printer_destination_required"));
     }
@@ -192,8 +193,8 @@ pub async fn create(
     };
 
     let id = Uuid::new_v4();
-    let mut payload = json!({"schemaVersion":1,"profile":PROFILE,"preflightId":id,"capability":"org.jrip.print.pipeline","issuedAt":rip_storage::now(),"expiresAt":snapshot["expiresAt"],"capabilityRevision":snapshot["capabilityRevision"],"ticket":resolution["ticket"],"requestHash":preflight::digest(&registration)?,"workflowRequest":workflow,"sourceInspection":inspection,"registrationTicket":registration,"actor":pipeline::actor(&app,&headers)?,"adjustments":adjustments,"digestProfile":"org.jrip.serde-json-v1","authorizationGranted":false,"documentVerified":false,"commitAvailable":true,"effects":if workflow.color.is_some() {json!(["compute","persistent-storage","color-processing","physical-output"])}else{json!(["compute","persistent-storage","physical-output"])},"messages":{"en":"Settings preflight only; geometry, source structure, runtime and approval still require checks","ja":"設定の事前確認です。原稿構造・用紙寸法・実行環境・承認の検査は別途必要です","zh-CN":"仅设置预检，源结构、纸张尺寸、运行环境与审批仍需检查"}});
-    payload["preflightDigest"] = json!(preflight::digest(&payload)?);
+    let mut payload = json!({"schemaVersion":1,"profile":if digest_profile==preflight::LEGACY_DIGEST {"org.jrip.pipeline-preflight-v1"}else{PROFILE},"preflightId":id,"capability":"org.jrip.print.pipeline","issuedAt":rip_storage::now(),"expiresAt":snapshot["expiresAt"],"capabilityRevision":snapshot["capabilityRevision"],"ticket":resolution["ticket"],"requestHash":preflight::digest_with_profile(&registration,digest_profile)?,"workflowRequest":workflow,"sourceInspection":inspection,"registrationTicket":registration,"actor":pipeline::actor(&app,&headers)?,"adjustments":adjustments,"digestProfile":digest_profile,"authorizationGranted":false,"documentVerified":false,"commitAvailable":true,"effects":if workflow.color.is_some() {json!(["compute","persistent-storage","color-processing","physical-output"])}else{json!(["compute","persistent-storage","physical-output"])},"messages":{"en":"Settings preflight only; geometry, source structure, runtime and approval still require checks","ja":"設定の事前確認です。原稿構造・用紙寸法・実行環境・承認の検査は別途必要です","zh-CN":"仅设置预检，源结构、纸张尺寸、运行环境与审批仍需检查"}});
+    payload["preflightDigest"] = json!(preflight::digest_with_profile(&payload, digest_profile)?);
     app.repo
         .save_preflight(
             id,
@@ -312,7 +313,8 @@ pub async fn commit(
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     pipeline::scopes(&app, &headers)?;
     let payload = app.repo.get_preflight(id).await?;
-    if payload["profile"] != PROFILE || payload["actor"] != pipeline::actor(&app, &headers)? {
+    let digest_profile = preflight::stored_digest_profile(&payload, true)?;
+    if payload["actor"] != pipeline::actor(&app, &headers)? {
         return Err(ApiError(StatusCode::FORBIDDEN, "preflight_actor_mismatch"));
     }
     let supplied = headers
@@ -325,7 +327,7 @@ pub async fn commit(
         .ok_or(bad("invalid_preflight"))?
         .remove("preflightDigest");
     if supplied != payload["preflightDigest"].as_str().unwrap_or("")
-        || supplied != preflight::digest(&unsigned)?
+        || supplied != preflight::digest_with_profile(&unsigned, digest_profile)?
     {
         return Err(ApiError(StatusCode::CONFLICT, "preflight_digest_mismatch"));
     }

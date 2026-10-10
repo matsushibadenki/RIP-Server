@@ -9,13 +9,47 @@ fn now() -> i64 {
         .expect("system clock before epoch")
         .as_secs() as i64
 }
-// Experimental profile: compact serde_json Value with lexicographically sorted object keys.
-// This is not RFC 8785 and is explicitly scoped to this provider's ticket vocabulary.
-pub(crate) fn digest(value: &Value) -> Result<String, ApiError> {
-    Ok(format!(
-        "sha256:{:x}",
-        Sha256::digest(serde_json::to_vec(value).map_err(internal)?)
-    ))
+pub(crate) const LEGACY_DIGEST: &str = "org.jrip.serde-json-v1";
+pub(crate) fn selected_digest(headers: &HeaderMap) -> Result<&'static str, ApiError> {
+    if headers.get_all("x-jrip-digest-profile").iter().count() > 1 {
+        return Err(bad("invalid_digest_profile"));
+    }
+    match headers.get("x-jrip-digest-profile").map(|h| h.to_str()) {
+        None => Ok(rip_digest::PROFILE),
+        Some(Ok(rip_digest::PROFILE)) => Ok(rip_digest::PROFILE),
+        Some(Ok(LEGACY_DIGEST)) => Ok(LEGACY_DIGEST),
+        _ => Err(bad("invalid_digest_profile")),
+    }
+}
+pub(crate) fn digest_with_profile(value: &Value, profile: &str) -> Result<String, ApiError> {
+    match profile {
+        rip_digest::PROFILE => {
+            rip_digest::digest(value).map_err(|_| bad("canonical_input_unsupported"))
+        }
+        LEGACY_DIGEST => Ok(format!(
+            "sha256:{:x}",
+            Sha256::digest(serde_json::to_vec(value).map_err(internal)?)
+        )),
+        _ => Err(bad("invalid_digest_profile")),
+    }
+}
+pub(crate) fn stored_digest_profile(
+    payload: &Value,
+    pipeline: bool,
+) -> Result<&'static str, ApiError> {
+    match (
+        pipeline,
+        payload["profile"].as_str(),
+        payload["digestProfile"].as_str(),
+    ) {
+        (false, Some("org.jrip.settings-preflight-v1"), Some(LEGACY_DIGEST))
+        | (true, Some("org.jrip.pipeline-preflight-v1"), Some(LEGACY_DIGEST)) => Ok(LEGACY_DIGEST),
+        (false, Some("org.jrip.settings-preflight-v2"), Some(rip_digest::PROFILE))
+        | (true, Some("org.jrip.pipeline-preflight-v2"), Some(rip_digest::PROFILE)) => {
+            Ok(rip_digest::PROFILE)
+        }
+        _ => Err(bad("invalid_preflight_profile")),
+    }
 }
 pub async fn create(
     State(app): State<App>,
@@ -23,6 +57,7 @@ pub async fn create(
     Json(intent): Json<rip_acx::intent::PrintIntent>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     authorize(&app, &headers, "jobs:submit")?;
+    let digest_profile = selected_digest(&headers)?;
     let resolution = rip_acx::intent::resolve(intent);
     if resolution["executable"] != true {
         return Ok((StatusCode::UNPROCESSABLE_ENTITY, Json(resolution)));
@@ -31,18 +66,18 @@ pub async fn create(
     let issued = now();
     let ticket = &resolution["ticket"];
     let mut payload = json!({
-        "acx":"0.1", "profile":"org.jrip.settings-preflight-v1",
+        "acx":"0.1", "profile":if digest_profile==LEGACY_DIGEST {"org.jrip.settings-preflight-v1"}else{"org.jrip.settings-preflight-v2"},
         "preflightId":id,"capability":rip_acx::RIP_CAPABILITY_ID,
         "issuedAt":issued,"expiresAt":issued+300,
-        "ticket":ticket,"requestHash":digest(ticket)?,
-        "digestProfile":"org.jrip.serde-json-v1",
+        "ticket":ticket,"requestHash":digest_with_profile(ticket,digest_profile)?,
+        "digestProfile":digest_profile,
         "adjustments":resolution["adjustments"],
         "effects":["compute","persistent-storage","raster-output"],
         "authorizationGranted":false,"documentVerified":false,
         "commitAvailable":true,
         "messages":resolution["messages"]
     });
-    let hash = digest(&payload)?;
+    let hash = digest_with_profile(&payload, digest_profile)?;
     payload["preflightDigest"] = json!(hash);
     app.repo.save_preflight(id, &payload, issued + 300).await?;
     Ok((StatusCode::CREATED, Json(payload)))
@@ -54,7 +89,10 @@ pub async fn get(
 ) -> Result<Json<Value>, ApiError> {
     authorize(&app, &headers, "jobs:submit")?;
     let payload = app.repo.get_preflight(id).await?;
-    if payload["profile"] == "org.jrip.pipeline-preflight-v1" {
+    if matches!(
+        payload["profile"].as_str(),
+        Some("org.jrip.pipeline-preflight-v1" | "org.jrip.pipeline-preflight-v2")
+    ) {
         pipeline::scopes(&app, &headers)?;
         if payload["actor"] != pipeline::actor(&app, &headers)? {
             return Err(ApiError(StatusCode::FORBIDDEN, "preflight_actor_mismatch"));
@@ -74,9 +112,13 @@ pub async fn commit(
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     authorize(&app, &headers, "jobs:submit")?;
     let payload = app.repo.get_preflight(preflight_id).await?;
-    if payload["profile"] == "org.jrip.pipeline-preflight-v1" {
+    if matches!(
+        payload["profile"].as_str(),
+        Some("org.jrip.pipeline-preflight-v1" | "org.jrip.pipeline-preflight-v2")
+    ) {
         return Err(bad("pipeline_commit_endpoint_required"));
     }
+    let digest_profile = stored_digest_profile(&payload, false)?;
     let supplied = headers
         .get("x-jrip-preflight-digest")
         .and_then(|h| h.to_str().ok())
@@ -87,7 +129,7 @@ pub async fn commit(
         .ok_or_else(|| bad("invalid_preflight"))?
         .remove("preflightDigest");
     if supplied != payload["preflightDigest"].as_str().unwrap_or("")
-        || supplied != digest(&unsigned)?
+        || supplied != digest_with_profile(&unsigned, digest_profile)?
     {
         return Err(ApiError(StatusCode::CONFLICT, "preflight_digest_mismatch"));
     }

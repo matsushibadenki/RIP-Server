@@ -403,10 +403,18 @@ impl Session {
             return self.api(request).await;
         }
         if name == "print_create_pipeline_preflight" {
+            let mut payload = args.clone();
+            payload.as_object_mut().unwrap().remove("digestProfile");
             let request = self
                 .builder("POST", "/api/v1/print/pipeline-preflights")
+                .header(
+                    "x-jrip-digest-profile",
+                    args["digestProfile"]
+                        .as_str()
+                        .unwrap_or("org.jrip.jcs-safe-v1"),
+                )
                 .header("content-type", "application/json")
-                .body(Body::from(args.to_string()))
+                .body(Body::from(payload.to_string()))
                 .map_err(|_| json!({"code":"invalid_request"}))?;
             return self.api(request).await;
         }
@@ -429,6 +437,12 @@ impl Session {
                     },
                 )
                 .header("content-type", "application/json")
+                .header(
+                    "x-jrip-digest-profile",
+                    args["digestProfile"]
+                        .as_str()
+                        .unwrap_or("org.jrip.jcs-safe-v1"),
+                )
                 .body(Body::from(args["intent"].to_string()))
                 .map_err(|_| json!({"code":"invalid_request"}))?;
             return self.api(request).await;
@@ -806,6 +820,7 @@ fn tools() -> Vec<Value> {
         if name=="print_validate_ticket" {properties["ticket"]=json!({"type":"object","description":"Versioned JobTicket; deeply validated by Print API / Print APIで検証 / 由Print API验证"});required.push("ticket");}
         if control || name=="print_preview_delivery" {properties["expectedRevision"]=json!({"type":"integer","minimum":0});required.push("expectedRevision");}
         if matches!(name,"rip_retry_job"|"print_deliver_job"|"print_preview_delivery") {properties["requestId"]=json!({"type":"string","format":"uuid"});required.push("requestId");}
+        if matches!(name,"print_create_preflight"|"print_create_pipeline_preflight") {properties["digestProfile"]=json!({"type":"string","enum":["org.jrip.jcs-safe-v1","org.jrip.serde-json-v1"]});}
         if matches!(name,"print_create_preflight"|"print_resolve_intent") {properties["intent"]=json!({"type":"object","description":"ACX PrintIntent; validated by Print API / Print APIで検証 / 由Print API验证"});required.push("intent");}
         if name=="print_get_printer" {properties["printerId"]=json!({"type":"string","minLength":1});required.push("printerId");}
         if name=="print_revoke_receipt_key" {properties["keyId"]=json!({"type":"string","pattern":"^sha256:[0-9a-f]{64}$"});properties["reason"]=json!({"type":"string","enum":["compromised","retired","operator-request"]});required.extend(["keyId","reason"]);}

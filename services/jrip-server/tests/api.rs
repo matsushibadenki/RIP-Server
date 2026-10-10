@@ -388,20 +388,13 @@ async fn preflight_survives_restart_and_expired_records_are_rejected() {
     let loaded: serde_json::Value =
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(loaded, created);
-    use sha2::{Digest, Sha256};
     let mut unsigned = loaded.clone();
     let hash = unsigned
         .as_object_mut()
         .unwrap()
         .remove("preflightDigest")
         .unwrap();
-    assert_eq!(
-        hash,
-        format!(
-            "sha256:{:x}",
-            Sha256::digest(serde_json::to_vec(&unsigned).unwrap())
-        )
-    );
+    assert_eq!(hash, rip_digest::digest(&unsigned).unwrap());
     assert_eq!(
         restarted
             .oneshot(request(

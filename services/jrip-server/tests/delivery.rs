@@ -1707,10 +1707,7 @@ async fn physical_preflight_expiry_and_icc_integrity_block_acceptance() {
     expired["preflightId"] = serde_json::json!(id);
     expired["expiresAt"] = serde_json::json!(rip_storage::now() - 1);
     expired.as_object_mut().unwrap().remove("preflightDigest");
-    expired["preflightDigest"] = serde_json::json!(format!(
-        "sha256:{:x}",
-        Sha256::digest(serde_json::to_vec(&expired).unwrap())
-    ));
+    expired["preflightDigest"] = serde_json::json!(rip_digest::digest(&expired).unwrap());
     app.repo
         .save_preflight(id, &expired, rip_storage::now() - 1)
         .await
