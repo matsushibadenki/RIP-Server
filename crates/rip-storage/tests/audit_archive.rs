@@ -50,6 +50,40 @@ async fn cli_exports_recovers_and_checks_independently_pinned_digest() {
             .success()
     );
     let id = archive["payload"]["id"].as_str().unwrap();
+    let listing = Command::new(binary)
+        .arg("list")
+        .arg(&database)
+        .args(["-", &(now() + 1).to_string(), "100"])
+        .output()
+        .unwrap();
+    assert!(listing.status.success());
+    let listing: serde_json::Value = serde_json::from_slice(&listing.stdout).unwrap();
+    assert_eq!(listing["archives"][0]["archiveId"], id);
+    assert_eq!(listing["hasMore"], false);
+    assert!(listing["archives"][0].get("records").is_none());
+    let vault = dir.path().join("vault");
+    std::fs::create_dir(&vault).unwrap();
+    assert!(
+        Command::new(binary)
+            .arg("store")
+            .arg(&database)
+            .arg(id)
+            .arg(&vault)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let status = Command::new(binary)
+        .arg("vault-status")
+        .arg(&database)
+        .arg(id)
+        .arg(&vault)
+        .output()
+        .unwrap();
+    assert!(status.status.success());
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["contentMatches"], true);
+    assert_eq!(status["acknowledged"], true);
     let recovered = dir.path().join("recovered.json");
     assert!(
         Command::new(binary)
@@ -96,4 +130,109 @@ async fn cli_exports_recovers_and_checks_independently_pinned_digest() {
             .unwrap()
             .success()
     );
+}
+
+#[tokio::test]
+async fn signed_cli_requires_a_key_and_current_verification_checks_revocation() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("db.sqlite");
+    let output = dir.path().join("signed.json");
+    let private = dir.path().join("key.pk8");
+    let public_path = dir.path().join("public.bin");
+    let key =
+        ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
+    let signer = rip_storage::receipts::ReceiptSigner::from_pkcs8(key.as_ref()).unwrap();
+    std::fs::write(&private, key.as_ref()).unwrap();
+    std::fs::write(&public_path, signer.public_key()).unwrap();
+    let repo = Repository::open_with_receipt_signer(&database, None)
+        .await
+        .unwrap();
+    let sequence = repo
+        .begin_audit(Uuid::new_v4(), "admin", "test", None)
+        .await
+        .unwrap();
+    repo.finish_audit(sequence, 200).await.unwrap();
+    let binary = env!("CARGO_BIN_EXE_jrip-audit");
+    assert!(
+        !Command::new(binary)
+            .env_remove("JRIP_RECEIPT_SIGNING_KEY")
+            .arg("create-signed")
+            .arg(&database)
+            .args(["0", &(now() + 1).to_string(), "100"])
+            .arg(&output)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(!output.exists());
+    assert!(
+        Command::new(binary)
+            .env("JRIP_RECEIPT_SIGNING_KEY", &private)
+            .arg("create-signed")
+            .arg(&database)
+            .args(["0", &(now() + 1).to_string(), "100"])
+            .arg(&output)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new(binary)
+            .arg("verify-signature")
+            .arg(&output)
+            .arg(&public_path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new(binary)
+            .arg("verify-current")
+            .arg(&database)
+            .arg(&output)
+            .arg(&public_path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let archive: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&output).unwrap()).unwrap();
+    repo.revoke_receipt_key(
+        archive["signature"]["keyId"].as_str().unwrap(),
+        "compromised",
+        "admin",
+    )
+    .await
+    .unwrap();
+    assert!(
+        !Command::new(binary)
+            .arg("verify-current")
+            .arg(&database)
+            .arg(&output)
+            .arg(&public_path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new(binary)
+            .arg("verify-signature")
+            .arg(&output)
+            .arg(&public_path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        !Command::new(binary)
+            .env("JRIP_RECEIPT_SIGNING_KEY", &private)
+            .arg("create-signed")
+            .arg(&database)
+            .args(["0", &(now() + 1).to_string(), "100"])
+            .arg(dir.path().join("revoked.json"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(!dir.path().join("revoked.json").exists());
 }

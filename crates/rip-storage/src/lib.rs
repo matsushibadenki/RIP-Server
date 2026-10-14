@@ -1,6 +1,7 @@
 pub mod approvals;
 pub mod audit;
 pub mod audit_archive;
+pub mod audit_vault;
 pub mod color;
 pub mod delivery;
 pub mod delivery_receipt;
@@ -81,6 +82,7 @@ impl Repository {
             .await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS delivery_events (sequence INTEGER PRIMARY KEY AUTOINCREMENT,delivery_id TEXT NOT NULL,state TEXT NOT NULL,created_at INTEGER NOT NULL)").execute(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS job_event_details (sequence INTEGER PRIMARY KEY,payload TEXT NOT NULL)").execute(&pool).await?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS audit_archive_exports(archive_id TEXT NOT NULL,target TEXT NOT NULL,digest TEXT NOT NULL,bytes INTEGER NOT NULL,verified_at INTEGER NOT NULL,PRIMARY KEY(archive_id,target))").execute(&pool).await?;
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS audit_archives(id TEXT PRIMARY KEY,payload TEXT NOT NULL)",
         )

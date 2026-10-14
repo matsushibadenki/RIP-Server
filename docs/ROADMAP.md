@@ -92,7 +92,11 @@
 - 🟢 [Done] 制限付きRFC 8785共通digest crate／厳密parser／CLI、JCS署名v2と旧v1検証、共通ticketの追加portableDigest。既存hashを変更せずRust／Nodeで相互検証。[CANONICAL-DIGEST.md](CANONICAL-DIGEST.md)。 / Portable bounded JCS digest / 可移植有界JCS摘要。
 - 🟢 [Done] 事前承認digestのversion移行：新規settings／pipeline preflightはJCS v2、明示指定で旧v1、保存済みprofileによるcommit検証。再起動後の互換性と旧物理workflow受付を検証。 / Versioned preflight digest negotiation and persisted-profile verification / 版本化预检摘要协商与持久化profile验证。
 - 🟢 [Done] 監査archiveの不変DB snapshot・JCS digest・ローカルCLI出力／復旧／独立digest検証。未完了記録を飛ばさず元記録を保持。 [AUDIT-ARCHIVE.md](AUDIT-ARCHIVE.md)。 / Immutable bounded audit archives and local export verification / 不可变有界审计归档及本地导出验证。
-- 🟠 [Next] KMS、監査archiveの外部保管・署名・保持期限。
+- 🟢 [Done] 監査archiveの専用Ed25519／JCS署名、鍵必須CLI、失効時の保存拒否、公開鍵での署名検証と現在の失効状態による検証。保存済みarchiveは再署名しない。 / Domain-separated audit signatures and current key trust / 独立domain审计签名与当前密钥信任验证。
+- 🟢 [Done] 監査archiveの管理者指定filesystem vault、非上書き公開、内容確認後の永続ACK・監査、再送復旧と現在の保管状況照会。 / Verified filesystem vault and replay recovery / 验证文件系统归档库与重放恢复。
+- ⭕️ [Pending] 実NFSの永続性・切断復旧、Windowsのdirectory sync。 / Actual NFS durability and Windows directory sync / 实际NFS持久性及Windows目录同步。
+- 🟢 [Done] 監査archiveのmetadata一覧、UUID cursor、作成時刻cutoff、過去の保管確認数、既存archiveからの復旧ID検索。 / Bounded archive metadata catalogue / 有界归档元数据目录。
+- 🟠 [Next] KMS、監査archiveのobject storage・保持期限。
 
 - 🟢 [Done] preflight digest、原稿SHA-256、形式、有効期限を検証するmultipart commit APIを実装。保存済みticketからジョブを登録し、SQLiteトランザクションで同一preflightの同時再送を重複排除する。共通Bearerトークンによる認可を使用。
 - 🟠 [Next] 主体別scope・認可証跡、原稿構造全体の検証、Receipt、期限切れpreflightと孤立ファイルの清掃を追加する。

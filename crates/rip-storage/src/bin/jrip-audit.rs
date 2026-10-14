@@ -5,7 +5,10 @@ use std::{
     path::Path,
 };
 
-fn export(value: &serde_json::Value, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn export(
+    value: &serde_json::Value,
+    path: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -19,15 +22,29 @@ fn export(value: &serde_json::Value, path: &str) -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
+fn read_archive(path: &str) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take((audit_archive::MAX_BYTES * 2 + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > audit_archive::MAX_BYTES * 2 {
+        return Err("archive exceeds input limit".into());
+    }
+    Ok(rip_digest::parse(&bytes)?)
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     match args.as_slice() {
-        [command,database,after,before,limit,output] if command == "create" => {
+        [command,database,after,before,limit,output] if command == "create" || command == "create-signed" => {
             if !Path::new(database).is_file() { return Err("existing repository database required".into()); }
             // Check existing destination before creating a durable snapshot.
             if Path::new(output).exists() { return Err("output already exists".into()); }
-            let repo = Repository::open_with_receipt_signer(Path::new(database),None).await?;
+            let repo = if command == "create-signed" {
+                if std::env::var_os("JRIP_RECEIPT_SIGNING_KEY").is_none() { return Err("JRIP_RECEIPT_SIGNING_KEY is required for create-signed".into()); }
+                Repository::open(Path::new(database)).await?
+            } else { Repository::open_with_receipt_signer(Path::new(database),None).await? };
             let archive = repo.archive_audit(after.parse()?,before.parse()?,limit.parse()?).await?;
             // Printed first: recover this immutable snapshot if file publication fails.
             println!("archiveId={} digest={}",archive["payload"]["id"].as_str().unwrap(),archive["digest"].as_str().unwrap());
@@ -40,16 +57,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             export(&repo.audit_archive(id.parse()?).await?,output)?;
         }
         [command,input,pinned] if command == "verify" => {
-            let mut bytes=Vec::new();
-            std::fs::File::open(input)?.take((audit_archive::MAX_BYTES*2+1) as u64).read_to_end(&mut bytes)?;
-            if bytes.len()>audit_archive::MAX_BYTES*2 { return Err("archive exceeds input limit".into()); }
-            let archive = rip_digest::parse(&bytes)?;
+            let archive = read_archive(input)?;
             if !audit_archive::verify(&archive) || archive["digest"].as_str()!=Some(pinned) {
                 return Err("archive integrity verification failed".into());
             }
             println!("integrity verified against supplied digest; authenticity depends on independent digest pinning");
         }
-        _ => return Err("usage: jrip-audit create DATABASE AFTER BEFORE_UNIX_SECONDS LIMIT OUTPUT.json | export DATABASE ARCHIVE_ID OUTPUT.json | verify INPUT.json PINNED_SHA256".into()),
+        [command,input,public] if command == "verify-signature" => {
+            let key = std::fs::read(public)?;
+            let archive = read_archive(input)?;
+            if !audit_archive::verify_signature(&archive,&key) { return Err("archive signature verification failed".into()); }
+            println!("archive signature verified; revocation not checked");
+        }
+        [command,database,input,public] if command == "verify-current" => {
+            if !Path::new(database).is_file() { return Err("existing repository database required".into()); }
+            let key = std::fs::read(public)?;
+            let archive = read_archive(input)?;
+            let repo = Repository::open_with_receipt_signer(Path::new(database),None).await?;
+            if !repo.verify_audit_archive_current(&archive,&key).await? { return Err("current archive trust verification failed".into()); }
+            println!("archive signature verified against current repository key status");
+        }
+        [command,database,id,directory] if command == "store" || command == "vault-status" => {
+            if !Path::new(database).is_file() { return Err("existing repository database required".into()); }
+            let repo = Repository::open_with_receipt_signer(Path::new(database),None).await?;
+            let result = if command == "store" {repo.store_audit_archive(id.parse()?,Path::new(directory)).await?}
+                else {repo.audit_vault_status(id.parse()?,Path::new(directory)).await?};
+            println!("{}",serde_json::to_string_pretty(&result)?);
+        }
+        [command,database,after,before,limit] if command == "list" => {
+            if !Path::new(database).is_file() { return Err("existing repository database required".into()); }
+            let repo = Repository::open_with_receipt_signer(Path::new(database),None).await?;
+            println!("{}",serde_json::to_string_pretty(&repo.audit_archives(if after=="-" {""}else{after},before.parse()?,limit.parse()?).await?)?);
+        }
+        _ => return Err("usage: jrip-audit create|create-signed DATABASE AFTER BEFORE_UNIX_SECONDS LIMIT OUTPUT.json | export DATABASE ARCHIVE_ID OUTPUT.json | verify INPUT.json PINNED_SHA256 | verify-signature INPUT.json PUBLIC.bin | verify-current DATABASE INPUT.json PUBLIC.bin | store|vault-status DATABASE ARCHIVE_ID VAULT_DIRECTORY | list DATABASE AFTER_UUID_OR_DASH BEFORE_UNIX_SECONDS LIMIT".into()),
     }
     Ok(())
 }

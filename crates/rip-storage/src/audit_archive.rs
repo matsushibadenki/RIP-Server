@@ -43,8 +43,22 @@ impl Repository {
         let payload = json!({"profile":PROFILE,"id":id,"createdAt":now(),"after":after,
             "through":cursor,"before":before,"records":records});
         let digest = rip_digest::digest(&payload).map_err(|_| StorageError::Conflict)?;
-        let archive =
+        let mut archive =
             json!({"digestProfile":rip_digest::PROFILE,"digest":digest,"payload":payload});
+        if let Some(signer) = &self.receipt_signer {
+            let key_id = format!("sha256:{:x}", Sha256::digest(signer.public_key()));
+            let revoked: i64 = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM receipt_key_revocations WHERE key_id=?)",
+            )
+            .bind(key_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            if revoked != 0 {
+                return Err(StorageError::ReceiptKeyRevoked);
+            }
+            archive["proof"] = json!({"signed":false});
+            signer.sign_profile(&mut archive, receipts::AUDIT_PROFILE)?;
+        }
         let bytes = serde_json::to_vec(&archive)?;
         if bytes.len() > MAX_BYTES || !verify(&archive) {
             return Err(StorageError::Conflict);
@@ -60,6 +74,38 @@ impl Repository {
             .bind(id.to_string()).bind(time).bind(time).execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(archive)
+    }
+
+    /// Metadata only, ordered by canonical UUID. Export acknowledgement is historical.
+    pub async fn audit_archives(
+        &self,
+        after: &str,
+        before: i64,
+        limit: i64,
+    ) -> Result<Value, StorageError> {
+        if !(1..=100).contains(&limit)
+            || before < 0
+            || (!after.is_empty()
+                && !Uuid::parse_str(after).is_ok_and(|id| id.to_string() == after))
+        {
+            return Err(StorageError::Conflict);
+        }
+        let rows = sqlx::query("SELECT id,json_extract(payload,'$.payload.createdAt') AS created_at,json_extract(payload,'$.payload.after') AS start_sequence,json_extract(payload,'$.payload.through') AS through_sequence,json_array_length(json_extract(payload,'$.payload.records')) AS record_count,length(CAST(payload AS BLOB)) AS bytes,json_extract(payload,'$.digest') AS digest,json_extract(payload,'$.signature.profile') AS signature_profile,(SELECT COUNT(*) FROM audit_archive_exports e WHERE e.archive_id=a.id) AS exports FROM audit_archives a WHERE id>? AND json_extract(payload,'$.payload.createdAt')<? ORDER BY id LIMIT ?")
+            .bind(after).bind(before).bind(limit+1).fetch_all(&self.pool).await?;
+        let has_more = rows.len() > limit as usize;
+        let mut cursor = after.to_owned();
+        let archives: Vec<Value> = rows.into_iter().take(limit as usize).map(|row| {
+            cursor = row.get::<String,_>("id");
+            json!({"archiveId":cursor,"createdAt":row.get::<i64,_>("created_at"),
+                "after":row.get::<i64,_>("start_sequence"),"through":row.get::<i64,_>("through_sequence"),
+                "recordCount":row.get::<i64,_>("record_count"),"bytes":row.get::<i64,_>("bytes"),
+                "digest":row.get::<String,_>("digest"),"signatureProfile":row.get::<Option<String>,_>("signature_profile"),
+                "acknowledgedVaultCount":row.get::<i64,_>("exports")})
+        }).collect();
+        Ok(
+            json!({"archives":archives,"nextAfter":cursor,"hasMore":has_more,"before":before,
+            "vaultAcknowledgementsAreHistorical":true}),
+        )
     }
 
     pub async fn audit_archive(&self, id: Uuid) -> Result<Value, StorageError> {
@@ -115,6 +161,29 @@ pub fn verify(archive: &Value) -> bool {
         sequence = next;
     }
     sequence == through && rip_digest::digest(p).is_ok_and(|digest| archive["digest"] == digest)
+}
+
+/// Verify the archive contract and its distinct signature domain using a pinned key.
+pub fn verify_signature(archive: &Value, trusted_key: &[u8]) -> bool {
+    verify(archive)
+        && archive["signature"]["profile"] == receipts::AUDIT_PROFILE
+        && receipts::verify_signed_record(archive, trusted_key)
+}
+
+impl Repository {
+    pub async fn verify_audit_archive_current(
+        &self,
+        archive: &Value,
+        trusted_key: &[u8],
+    ) -> Result<bool, StorageError> {
+        if !verify_signature(archive, trusted_key) {
+            return Ok(false);
+        }
+        let key_id = format!("sha256:{:x}", Sha256::digest(trusted_key));
+        let valid: i64 = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM receipt_public_keys k WHERE k.key_id=? AND NOT EXISTS(SELECT 1 FROM receipt_key_revocations r WHERE r.key_id=k.key_id))")
+            .bind(key_id).fetch_one(&self.pool).await?;
+        Ok(valid != 0)
+    }
 }
 
 #[cfg(test)]
@@ -194,5 +263,123 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 1);
+    }
+    #[tokio::test]
+    async fn signature_is_durable_domain_bound_and_revocation_blocks_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        let key = ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+            .unwrap();
+        let signer = receipts::ReceiptSigner::from_pkcs8(key.as_ref()).unwrap();
+        let public = signer.public_key().to_vec();
+        let repo = Repository::open_with_receipt_signer(&path, Some(signer))
+            .await
+            .unwrap();
+        let seq = repo
+            .begin_audit(Uuid::new_v4(), "operator", "submit", None)
+            .await
+            .unwrap();
+        repo.finish_audit(seq, 201).await.unwrap();
+        let archive = repo.archive_audit(0, now() + 1, 100).await.unwrap();
+        assert!(verify_signature(&archive, &public));
+        assert!(!receipts::verify(&archive, &public));
+        assert!(
+            repo.verify_audit_archive_current(&archive, &public)
+                .await
+                .unwrap()
+        );
+        let mut changed = archive.clone();
+        changed["payload"]["records"][0]["identity"] = json!("tampered");
+        changed["digest"] = json!(rip_digest::digest(&changed["payload"]).unwrap());
+        assert!(verify(&changed));
+        assert!(!verify_signature(&changed, &public));
+        changed = archive.clone();
+        changed["signature"]["profile"] = json!(receipts::PROFILE);
+        assert!(!verify_signature(&changed, &public));
+        let reopened = Repository::open_with_receipt_signer(&path, None)
+            .await
+            .unwrap();
+        let id = Uuid::parse_str(archive["payload"]["id"].as_str().unwrap()).unwrap();
+        assert_eq!(reopened.audit_archive(id).await.unwrap(), archive);
+        let key_id = archive["signature"]["keyId"].as_str().unwrap();
+        reopened
+            .revoke_receipt_key(key_id, "compromised", "admin")
+            .await
+            .unwrap();
+        assert!(
+            !reopened
+                .verify_audit_archive_current(&archive, &public)
+                .await
+                .unwrap()
+        );
+        assert!(verify_signature(&archive, &public)); // Offline cryptography does not check revocation.
+        assert!(matches!(
+            repo.archive_audit(0, now() + 1, 100).await,
+            Err(StorageError::ReceiptKeyRevoked)
+        ));
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_archives")
+            .fetch_one(&repo.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(reopened.audit_archive(id).await.unwrap(), archive);
+    }
+    #[tokio::test]
+    async fn catalog_pages_legacy_snapshots_filters_age_and_counts_acknowledgements() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("db");
+        let repo = Repository::open_with_receipt_signer(&db, None)
+            .await
+            .unwrap();
+        let seq = repo
+            .begin_audit(Uuid::new_v4(), "operator", "submit", None)
+            .await
+            .unwrap();
+        repo.finish_audit(seq, 200).await.unwrap();
+        let a = repo.archive_audit(0, now() + 1, 100).await.unwrap();
+        let b = repo.archive_audit(0, now() + 1, 100).await.unwrap();
+        let vault = dir.path().join("vault");
+        std::fs::create_dir(&vault).unwrap();
+        let id = Uuid::parse_str(a["payload"]["id"].as_str().unwrap()).unwrap();
+        repo.store_audit_archive(id, &vault).await.unwrap();
+        let reopened = Repository::open_with_receipt_signer(&db, None)
+            .await
+            .unwrap();
+        let first = reopened.audit_archives("", now() + 1, 1).await.unwrap();
+        assert_eq!(first["hasMore"], true);
+        let cursor = first["nextAfter"].as_str().unwrap();
+        let second = reopened.audit_archives(cursor, now() + 1, 1).await.unwrap();
+        assert_eq!(second["hasMore"], false);
+        assert_ne!(
+            first["archives"][0]["archiveId"],
+            second["archives"][0]["archiveId"]
+        );
+        let all = reopened.audit_archives("", now() + 1, 100).await.unwrap();
+        let rows = all["archives"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        let exported = rows
+            .iter()
+            .find(|r| r["archiveId"] == id.to_string())
+            .unwrap();
+        assert_eq!(exported["acknowledgedVaultCount"], 1);
+        assert_eq!(
+            exported["recordCount"],
+            a["payload"]["records"].as_array().unwrap().len()
+        );
+        assert!(exported.get("records").is_none());
+        assert_eq!(
+            reopened.audit_archives("", 0, 100).await.unwrap()["archives"],
+            json!([])
+        );
+        assert!(
+            reopened
+                .audit_archives("invalid", now() + 1, 100)
+                .await
+                .is_err()
+        );
+        assert!(reopened.audit_archives("", now() + 1, 101).await.is_err());
+        assert!(reopened.audit_archives("", -1, 1).await.is_err());
+        let b_id = Uuid::parse_str(b["payload"]["id"].as_str().unwrap()).unwrap();
+        assert_eq!(reopened.audit_archive(b_id).await.unwrap(), b);
     }
 }

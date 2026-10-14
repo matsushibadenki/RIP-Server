@@ -4,6 +4,8 @@ use ring::signature::{self, Ed25519KeyPair, KeyPair};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+pub const AUDIT_PROFILE: &str = "org.jrip.audit-archive-ed25519-v1";
+
 pub const LEGACY_PROFILE: &str = "org.jrip.receipt-ed25519-v1";
 pub const PROFILE: &str = "org.jrip.receipt-ed25519-v2";
 
@@ -23,7 +25,11 @@ impl ReceiptSigner {
         *receipt = signed;
         Ok(())
     }
-    fn sign_profile(&self, receipt: &mut Value, profile: &str) -> Result<(), StorageError> {
+    pub(crate) fn sign_profile(
+        &self,
+        receipt: &mut Value,
+        profile: &str,
+    ) -> Result<(), StorageError> {
         if !receipt.is_object()
             || !receipt["proof"].is_object()
             || receipt.get("signature").is_some()
@@ -35,7 +41,7 @@ impl ReceiptSigner {
         let key = self.public_key();
         receipt["signature"] = json!({"profile":profile,"algorithm":"Ed25519",
             "keyId":format!("sha256:{:x}", Sha256::digest(key)),
-            "publicKey":hex(key),"encoding":"hex","digestProfile":if profile==PROFILE {rip_digest::PROFILE}else{"org.jrip.serde-json-v1"}});
+            "publicKey":hex(key),"encoding":"hex","digestProfile":if profile!=LEGACY_PROFILE {rip_digest::PROFILE}else{"org.jrip.serde-json-v1"}});
         let bytes = message(receipt)?;
         receipt["signature"]["value"] = json!(hex(self.0.sign(&bytes).as_ref()));
         Ok(())
@@ -69,7 +75,9 @@ fn message(receipt: &Value) -> Result<Vec<u8>, StorageError> {
     let mut bytes = profile.as_bytes().to_vec();
     bytes.push(0);
     match profile {
-        PROFILE => bytes.extend(rip_digest::canonical(&body).map_err(|_| StorageError::Conflict)?),
+        PROFILE | AUDIT_PROFILE => {
+            bytes.extend(rip_digest::canonical(&body).map_err(|_| StorageError::Conflict)?)
+        }
         LEGACY_PROFILE => bytes.extend(serde_json::to_vec(&body)?),
         _ => return Err(StorageError::Conflict),
     }
@@ -78,13 +86,26 @@ fn message(receipt: &Value) -> Result<Vec<u8>, StorageError> {
 /// Cryptographic verification only; does not check revocation.
 /// The embedded public key is informational; callers supply an independently trusted key.
 pub fn verify(receipt: &Value, trusted_key: &[u8]) -> bool {
+    if !matches!(
+        receipt["signature"]["profile"].as_str(),
+        Some(PROFILE | LEGACY_PROFILE)
+    ) {
+        return false;
+    }
+    verify_signed_record(receipt, trusted_key)
+}
+
+pub(crate) fn verify_signed_record(receipt: &Value, trusted_key: &[u8]) -> bool {
     let sig = &receipt["signature"];
     if trusted_key.len() != 32
-        || !matches!(sig["profile"].as_str(), Some(PROFILE | LEGACY_PROFILE))
+        || !matches!(
+            sig["profile"].as_str(),
+            Some(PROFILE | LEGACY_PROFILE | AUDIT_PROFILE)
+        )
         || sig["algorithm"] != "Ed25519"
         || sig["encoding"] != "hex"
         || sig["digestProfile"]
-            != if sig["profile"] == PROFILE {
+            != if sig["profile"] != LEGACY_PROFILE {
                 rip_digest::PROFILE
             } else {
                 "org.jrip.serde-json-v1"
