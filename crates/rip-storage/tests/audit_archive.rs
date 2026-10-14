@@ -94,7 +94,7 @@ async fn cli_exports_recovers_and_checks_independently_pinned_digest() {
     assert!(preview.status.success());
     let preview: serde_json::Value = serde_json::from_slice(&preview.stdout).unwrap();
     assert_eq!(preview["dryRun"], true);
-    assert_eq!(preview["deletionImplemented"], false);
+    assert_eq!(preview["deletionImplemented"], true);
     assert_eq!(preview["candidates"], serde_json::json!([]));
     assert!(
         !Command::new(binary)
@@ -258,4 +258,83 @@ async fn signed_cli_requires_a_key_and_current_verification_checks_revocation() 
             .success()
     );
     assert!(!dir.path().join("revoked.json").exists());
+}
+
+#[tokio::test]
+async fn prune_cli_requires_apply_and_retains_recoverable_vault_evidence() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("db");
+    let vault = dir.path().join("vault");
+    std::fs::create_dir(&vault).unwrap();
+    let repo = Repository::open_with_receipt_signer(&database, None)
+        .await
+        .unwrap();
+    let seq = repo
+        .begin_audit(Uuid::new_v4(), "operator", "test", None)
+        .await
+        .unwrap();
+    repo.finish_audit(seq, 200).await.unwrap();
+    let mut archive = repo.archive_audit(0, now() + 1, 100).await.unwrap();
+    archive["payload"]["createdAt"] = serde_json::json!(now() - 86400 * 40);
+    archive["digest"] = serde_json::json!(rip_digest::digest(&archive["payload"]).unwrap());
+    let id = archive["payload"]["id"].as_str().unwrap();
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .connect_with(sqlx::sqlite::SqliteConnectOptions::new().filename(&database))
+        .await
+        .unwrap();
+    sqlx::query("UPDATE audit_archives SET payload=? WHERE id=?")
+        .bind(serde_json::to_string(&archive).unwrap())
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    repo.store_audit_archive(id.parse().unwrap(), &vault)
+        .await
+        .unwrap();
+    let binary = env!("CARGO_BIN_EXE_jrip-audit");
+    let digest = archive["digest"].as_str().unwrap();
+    assert!(
+        !Command::new(binary)
+            .arg("prune")
+            .arg(&database)
+            .arg(id)
+            .arg(&vault)
+            .args(["30", digest])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(repo.audit_archive(id.parse().unwrap()).await.is_ok());
+    assert!(
+        Command::new(binary)
+            .arg("prune")
+            .arg(&database)
+            .arg(id)
+            .arg(&vault)
+            .args(["30", digest, "--apply"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new(binary)
+            .arg("prune-record")
+            .arg(&database)
+            .arg(id)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let status = Command::new(binary)
+        .arg("vault-status")
+        .arg(&database)
+        .arg(id)
+        .arg(&vault)
+        .output()
+        .unwrap();
+    assert!(status.status.success());
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["localSnapshotPruned"], true);
+    assert_eq!(status["contentMatches"], true);
+    assert!(vault.join(format!("{id}.json")).is_file());
 }

@@ -18,7 +18,7 @@ The CLI prints the archive ID and digest before writing the export. Output uses 
 
 Offline verify caps input at 16 MiB, rejects duplicate JSON keys, validates profile, sequence order, completion statuses and the canonical digest, and requires a separately supplied pinned digest. Unsigned archives are not authenticated: an attacker can replace both data and an untrusted digest. Keep the pinned digest through an independently trusted channel. Exported audit identities and operations are administrative data; protect the destination appropriately. Keys, bearer tokens and original request bodies are not added by this feature.
 
-Automatic scheduling, object/WORM storage, audit deletion, archive retention and KMS integration remain planned. No production records are deleted by this implementation.
+Automatic scheduling, object/WORM storage, source-audit deletion, external-storage retention and KMS integration remain planned. Creation and export do not delete records.
 
 ## 日本語
 
@@ -75,7 +75,7 @@ English: `store` copies the exact compact JSON representation of the stored arch
 
 `vault-status` rechecks current contents rather than assuming the stored acknowledgement means the file still exists. acknowledged:true with contentMatches:false indicates missing or changed evidence. It does not delete, repair or resign files. `store` can restore a missing file; it never overwrites a conflicting file. The directory must be controlled by administrators; this is not a sandbox for a hostile shared writable directory. No Agent-supplied paths or remote tools are added.
 
-storageMeaning is filesystem-sync and worm is false. Local filesystem publication/replay is tested; actual NFS durability, disconnected-volume recovery and Windows directory-sync behavior remain Pending. A successful filesystem sync does not certify remote replication or provider retention. Object storage, WORM guarantees, automated retention/pruning and KMS remain unimplemented. Source audit records and database snapshots are never deleted.
+storageMeaning is filesystem-sync and worm is false. Local filesystem publication/replay is tested; actual NFS durability, disconnected-volume recovery and Windows directory-sync behavior remain Pending. A successful filesystem sync does not certify remote replication or provider retention. Object storage, WORM guarantees, automated retention/pruning and KMS remain unimplemented. Source audit records are retained. Local database snapshots can be pruned explicitly as described below.
 
 日本語：`store` は既存の管理者専用ディレクトリへ `{UUID}.json` を出力します。別volumeも指定できます。同期した一時ファイルを上書きしないhard linkで公開し、DB内容との一致とファイル・ディレクトリの同期後に保管確認と監査を原子的に記録します。ファイル全体のSHA-256はpayload digestとは別です。再送は内容を確認し、元の確認時刻を保持します。公開後・DB記録前の中断は再送で復旧します。不一致ファイルや出力先symlinkは拒否します。強制終了後に残った一時ファイルの清掃は管理者が行います。
 
@@ -104,14 +104,68 @@ English: `list DATABASE AFTER_UUID_OR_DASH BEFORE_UNIX_SECONDS LIMIT` returns me
 cargo run -p rip-storage --bin jrip-audit -- retention-preview data/jobs.sqlite3 /admin-configured/vault 30 - 100
 ```
 
-English: `retention-preview DATABASE VAULT_DIRECTORY DAYS AFTER_UUID_OR_DASH LIMIT` assesses local database snapshots older than 1–3650 days. It returns at most 100 metadata entries per page and rereads the selected vault copy for each archive. A localSnapshotPruneCandidate requires an existing acknowledgement for this vault and current exact content equality. Reason codes are VERIFIED_VAULT_COPY, VAULT_ACKNOWLEDGEMENT_MISSING, VAULT_CONTENT_MISMATCH and EVIDENCE_UNVERIFIABLE. File/read/integrity errors never produce a positive candidate. This is a read-only assessment: dryRun:true, deletionImplemented:false. Original audit records, snapshots, acknowledgements and vault files are retained. Normal repository opening may still perform schema initialization/migration.
+English: `retention-preview DATABASE VAULT_DIRECTORY DAYS AFTER_UUID_OR_DASH LIMIT` assesses local database snapshots older than 1–3650 days. It returns at most 100 metadata entries per page and rereads the selected vault copy for each archive. A localSnapshotPruneCandidate requires an existing acknowledgement for this vault and current exact content equality. Reason codes are VERIFIED_VAULT_COPY, VAULT_ACKNOWLEDGEMENT_MISSING, VAULT_CONTENT_MISMATCH and EVIDENCE_UNVERIFIABLE. File/read/integrity errors never produce a positive candidate. This is a read-only assessment: dryRun:true, deletionImplemented:true. Original audit records, snapshots, acknowledgements and vault files are retained. Normal repository opening may still perform schema initialization/migration.
 
-Candidate status is a prerequisite assessment, not permission to delete or a WORM/replication guarantee. It does not verify signatures or current key trust; use verify-current separately. It does not evaluate legal holds or operator retention policy. A copy can change after assessment. Actual pruning, revalidation at deletion time, durable deletion evidence and external-storage retention remain unfinished. For reproducible paging, use the returned before value with list; repeated retention-preview invocations recompute the age cutoff from the current time.
+Candidate status is a prerequisite assessment, not permission to delete or a WORM/replication guarantee. It does not verify signatures or current key trust; use verify-current separately. It does not evaluate legal holds or operator retention policy. A copy can change after assessment. Local snapshot pruning with revalidation and durable evidence is described below; external-storage retention remains unfinished. For reproducible paging, use the returned before value with list; repeated retention-preview invocations recompute the age cutoff from the current time.
 
-日本語：`retention-preview` は1〜3650日の保持期限と最大100件のページングを指定し、期限を過ぎたDB snapshotの保管先を再読込します。同じ保管先の確認記録と現在の完全一致がある場合だけ候補とします。確認なし・内容不一致・検証不能は理由コード付きで除外します。`dryRun:true`、`deletionImplemented:false` で、記録・snapshot・保管先を削除しません。DBを開く際の通常schema移行はあり得ます。
+日本語：`retention-preview` は1〜3650日の保持期限と最大100件のページングを指定し、期限を過ぎたDB snapshotの保管先を再読込します。同じ保管先の確認記録と現在の完全一致がある場合だけ候補とします。確認なし・内容不一致・検証不能は理由コード付きで除外します。`dryRun:true`、`deletionImplemented:true` で、記録・snapshot・保管先を削除しません。DBを開く際の通常schema移行はあり得ます。
 
-候補表示は削除許可や外部永続性保証ではありません。署名・現在の鍵状態、legal hold、運用上の保持ポリシーは別途確認が必要です。表示後にファイルが変わる可能性があるため、実削除時の再確認と永続削除証跡は未実装です。各CLI実行でcutoffを再計算します。固定cutoffでの一覧には返されたbeforeをlistに指定してください。
+候補表示は削除許可や外部永続性保証ではありません。署名・現在の鍵状態、legal hold、運用上の保持ポリシーは別途確認が必要です。表示後にファイルが変わる可能性があるため、実削除時の再確認と永続削除証跡は後述のpruneを使います。各CLI実行でcutoffを再計算します。固定cutoffでの一覧には返されたbeforeをlistに指定してください。
 
-简体中文：`retention-preview` 接受1–3650天保留期限，每页最多100条，并重新读取过期DB快照对应的归档文件。仅当所选目录存在历史确认且当前内容完全一致时列为候选；缺少确认、内容不匹配及无法验证分别返回原因代码。固定返回 `dryRun:true`、`deletionImplemented:false`，不删除记录、快照或文件。打开DB时可能执行正常schema迁移。
+简体中文：`retention-preview` 接受1–3650天保留期限，每页最多100条，并重新读取过期DB快照对应的归档文件。仅当所选目录存在历史确认且当前内容完全一致时列为候选；缺少确认、内容不匹配及无法验证分别返回原因代码。固定返回 `dryRun:true`、`deletionImplemented:true`，不删除记录、快照或文件。打开DB时可能执行正常schema迁移。
 
-候选结果不是删除授权或远程持久性保证，不验证签名、当前密钥信任、legal hold或运维保留策略。评估后文件可能变化；实际删除时再验证及持久删除证据仍未实现。每次CLI重新计算cutoff；固定时间分页可将返回before用于list。
+候选结果不是删除授权或远程持久性保证，不验证签名、当前密钥信任、legal hold或运维保留策略。评估后文件可能变化；实际删除时再验证及持久删除证据由下述prune提供。每次CLI重新计算cutoff；固定时间分页可将返回before用于list。
+
+## Local snapshot pruning / DB内snapshotの削除 / 本地快照删除
+
+```sh
+cargo run -p rip-storage --bin jrip-audit -- prune data/jobs.sqlite3 ARCHIVE_UUID /admin-configured/vault 30 sha256:EXPECTED_ARCHIVE_DIGEST --apply
+cargo run -p rip-storage --bin jrip-audit -- prune-record data/jobs.sqlite3 ARCHIVE_UUID
+```
+
+English: `prune` requires an explicit archive ID, selected vault, retention days (1–3650), expected payload digest from list/preview and --apply. It removes only that local audit_archives snapshot. Under a SQLite writer transaction it checks the expected digest, archive integrity and age, plus the vault acknowledgement's full-file digest/byte count. It rereads and syncs the matching vault file and directory before atomically saving an immutable org.jrip.audit-archive-prune-v1 record, deleting the snapshot and inserting audit-archive-prune. Any validation, filesystem, database or audit insertion failure aborts the transaction. Replay after restart returns the original record without a duplicate audit event; changed digest or vault conflicts.
+
+Source audit records, public-key records, historical export acknowledgements and vault files remain. The prune record preserves archive ID, payload/full-file digests, byte count, record range/count, signature profile/key ID, target, cutoff and time. `vault-status` continues to check the external file against the recorded full-file hash after pruning. Replay reports a historical deletion, not current vault integrity. DB export/store for a pruned ID returns not found; recover the original JSON from the retained `{UUID}.json` vault file and use verify/verify-signature/verify-current as appropriate. No automatic import or resigning occurs. list reports only remaining local snapshots; prune-record retrieves evidence by the known ID.
+
+The vault must stay administrator-controlled during and after pruning. Filesystem verification/sync is not a WORM or remote replication guarantee and cannot prevent an administrator changing/deleting the sole retained copy afterward. Apply your legal holds, key trust requirements and backup policy before explicitly invoking --apply. No production pruning was performed during development; tests use temporary databases and directories. SQLite freed pages are reusable; this does not run VACUUM or guarantee a smaller database file. External archive deletion, original-audit pruning, object storage and KMS remain planned.
+
+日本語：`prune` はID、保管先、保持日数1〜3650、確認したpayload digest、`--apply` を必須とします。SQLite writerトランザクション内で期限・digest・保管ACKを検査し、保管ファイルの再読込と同期後に、削除証跡・DB snapshot削除・監査を原子的に保存します。検証や監査保存の失敗時は削除も取り消します。再送は元の証跡を返し、異なるdigest・保管先は拒否します。
+
+元の監査、鍵、保管ACK、保管ファイルは保持します。削除証跡にID・hash・容量・記録範囲・署名metadata・期限・時刻を残し、削除後もvault-statusでファイルを検証できます。復旧には保管先のJSONを使います。DBからのexport/storeは削除済みIDで404相当となり、自動再取込・再署名はしません。prune-recordは指定IDの証跡を返します。
+
+管理者専用保管先が前提で、後からの唯一のcopyの削除やWORM・遠隔replicationを保証しません。legal hold・鍵の信頼・backupの運用方針を確認してから適用してください。本番DBには適用せず、開発テストの一時データのみで検証しました。VACUUMは実行せず、DBファイル縮小は保証しません。
+
+简体中文：`prune` 必须指定ID、归档库、1–3650天保留期、确认的payload摘要及 `--apply`。在SQLite writer事务中验证期限、摘要、存储ACK，重新读取并同步归档文件后，原子保存删除证据、删除DB快照及审计。验证或审计写入失败时回滚删除。重放返回首次证据，不重复审计；不同摘要或归档库被拒绝。
+
+保留原审计、密钥、存储ACK和归档文件。删除证据记录ID、摘要、大小、记录范围、签名metadata、期限及时间；删除后vault-status仍检查完整文件hash。恢复需读取归档库JSON，DB export/store对已删除ID返回未找到，不自动导入或重新签名。prune-record按已知ID查询证据。
+
+仅支持管理员控制的目录，不保证WORM、远程复制或后续管理员删除唯一copy时的安全。应用前须确认legal hold、密钥信任及backup策略。开发仅在临时DB与目录测试，未删除生产数据。不执行VACUUM或保证DB文件变小。
+
+## HTTPS object vault / HTTPS object保管 / HTTPS对象归档库
+
+Configure `JRIP_AUDIT_VAULT_URL` (an HTTPS directory URL ending in `/`) and `JRIP_AUDIT_VAULT_TOKEN` through your administrator secret environment, then run:
+
+```sh
+cargo run -p rip-storage --bin jrip-audit -- remote-store data/jobs.sqlite3 ARCHIVE_UUID
+cargo run -p rip-storage --bin jrip-audit -- remote-status data/jobs.sqlite3 ARCHIVE_UUID
+```
+
+English: This adapter defines a conditional HTTP object-vault contract, not an S3 client. The endpoint must accept authenticated PUT/GET at `{base}/{UUID}.json`, atomically honor PUT `If-None-Match: *` and return 412 when already present. Creation may return 200/201/204. GET must return 200 with the exact uncompressed bytes or 404; it must support read-after-write consistency. The conditional request follows [RFC 9110](https://www.rfc-editor.org/rfc/rfc9110.html#name-if-none-match). Configure a compatible gateway/server; SigV4, presigned URLs, multipart upload and provider Object Lock are not implemented.
+
+Production configuration accepts only HTTPS and rejects URL user information, query, fragment, missing trailing slash and invalid/empty bearer credentials. TLS uses platform/native trust roots; no certificate-verification bypass exists. Redirects and environment proxy discovery are disabled. Connect timeout is 5 seconds, request/body timeout 30 seconds; readback is bounded to 8 MiB even without Content-Length. Transport errors are reported without request URLs/tokens. Credentials are absent from acknowledgement/audit records; keep URL paths free of secrets as well.
+
+After a conditional write (including 412 replay), remote-store reads the object back and requires exact equality to the stored DB archive before atomically saving a separate remote acknowledgement and audit event. A remote publication followed by readback/DB failure leaves no acknowledgement; retry reconciles it. Replays preserve the original acknowledgement time. remote-status rereads and compares the complete-file hash; after local snapshot pruning it can use retained prune evidence. DB snapshots and remote objects are never deleted by these commands. Filesystem prune still requires a filesystem vault; a remote acknowledgement alone does not authorize it. Catalogue acknowledgedVaultCount counts filesystem copies only.
+
+storageMeaning is http-readback and worm:false. Tests use a private plaintext loopback fake server only; production configuration cannot enable HTTP. Actual HTTPS service/certificate-chain deployment, provider durability, S3 compatibility, replication, WORM and remote retention remain Pending or planned. A successful readback does not guarantee that a service will retain the object later. No live external service was contacted during tests.
+
+日本語：環境変数のHTTPS URLとBearer tokenで保管先を設定します。専用gatewayはUUID.jsonへのPUT/GET、原子的な `If-None-Match: *`、既存時412、読み戻しの完全一致とread-after-writeを提供する必要があります。S3 clientではなく、SigV4・presigned URL・Object Lockには未対応です。
+
+HTTPSのみ許可し、認証付きURL・query・fragment・redirect・環境proxyを拒否します。tokenは管理者のsecret環境で設定し、監査・ACKへ保存しません。接続5秒、リクエスト30秒、読み戻し8 MiB制限です。保存後の完全一致を確認してからremote ACKと監査を原子的に保存し、再送で復旧します。remote-statusは現在の内容を確認し、ローカルsnapshot削除後も削除証跡のhashを使えます。remote ACKだけで既存filesystem pruneは実行できません。
+
+検証はテスト専用loopback HTTPサーバーで行いました。本番constructorにHTTP許可やTLS検証回避はありません。実HTTPSサービス・証明書、事業者の永続性、S3互換性、WORM、remote保持期限は未検証／未実装です。読み戻し成功は将来の保持を保証しません。
+
+简体中文：管理员通过HTTPS目录URL及Bearer token环境变量配置归档库。兼容gateway须提供UUID.json PUT/GET、原子 `If-None-Match: *`、已存在时412及read-after-write一致性。这不是S3 client，尚不支持SigV4、presigned URL或Object Lock。
+
+仅允许HTTPS，拒绝URL用户凭证、query、fragment、redirect及环境proxy。token通过secret环境配置，不记录到审计或ACK。连接超时5秒、请求30秒、读取上限8 MiB。写入后完整读回匹配，才原子保存remote ACK与审计；重放可恢复中断。remote-status检查当前内容，本地快照删除后可使用删除证据摘要。remote ACK不能单独触发filesystem prune。
+
+测试使用仅测试可用的loopback HTTP模拟服务，生产constructor不允许HTTP或绕过TLS校验。实际HTTPS服务/证书、provider持久性、S3兼容、WORM和远程保留期限仍未验证或实现。成功读回不保证后续保留。

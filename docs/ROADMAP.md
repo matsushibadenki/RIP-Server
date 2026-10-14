@@ -97,7 +97,10 @@
 - ⭕️ [Pending] 実NFSの永続性・切断復旧、Windowsのdirectory sync。 / Actual NFS durability and Windows directory sync / 实际NFS持久性及Windows目录同步。
 - 🟢 [Done] 監査archiveのmetadata一覧、UUID cursor、作成時刻cutoff、過去の保管確認数、既存archiveからの復旧ID検索。 / Bounded archive metadata catalogue / 有界归档元数据目录。
 - 🟢 [Done] 監査archive保持期限のdry-run対象確認、指定vaultのACKと現在の内容再検証、理由コード・件数制限付き一覧。 / Read-only retention assessment with live vault checks / 实时归档库检查及只读保留期限评估。
-- 🟠 [Next] 監査snapshotの再検証付き削除・永続削除証跡、object storage、KMS。
+- 🟢 [Done] 指定ID・digest・保持期限・--applyによる監査DB snapshot削除、保管先再検証・同期、削除証跡と監査の原子保存、再送復旧と削除後のvault-status。元監査と保管copyは保持。 / Revalidated local snapshot pruning and durable evidence / 重新验证的本地快照删除及持久证据。
+- 🟢 [Done] HTTPS conditional object-vault adapter、管理者環境設定、保存後のbounded読み戻し、永続remote ACK・監査、再送／現在状態照会。 / Conditional HTTPS vault adapter / 条件式HTTPS归档库adapter。
+- ⭕️ [Pending] 実HTTPSサービス・証明書と事業者の永続性、S3互換・WORM検証。 / Live HTTPS/provider durability and S3/WORM verification / 实际HTTPS及provider持久性、S3/WORM验证。
+- 🟠 [Next] S3/provider専用adapter、外部保管copyの保持期限、KMS。
 
 - 🟢 [Done] preflight digest、原稿SHA-256、形式、有効期限を検証するmultipart commit APIを実装。保存済みticketからジョブを登録し、SQLiteトランザクションで同一preflightの同時再送を重複排除する。共通Bearerトークンによる認可を使用。
 - 🟠 [Next] 主体別scope・認可証跡、原稿構造全体の検証、Receipt、期限切れpreflightと孤立ファイルの清掃を追加する。
