@@ -32,7 +32,7 @@
 - 🟢 [Done] ワーカーリースをSQLiteへ永続化し、10秒ごとのハートビートと30秒の期限を管理する。ディスパッチャー再起動後、期限切れの処理中ジョブを `FAILED/LEASE_EXPIRED` へ復旧する。
 - 🟢 [Done] `rip-acx` と `/.well-known/acx.json` を追加し、現在のTIFF出力能力だけをACX 0.1 Manifestとして公開。ACX側にnamespaced extensionsと英語・日本語・简体中文の実験的PrintIntent profile、schema、検証ベクターを追加し、両実装間のschema検証を完了。
 
-## ⭕️ [Pending] 第1段階：PDFを受けるIPP仮想プリンター（Mac専用PPDで検証済み、Windows・driverless受入試験待ち）
+## 第1段階：PDFを受けるIPP仮想プリンター（Mac専用PPDで検証済み、Windows・driverless受入試験待ち）
 
 この段階は印刷プロトコルの受付を検証する**ファイル出力用の仮想プリンター**とする。実機出力やIPP Everywhere / AirPrint適合を完了と表示しない。
 
@@ -53,7 +53,7 @@
 
 **第1段階の完了条件（OSクライアント受入試験はPending）:** プロトコルの照会・投入・取消、Mac標準ipptoolからの1/2ページPDF→TIFF、Mac BonjourによるLAN発見、再起動後のID復元、受付制限、限定コンテナー回収は検証済み。Mac専用PPDでのキュー登録・設定画面表示・標準lpからの完了は確認済み。driverless追加・アプリ印刷ダイアログ・Windows標準ドライバーの受入確認が残るため、段階全体をDoneにはしない。実機出力やAirPrint / IPP Everywhere適合はこの段階の対象外。
 
-## 🟠 [Next] Agent Print Infrastructureの標準契約
+## Agent Print Infrastructureの標準契約
 
 - 🟢 [Done] 共通JobTicket v0.1を新規REST・IPP・MCP投入と同じトランザクションで保存。原稿hash・エンジン・設定・TIFF完了条件を記録し、設定検証APIと削除後も保持する照会APIを追加。 / Durable shared raster ticket and pure validation / 持久化通用栅格契约及纯设置验证。詳細：[JOB-TICKET.md](JOB-TICKET.md)。
 - 🟢 [Done] RIP・Color・Queue・設定済みPrinterの共通Capability Model、内容revisionと30秒有効期限、MCP能力照会・ticket取得・検証を追加。未照会と利用可能を区別する。 / Common stage capability snapshots and MCP bindings / 通用阶段能力快照及MCP绑定。
@@ -137,7 +137,7 @@ Printer
 
 **Infrastructure段階の完了条件（未達）:** Agentが自然言語の印刷意図から能力照合済みJobTicketを作り、RIP、明示的な色変換、永続キュー、Native IPP実機出力を通して排紙結果まで追跡できる。途中の再起動、Agentの切断、プリンター障害、用紙切れ、取消、再試行でも同じjob-idから工程とattemptを復元でき、重複印刷を起こさない。各境界の契約テストと、模擬プリンターを使うend-to-endテストを必須とする。
 
-## 🟠 [Next] AIから直接利用するMCP制御面
+## AIから直接利用するMCP制御面
 
 `services/jrip-mcp` を独立プロセスとして追加し、MCP固有の型や接続処理をRIP Coreへ持ち込まない。最初はローカルAIエージェント向けのstdio transportを提供し、認証・TLS・接続制限を整えた後にリモート向けStreamable HTTPを追加する。MCPサーバーはSQLiteやDockerを直接操作せず、既存のJob Service、Repository、Dispatcher、将来のPrinter Backendを型付きアプリケーション境界から呼び出す。
 
@@ -151,7 +151,7 @@ Printer
 
 **MCP段階の完了条件（未達）:** MCP Inspectorと2種類以上のAIクライアントから、能力発見、dry-run、PDF投入、進捗通知、成果物取得、保留・解除・取消、失敗診断、revision競合、idempotency、再接続をend-to-endで検証する。権限不足と承認待ちを構造化応答として確認し、MCP経由でホストの任意ファイル、任意コマンド、Docker APIへ到達できないことをテストする。すべての更新操作を主体、tool名、引数の要約、結果、job-id、時刻とともに監査できる状態を完了とする。
 
-## 🟠 [Next] 第2段階：実機への出力
+## 第2段階：実機への出力
 
 - 🟢 [Done] `rip-printer` に `PrinterBackend` とNative IPP送信アダプターを実装。能力取得、受理ジョブID、状態照会、取消を模擬プリンターとのHTTP通信で検証。IPPクライアント受付とは別の境界。
 - 🟢 [Done] 管理者設定の出力先、永続Delivery Queue、検証付きPWG登録、Print API、Delivery Workerによる送信・状態照会を接続。RIP完了と実機完了は別状態。詳細は[DELIVERY.md](DELIVERY.md)。 / Configured destinations, verified PWG registration, API and worker / 配置目标、验证PWG注册、API与Worker。
@@ -162,7 +162,7 @@ Printer
 - ⭕️ [Pending] Mac / Windowsの実機印刷、取消、障害、再起動を通し、クライアント表示と実際の印刷結果が一致することを確認する。対象クライアントと実機を使用できる検証環境が必要。
 - 🟠 [Next] IPP Everywhereを名乗る前に、必要なPWG Raster入力と、カラー機で必要なJPEG入力、属性・DNS-SD・セキュリティ要件を満たし、PWGの自己認証テストを実行する。PDFだけの受付では適合を主張しない。
 
-## 🔴 [Later] 印刷品質と製品機能
+## 印刷品質と製品機能
 
 - 🔴 [Later] `Create-Job` / `Send-Document` の複数文書とApple URF入力をクライアント互換性に応じて追加する。未実装の形式を広告しない。
 - 🔴 [Later] 日本語CID/CMap・縦書き・IVSとフォント置換レポート、EPS / 日本語のGolden Master。
