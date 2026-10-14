@@ -106,6 +106,47 @@ impl Repository {
         )
     }
 
+    /// Read-only retention assessment. No database rows or vault files are removed.
+    pub async fn preview_audit_retention(
+        &self,
+        before: i64,
+        directory: &Path,
+        after: &str,
+        limit: i64,
+    ) -> Result<Value, Error> {
+        if before < 0 || before > now() {
+            return Err(StorageError::Conflict.into());
+        }
+        let root = std::fs::canonicalize(directory)?;
+        if !root.is_dir() {
+            return Err("existing administrator vault directory required".into());
+        }
+        let page = self.audit_archives(after, before, limit).await?;
+        let mut candidates = Vec::new();
+        for metadata in page["archives"]
+            .as_array()
+            .ok_or("invalid archive catalogue")?
+        {
+            let id = Uuid::parse_str(metadata["archiveId"].as_str().ok_or("invalid archive id")?)?;
+            let (ready, reason) = match self.audit_vault_status(id, &root).await {
+                Ok(status) if status["acknowledged"] != true => {
+                    (false, "VAULT_ACKNOWLEDGEMENT_MISSING")
+                }
+                Ok(status) if status["contentMatches"] != true => (false, "VAULT_CONTENT_MISMATCH"),
+                Ok(_) => (true, "VERIFIED_VAULT_COPY"),
+                Err(_) => (false, "EVIDENCE_UNVERIFIABLE"),
+            };
+            candidates.push(
+                json!({"archive":metadata,"localSnapshotPruneCandidate":ready,"reason":reason}),
+            );
+        }
+        Ok(
+            json!({"dryRun":true,"before":before,"target":root.to_str().ok_or("vault path must be UTF-8")?,
+            "candidates":candidates,"nextAfter":page["nextAfter"],"hasMore":page["hasMore"],
+            "sourceAuditRecordsRetained":true,"deletionImplemented":false,"storageMeaning":"filesystem-sync","worm":false}),
+        )
+    }
+
     pub async fn audit_vault_status(&self, id: Uuid, directory: &Path) -> Result<Value, Error> {
         let archive = self.audit_archive(id).await?;
         if !audit_archive::verify(&archive) || archive["payload"]["id"] != id.to_string() {
@@ -230,6 +271,81 @@ mod tests {
         assert_eq!(
             std::fs::read(&original).unwrap(),
             serde_json::to_vec(&archive).unwrap()
+        );
+    }
+    #[tokio::test]
+    async fn retention_preview_rechecks_copy_and_never_changes_evidence() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = Repository::open_with_receipt_signer(&temp.path().join("db"), None)
+            .await
+            .unwrap();
+        let vault = temp.path().join("vault");
+        std::fs::create_dir(&vault).unwrap();
+        let seq = repo
+            .begin_audit(Uuid::new_v4(), "operator", "test", None)
+            .await
+            .unwrap();
+        repo.finish_audit(seq, 200).await.unwrap();
+        let mut archive = repo.archive_audit(0, now() + 1, 100).await.unwrap();
+        // Historical unsigned fixture, with its original digest rules preserved.
+        archive["payload"]["createdAt"] = json!(now() - 86400 * 40);
+        archive["digest"] = json!(rip_digest::digest(&archive["payload"]).unwrap());
+        let id = Uuid::parse_str(archive["payload"]["id"].as_str().unwrap()).unwrap();
+        sqlx::query("UPDATE audit_archives SET payload=? WHERE id=?")
+            .bind(serde_json::to_string(&archive).unwrap())
+            .bind(id.to_string())
+            .execute(&repo.pool)
+            .await
+            .unwrap();
+        let before = now() - 86400 * 30;
+        let missing = repo
+            .preview_audit_retention(before, &vault, "", 100)
+            .await
+            .unwrap();
+        assert_eq!(
+            missing["candidates"][0]["reason"],
+            "VAULT_ACKNOWLEDGEMENT_MISSING"
+        );
+        assert_eq!(
+            missing["candidates"][0]["localSnapshotPruneCandidate"],
+            false
+        );
+        repo.store_audit_archive(id, &vault).await.unwrap();
+        let prior = repo.audit_records(0, 100).await.unwrap();
+        let verified = repo
+            .preview_audit_retention(before, &vault, "", 100)
+            .await
+            .unwrap();
+        assert_eq!(verified["candidates"][0]["reason"], "VERIFIED_VAULT_COPY");
+        assert_eq!(
+            verified["candidates"][0]["localSnapshotPruneCandidate"],
+            true
+        );
+        assert_eq!(verified["deletionImplemented"], false);
+        let path = vault.join(format!("{id}.json"));
+        std::fs::write(&path, b"changed").unwrap();
+        let changed = repo
+            .preview_audit_retention(before, &vault, "", 100)
+            .await
+            .unwrap();
+        assert_eq!(changed["candidates"][0]["reason"], "VAULT_CONTENT_MISMATCH");
+        assert_eq!(
+            changed["candidates"][0]["localSnapshotPruneCandidate"],
+            false
+        );
+        assert_eq!(repo.audit_records(0, 100).await.unwrap(), prior);
+        assert_eq!(repo.audit_archive(id).await.unwrap(), archive);
+        assert_eq!(std::fs::read(path).unwrap(), b"changed");
+        assert!(
+            repo.preview_audit_retention(now() + 60, &vault, "", 100)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            repo.preview_audit_retention(0, &vault, "", 100)
+                .await
+                .unwrap()["candidates"],
+            json!([])
         );
     }
 }

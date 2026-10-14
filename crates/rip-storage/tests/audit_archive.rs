@@ -84,6 +84,29 @@ async fn cli_exports_recovers_and_checks_independently_pinned_digest() {
     let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
     assert_eq!(status["contentMatches"], true);
     assert_eq!(status["acknowledged"], true);
+    let preview = Command::new(binary)
+        .arg("retention-preview")
+        .arg(&database)
+        .arg(&vault)
+        .args(["30", "-", "100"])
+        .output()
+        .unwrap();
+    assert!(preview.status.success());
+    let preview: serde_json::Value = serde_json::from_slice(&preview.stdout).unwrap();
+    assert_eq!(preview["dryRun"], true);
+    assert_eq!(preview["deletionImplemented"], false);
+    assert_eq!(preview["candidates"], serde_json::json!([]));
+    assert!(
+        !Command::new(binary)
+            .arg("retention-preview")
+            .arg(&database)
+            .arg(&vault)
+            .args(["0", "-", "100"])
+            .status()
+            .unwrap()
+            .success()
+    );
+
     let recovered = dir.path().join("recovered.json");
     assert!(
         Command::new(binary)

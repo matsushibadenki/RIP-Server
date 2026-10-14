@@ -97,3 +97,21 @@ English: `list DATABASE AFTER_UUID_OR_DASH BEFORE_UNIX_SECONDS LIMIT` returns me
 日本語：`list` は作成時刻がcutoffより前のarchiveを、正規UUID順・最大100件で返します。初回は `-`、次回は `nextAfter` を指定し、同じcutoffを使います。本文・保存先pathを出さず、ID、記録範囲、件数、容量、digest、署名profile、過去の保管確認数だけを返します。既存archiveを書き換えません。UUID順は時刻順ではなく、ページングも固定snapshotではありません。同時に追加されたIDがcursorより前なら先頭からの再走査が必要です。署名profileは検証結果ではなく、保管確認数も現在状態ではありません。保持期限による削除は行いません。
 
 简体中文：`list` 返回创建时间严格早于cutoff的归档，按规范UUID排序，每页最多100条。首次使用 `-`，后续使用 `nextAfter` 并保持相同cutoff。仅返回ID、记录范围、数量、大小、摘要、签名profile及历史存储确认数，不返回审计正文或路径，不重写既有归档。UUID顺序不是时间顺序，分页不是固定快照；并发新增ID若位于游标之前，需从头重新扫描。签名profile不是验证结果，历史确认不是当前文件状态。本操作不删除记录或执行保留策略。
+
+## Retention assessment / 保持期限の対象確認 / 保留期限评估
+
+```sh
+cargo run -p rip-storage --bin jrip-audit -- retention-preview data/jobs.sqlite3 /admin-configured/vault 30 - 100
+```
+
+English: `retention-preview DATABASE VAULT_DIRECTORY DAYS AFTER_UUID_OR_DASH LIMIT` assesses local database snapshots older than 1–3650 days. It returns at most 100 metadata entries per page and rereads the selected vault copy for each archive. A localSnapshotPruneCandidate requires an existing acknowledgement for this vault and current exact content equality. Reason codes are VERIFIED_VAULT_COPY, VAULT_ACKNOWLEDGEMENT_MISSING, VAULT_CONTENT_MISMATCH and EVIDENCE_UNVERIFIABLE. File/read/integrity errors never produce a positive candidate. This is a read-only assessment: dryRun:true, deletionImplemented:false. Original audit records, snapshots, acknowledgements and vault files are retained. Normal repository opening may still perform schema initialization/migration.
+
+Candidate status is a prerequisite assessment, not permission to delete or a WORM/replication guarantee. It does not verify signatures or current key trust; use verify-current separately. It does not evaluate legal holds or operator retention policy. A copy can change after assessment. Actual pruning, revalidation at deletion time, durable deletion evidence and external-storage retention remain unfinished. For reproducible paging, use the returned before value with list; repeated retention-preview invocations recompute the age cutoff from the current time.
+
+日本語：`retention-preview` は1〜3650日の保持期限と最大100件のページングを指定し、期限を過ぎたDB snapshotの保管先を再読込します。同じ保管先の確認記録と現在の完全一致がある場合だけ候補とします。確認なし・内容不一致・検証不能は理由コード付きで除外します。`dryRun:true`、`deletionImplemented:false` で、記録・snapshot・保管先を削除しません。DBを開く際の通常schema移行はあり得ます。
+
+候補表示は削除許可や外部永続性保証ではありません。署名・現在の鍵状態、legal hold、運用上の保持ポリシーは別途確認が必要です。表示後にファイルが変わる可能性があるため、実削除時の再確認と永続削除証跡は未実装です。各CLI実行でcutoffを再計算します。固定cutoffでの一覧には返されたbeforeをlistに指定してください。
+
+简体中文：`retention-preview` 接受1–3650天保留期限，每页最多100条，并重新读取过期DB快照对应的归档文件。仅当所选目录存在历史确认且当前内容完全一致时列为候选；缺少确认、内容不匹配及无法验证分别返回原因代码。固定返回 `dryRun:true`、`deletionImplemented:false`，不删除记录、快照或文件。打开DB时可能执行正常schema迁移。
+
+候选结果不是删除授权或远程持久性保证，不验证签名、当前密钥信任、legal hold或运维保留策略。评估后文件可能变化；实际删除时再验证及持久删除证据仍未实现。每次CLI重新计算cutoff；固定时间分页可将返回before用于list。

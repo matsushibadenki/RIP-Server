@@ -89,7 +89,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             let repo = Repository::open_with_receipt_signer(Path::new(database),None).await?;
             println!("{}",serde_json::to_string_pretty(&repo.audit_archives(if after=="-" {""}else{after},before.parse()?,limit.parse()?).await?)?);
         }
-        _ => return Err("usage: jrip-audit create|create-signed DATABASE AFTER BEFORE_UNIX_SECONDS LIMIT OUTPUT.json | export DATABASE ARCHIVE_ID OUTPUT.json | verify INPUT.json PINNED_SHA256 | verify-signature INPUT.json PUBLIC.bin | verify-current DATABASE INPUT.json PUBLIC.bin | store|vault-status DATABASE ARCHIVE_ID VAULT_DIRECTORY | list DATABASE AFTER_UUID_OR_DASH BEFORE_UNIX_SECONDS LIMIT".into()),
+        [command,database,directory,days,after,limit] if command == "retention-preview" => {
+            if !Path::new(database).is_file() { return Err("existing repository database required".into()); }
+            let days: i64 = days.parse()?;
+            if !(1..=3650).contains(&days) { return Err("retention days must be 1..3650".into()); }
+            let before = rip_storage::now()-days*86400;
+            let repo = Repository::open_with_receipt_signer(Path::new(database),None).await?;
+            println!("{}",serde_json::to_string_pretty(&repo.preview_audit_retention(before,Path::new(directory),if after=="-" {""}else{after},limit.parse()?).await?)?);
+        }
+        _ => return Err("usage: jrip-audit create|create-signed DATABASE AFTER BEFORE_UNIX_SECONDS LIMIT OUTPUT.json | export DATABASE ARCHIVE_ID OUTPUT.json | verify INPUT.json PINNED_SHA256 | verify-signature INPUT.json PUBLIC.bin | verify-current DATABASE INPUT.json PUBLIC.bin | store|vault-status DATABASE ARCHIVE_ID VAULT_DIRECTORY | list DATABASE AFTER_UUID_OR_DASH BEFORE_UNIX_SECONDS LIMIT | retention-preview DATABASE VAULT_DIRECTORY DAYS AFTER_UUID_OR_DASH LIMIT".into()),
     }
     Ok(())
 }
