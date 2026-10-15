@@ -51,6 +51,34 @@ pub(crate) fn stored_digest_profile(
         _ => Err(bad("invalid_preflight_profile")),
     }
 }
+pub(crate) fn authorization_evidence(
+    app: &App,
+    headers: &HeaderMap,
+    scopes: &[&str],
+) -> Result<Value, ApiError> {
+    for scope in scopes {
+        authorize(app, headers, scope)?;
+    }
+    Ok(
+        json!({"actor":pipeline::actor(app,headers)?,"mechanism":if app.credentials.is_empty() {"shared-bearer"}else{"scoped-bearer"},
+        "requiredScopes":scopes,"scopeCheck":"passed","purpose":"scope-check-only"}),
+    )
+}
+pub(crate) fn require_actor(
+    app: &App,
+    headers: &HeaderMap,
+    payload: &Value,
+) -> Result<(), ApiError> {
+    match payload.get("actor") {
+        Some(actor) if actor != &json!(pipeline::actor(app, headers)?) => {
+            Err(ApiError(StatusCode::FORBIDDEN, "preflight_actor_mismatch"))
+        }
+        None if !app.credentials.is_empty() => {
+            Err(ApiError(StatusCode::FORBIDDEN, "preflight_actor_required"))
+        }
+        _ => Ok(()),
+    }
+}
 pub async fn create(
     State(app): State<App>,
     headers: HeaderMap,
@@ -58,6 +86,7 @@ pub async fn create(
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     authorize(&app, &headers, "jobs:submit")?;
     let digest_profile = selected_digest(&headers)?;
+    let evidence = authorization_evidence(&app, &headers, &["jobs:submit"])?;
     let resolution = rip_acx::intent::resolve(intent);
     if resolution["executable"] != true {
         return Ok((StatusCode::UNPROCESSABLE_ENTITY, Json(resolution)));
@@ -67,7 +96,7 @@ pub async fn create(
     let ticket = &resolution["ticket"];
     let mut payload = json!({
         "acx":"0.1", "profile":if digest_profile==LEGACY_DIGEST {"org.jrip.settings-preflight-v1"}else{"org.jrip.settings-preflight-v2"},
-        "preflightId":id,"capability":rip_acx::RIP_CAPABILITY_ID,
+        "preflightId":id,"capability":rip_acx::RIP_CAPABILITY_ID,"actor":evidence["actor"],"authorizationEvidence":evidence,
         "issuedAt":issued,"expiresAt":issued+300,
         "ticket":ticket,"requestHash":digest_with_profile(ticket,digest_profile)?,
         "digestProfile":digest_profile,
@@ -89,6 +118,7 @@ pub async fn get(
 ) -> Result<Json<Value>, ApiError> {
     authorize(&app, &headers, "jobs:submit")?;
     let payload = app.repo.get_preflight(id).await?;
+    require_actor(&app, &headers, &payload)?;
     if matches!(
         payload["profile"].as_str(),
         Some("org.jrip.pipeline-preflight-v1" | "org.jrip.pipeline-preflight-v2")
@@ -112,6 +142,7 @@ pub async fn commit(
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     authorize(&app, &headers, "jobs:submit")?;
     let payload = app.repo.get_preflight(preflight_id).await?;
+    require_actor(&app, &headers, &payload)?;
     if matches!(
         payload["profile"].as_str(),
         Some("org.jrip.pipeline-preflight-v1" | "org.jrip.pipeline-preflight-v2")

@@ -62,3 +62,19 @@ Keep administrator credentials separate from AI credentials if a human approval 
 
 
 Color control / 色処理制御 / 颜色控制：`color_get_capabilities` describes supported formats, policy constraints, limits, capability revision and expiry; worker availability is explicitly not probed. `color_apply` queues an immutable, source-revision-bound attempt; `color_get_attempt`, `color_get_events`, `color_cancel_attempt` and `color_get_profile` delegate the scoped API. The original RIP artifact remains intact, and physical delivery can select a completed `colorAttemptId`. See [Color processing](COLOR-MANAGEMENT.md). / 色処理能力・制約・上限・版・期限を公開し、Worker稼働状態は未確認と明示します。色attemptは原本revisionを固定し、完了後に実機送信へ選択できます。 / 发布颜色能力、约束、限额、revision及期限，明确Worker状态未探测。颜色尝试固定原稿revision，完成后可选用于实体投递。
+
+## Owner-bound preflight and authorization evidence / 主体拘束と認可証跡 / 身份绑定与授权证据
+
+English: New settings preflights persist actor and authorizationEvidence (mechanism, requiredScopes, scopeCheck and purpose) inside their digest-bound payload. Create/get/commit require jobs:submit, and get/commit—including committed replay—require the same authenticated identity. Admin scope does not bypass owner binding. Two current credentials for the same identity can rotate without invalidating the preflight; scope checks still apply to each request. Physical preflights retain their existing owner check and now carry evidence for the required four workflow scopes. Retry requires submit/control and binds its durable requestId to the actor before returning an idempotent result.
+
+New acceptance receipts identify scoped-bearer/shared-bearer or historical actor-bound-bearer correctly and copy actor plus the stored scope-check evidence into proof. These fields describe the preflight scope check, not an execution token, human approval or complete document-structure validation. Existing commit/runtime/approval checks remain necessary. Tokens and the caller's full scope grant list are not persisted. Stored historical receipts are not rewritten.
+
+Historical settings/retry records without actor remain available only in shared-token mode. With an explicit credential policy, they fail with preflight_actor_required and callers must create a new bound request; malformed or different actors fail with preflight_actor_mismatch. Records are not assigned an invented historical owner. Existing JCS v2 and explicitly negotiated legacy v1 hashing rules are retained. Three-language messages explain the recovery action. This implements the owner/scope evidence milestone, not complete ACX lifecycle conformance or tenant isolation of all jobs.
+
+日本語：新規設定preflightのactorと認可証跡をdigest対象に含め、取得・commit・再送時に同じidentityと現在のjobs:submitを確認します。管理者も別主体のpreflightを流用できません。同一identityのトークン更新は可能ですが、操作ごとのscopeを再検査します。物理preflightの4つのworkflow scope、retryのsubmit/controlも証跡へ記録し、retryのrequestIdを主体に拘束します。
+
+受付Receiptには方式・主体・保存済みscope検査証跡を記録します。tokenや全付与scopeは保存せず、この証跡を実行token・人の承認・原稿構造検証とは扱いません。旧Receiptを書き換えません。actorのない旧設定／retryは共有tokenモードのみで利用でき、明示的policyでは新しい要求の作成が必要です。JCS v2と旧v1のhash規則は維持します。ACX lifecycle全体や全jobのtenant分離の完了とは扱いません。
+
+简体中文：新设置预检的actor及scope检查证据纳入摘要，读取、commit及重放均检查相同identity及当前jobs:submit。管理员scope不能绕过归属。同identity可轮换token，但每次重新检查权限。实体预检记录4个workflow scope，retry记录submit/control并将requestId绑定身份。
+
+接收回执记录机制、主体及保存的scope检查证据，不保存token或完整授权列表，也不将证据视为执行token、人工审批或原稿结构验证。历史回执不重写。无actor的旧设置／retry仅在共享token模式可用；显式policy下须创建新请求。保持JCS v2及旧v1摘要规则，不宣称完整ACX lifecycle或全部job的tenant隔离已完成。

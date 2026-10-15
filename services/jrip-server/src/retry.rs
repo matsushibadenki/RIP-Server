@@ -20,10 +20,11 @@ pub async fn retry(
         return Err(bad("invalid_revision"));
     }
     let original = app.repo.get(source).await?;
-    let payload = json!({"capability":rip_acx::RIP_CAPABILITY_ID,"retrySource":source,"retryRevision":request.expected_revision,
+    let payload = json!({"capability":rip_acx::RIP_CAPABILITY_ID,"retrySource":source,"retryRevision":request.expected_revision,"actor":pipeline::actor(&app,&headers)?,"authorizationEvidence":preflight::authorization_evidence(&app,&headers,&["jobs:submit","jobs:control"])?,
         "requestHash":format!("sha256:{:x}",Sha256::digest(serde_json::to_vec(&original.manifest).map_err(internal)?)),
         "preflightDigest":format!("retry:{}:{}:{}",source,request.expected_revision,request.request_id)});
-    app.repo
+    let stored = app
+        .repo
         .retry_preflight(
             request.request_id,
             source,
@@ -31,6 +32,7 @@ pub async fn retry(
             &payload,
         )
         .await?;
+    preflight::require_actor(&app, &headers, &stored)?;
     if let Some(id) = app.repo.committed_job(request.request_id).await? {
         return Ok(Json(
             json!({"job":app.repo.get(id).await?,"retryOf":source,"replayed":true}),

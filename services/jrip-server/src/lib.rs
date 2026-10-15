@@ -265,6 +265,16 @@ fn messages(code: &str) -> serde_json::Value {
             "監査記録を保存できません",
             "无法保存审计记录",
         ),
+        "preflight_actor_mismatch" => (
+            "Use the identity that created this preflight",
+            "このpreflightを作成した主体で操作してください",
+            "请使用创建此预检的身份操作",
+        ),
+        "preflight_actor_required" => (
+            "Create a new owner-bound preflight under the current authorization policy",
+            "現在の認可ポリシーで主体に紐付くpreflightを新規作成してください",
+            "请按当前授权策略重新创建绑定身份的预检",
+        ),
         "forbidden" => (
             "Insufficient permission",
             "操作権限がありません",

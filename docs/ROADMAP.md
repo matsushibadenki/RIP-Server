@@ -100,13 +100,17 @@
 - 🟢 [Done] 指定ID・digest・保持期限・--applyによる監査DB snapshot削除、保管先再検証・同期、削除証跡と監査の原子保存、再送復旧と削除後のvault-status。元監査と保管copyは保持。 / Revalidated local snapshot pruning and durable evidence / 重新验证的本地快照删除及持久证据。
 - 🟢 [Done] HTTPS conditional object-vault adapter、管理者環境設定、保存後のbounded読み戻し、永続remote ACK・監査、再送／現在状態照会。 / Conditional HTTPS vault adapter / 条件式HTTPS归档库adapter。
 - ⭕️ [Pending] 実HTTPSサービス・証明書と事業者の永続性、S3互換・WORM検証。 / Live HTTPS/provider durability and S3/WORM verification / 实际HTTPS及provider持久性、S3/WORM验证。
-- 🟠 [Next] S3/provider専用adapter、外部保管copyの保持期限、KMS。
+- 🟢 [Done] remote copy保持期限のdry-run確認、初回ACK基準、現存local snapshotと現在のGET照合、最後のcopyの候補除外、bounded paging。 / Conservative remote-retention assessment / 保守远程保留期限评估。
+- 🟢 [Done] HTTPS copyのstrong ETag条件付き単一DELETE、PREPARED journal・監査、UNKNOWN照会復旧、local snapshot保護、store競合防止。 / Conditional remote deletion with durable uncertainty handling / 条件式远程删除与持久不确定状态处理。
+- ⭕️ [Pending] 実HTTPS事業者のIf-Match DELETE・read-after-delete保証と共有NFSロック。 / Live provider conditional deletion and shared NFS locks / 实际provider条件删除及共享NFS锁。
+- 🟠 [Next] S3/provider専用adapter、UNKNOWNのprovider固有解決、KMS。
 
 - 🟢 [Done] preflight digest、原稿SHA-256、形式、有効期限を検証するmultipart commit APIを実装。保存済みticketからジョブを登録し、SQLiteトランザクションで同一preflightの同時再送を重複排除する。共通Bearerトークンによる認可を使用。
-- 🟠 [Next] 主体別scope・認可証跡、原稿構造全体の検証、Receipt、期限切れpreflightと孤立ファイルの清掃を追加する。
+- 🟢 [Done] 設定／物理preflightとretryの主体拘束、操作ごとのscope検査、受付Receiptへの方式・主体・検査証跡。Receipt、期限切れpreflightと孤立ファイルの清掃は既存実装で検証済み。 / Owner-bound requests and scoped evidence / 身份绑定请求与scope证据。
+- 🟠 [Next] すべての投入経路での原稿構造全体の検証。 / Full structural document validation across every submission path / 全部提交路径的完整文档结构验证。
 
-- 🟢 [Done] 設定preflightをSQLiteへ永続化し、5分の期限、確定ticketのrequestHash、preflightDigest、再起動後の取得、期限切れの拒否を実装。digestはJ-RIP専用の実験的JSON encodingで、ACXの共通canonicalizationではない。
-- 🟠 [Next] 主体別の認可証跡とACX共通digest profileへの対応を追加。設定preflightの作成だけでは実行を許可しない。
+- 🟢 [Done] 設定preflightの永続化、5分の期限、確定ticketのrequestHash、preflightDigest、再起動後の取得、期限切れ拒否。新規v2は共有JCS bounded profile、明示選択したv1は旧encoding。保存済み方式を維持。 / Versioned durable preflight / 版本化持久预检。
+- 🟢 [Done] 主体別の認可証跡とJRIP/ACX実験的print profileの共有JCS digestに対応。設定preflightの作成だけでは実行を許可しない。 [AGENT-CONTROL.md](AGENT-CONTROL.md)。 / Owner evidence and shared experimental JCS profile / 身份证据及共享实验性JCS profile。
 
 - 🟢 [Done] `POST /api/v1/print/resolve` でACX PrintIntentをTIFF出力用JobTicketへ能力照合する。必須条件の競合、推奨値の調整、実機出力・ICC・用紙・両面・期限など未対応設定を明示する。原稿取得・検証、認可、コミット、ジョブ投入は後続工程。
 - 🟠 [Next] ACX lifecycle全体の適合を検証する。resolverは設定照合のみで、原稿構造検証や主体別認可を含むACX lifecycleの完了とは扱わない。

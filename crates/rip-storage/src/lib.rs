@@ -83,6 +83,7 @@ impl Repository {
             .await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS delivery_events (sequence INTEGER PRIMARY KEY AUTOINCREMENT,delivery_id TEXT NOT NULL,state TEXT NOT NULL,created_at INTEGER NOT NULL)").execute(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS job_event_details (sequence INTEGER PRIMARY KEY,payload TEXT NOT NULL)").execute(&pool).await?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS audit_remote_prunes(archive_id TEXT NOT NULL,target TEXT NOT NULL,state TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(archive_id,target))").execute(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS audit_remote_exports(archive_id TEXT NOT NULL,target TEXT NOT NULL,digest TEXT NOT NULL,bytes INTEGER NOT NULL,verified_at INTEGER NOT NULL,PRIMARY KEY(archive_id,target))").execute(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS audit_archive_prunes(archive_id TEXT PRIMARY KEY,payload TEXT NOT NULL)").execute(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS audit_archive_exports(archive_id TEXT NOT NULL,target TEXT NOT NULL,digest TEXT NOT NULL,bytes INTEGER NOT NULL,verified_at INTEGER NOT NULL,PRIMARY KEY(archive_id,target))").execute(&pool).await?;
@@ -362,7 +363,7 @@ impl Repository {
                     "jobId":job.id,"preflightId":id,"preflightDigest":pf["preflightDigest"],
                     "sourceSha256":job.source_sha256,"completionMeaning":"raster_export",
                     "requestHashDigestProfile":if pf.get("retrySource").is_some() {serde_json::json!("org.jrip.serde-json-v1")}else{pf["digestProfile"].clone()},"preflightDigestProfile":pf["digestProfile"],
-                    "authorization":"shared-bearer","signed":false,
+                    "authorization":pf["authorizationEvidence"]["mechanism"].as_str().unwrap_or(if pf["actor"].is_string() {"actor-bound-bearer"}else{"shared-bearer"}),"actor":pf["actor"],"authorizationEvidence":pf["authorizationEvidence"],"signed":false,
                     "workflowId":pf["workflowRequest"]["requestId"],
                     "workflowCompletionMeaning":if matches!(pf["profile"].as_str(),Some("org.jrip.pipeline-preflight-v1"|"org.jrip.pipeline-preflight-v2")) {Some("device-confirmed")}else{None}}
             });

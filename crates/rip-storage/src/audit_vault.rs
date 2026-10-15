@@ -158,6 +158,11 @@ impl Repository {
             .bind(id.to_string())
             .execute(&mut *tx)
             .await?;
+        let remote_pending: i64 = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM audit_remote_prunes WHERE archive_id=? AND state IN ('PREPARED','UNKNOWN'))")
+            .bind(id.to_string()).fetch_one(&mut *tx).await?;
+        if remote_pending != 0 {
+            return Err("remote deletion unresolved; local snapshot protected".into());
+        }
         let prior: Option<String> =
             sqlx::query_scalar("SELECT payload FROM audit_archive_prunes WHERE archive_id=?")
                 .bind(id.to_string())

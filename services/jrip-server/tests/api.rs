@@ -1221,3 +1221,210 @@ async fn preflight_digest_versions_survive_restart_and_commit_uses_stored_profil
         assert_eq!(receipt["proof"]["preflightDigestProfile"], expected);
     }
 }
+
+#[tokio::test]
+async fn settings_preflight_owner_scope_rotation_and_receipt_survive_restart() {
+    use sha2::{Digest, Sha256};
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = jrip_server::open(dir.path().into(), TOKEN.into())
+        .await
+        .unwrap();
+    let credentials = vec![
+        jrip_server::Credential {
+            token: TOKEN.into(),
+            identity: "alice".into(),
+            scopes: vec!["jobs:submit".into()],
+        },
+        jrip_server::Credential {
+            token: "rotated-token-at-least-24-characters".into(),
+            identity: "alice".into(),
+            scopes: vec!["jobs:submit".into()],
+        },
+        jrip_server::Credential {
+            token: "bob-admin-token-at-least-24-characters".into(),
+            identity: "bob".into(),
+            scopes: vec!["admin".into()],
+        },
+        jrip_server::Credential {
+            token: "reader-token-at-least-24-characters".into(),
+            identity: "alice".into(),
+            scopes: vec!["jobs:read".into()],
+        },
+    ];
+    state.credentials = credentials.clone();
+    let document = "%!PS-Adobe-3.0\nshowpage\n";
+    let intent = serde_json::json!({"document":{"uri":"https://example.org/proof.ps","mediaType":"application/postscript","sha256":format!("{:x}",Sha256::digest(document))},"copies":{"mode":"required","value":1},"output":{"destination":"artifact"}});
+    let response = jrip_server::router(state)
+        .oneshot(
+            Request::post("/api/v1/print/preflights")
+                .header("authorization", format!("Bearer {TOKEN}"))
+                .header("content-type", "application/json")
+                .body(Body::from(intent.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let pf: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(pf["actor"], "alice");
+    assert_eq!(pf["authorizationEvidence"]["mechanism"], "scoped-bearer");
+    assert_eq!(
+        pf["authorizationEvidence"]["requiredScopes"],
+        serde_json::json!(["jobs:submit"])
+    );
+    assert_eq!(pf["authorizationGranted"], false);
+    let id = pf["preflightId"].as_str().unwrap();
+    let mut reopened = jrip_server::open(dir.path().into(), TOKEN.into())
+        .await
+        .unwrap();
+    reopened.credentials = credentials;
+    let router = jrip_server::router(reopened.clone());
+    let commit = |token: &str| {
+        Request::post(format!("/api/v1/print/preflights/{id}/commit")).header("authorization",format!("Bearer {token}")).header("x-jrip-preflight-digest",pf["preflightDigest"].as_str().unwrap()).header("content-type","multipart/form-data; boundary=bound").body(Body::from(format!("--bound\r\nContent-Disposition: form-data; name=\"document\"\r\n\r\n{document}\r\n--bound--\r\n"))).unwrap()
+    };
+    for token in [
+        "bob-admin-token-at-least-24-characters",
+        "reader-token-at-least-24-characters",
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::get(format!("/api/v1/print/preflights/{id}"))
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            router
+                .clone()
+                .oneshot(commit(token))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    assert!(reopened.repo.list(100, 0).await.unwrap().is_empty());
+    let response = router
+        .clone()
+        .oneshot(commit("rotated-token-at-least-24-characters"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let result: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let receipt = reopened
+        .repo
+        .get_print_receipt(result["job"]["id"].as_str().unwrap().parse().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(receipt["proof"]["authorization"], "scoped-bearer");
+    assert_eq!(receipt["proof"]["actor"], "alice");
+    assert_eq!(
+        receipt["proof"]["authorizationEvidence"],
+        pf["authorizationEvidence"]
+    );
+    assert!(!receipt.to_string().contains(TOKEN));
+    assert!(!receipt.to_string().contains("rotated-token"));
+    assert_eq!(
+        router
+            .clone()
+            .oneshot(commit("bob-admin-token-at-least-24-characters"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        router.oneshot(commit(TOKEN)).await.unwrap().status(),
+        StatusCode::OK
+    );
+    let job_id: uuid::Uuid = result["job"]["id"].as_str().unwrap().parse().unwrap();
+    let source = reopened.repo.get(job_id).await.unwrap();
+    let cancelled = reopened
+        .repo
+        .transition(source, rip_core::JobState::Cancelled, None)
+        .await
+        .unwrap();
+    let mut retry_app = reopened.clone();
+    retry_app.credentials[0].scopes.push("jobs:control".into());
+    let retry_api = jrip_server::router(retry_app);
+    let retry_id = uuid::Uuid::new_v4();
+    let retry_request = |token: &str| {
+        Request::post(format!("/api/v1/jobs/{job_id}/retry"))
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({"expectedRevision":cancelled.revision,"requestId":retry_id})
+                    .to_string(),
+            ))
+            .unwrap()
+    };
+    let response = retry_api
+        .clone()
+        .oneshot(retry_request(TOKEN))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let retried: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let receipt = reopened
+        .repo
+        .get_print_receipt(retried["job"]["id"].as_str().unwrap().parse().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(receipt["proof"]["actor"], "alice");
+    assert_eq!(
+        receipt["proof"]["authorizationEvidence"]["requiredScopes"],
+        serde_json::json!(["jobs:submit", "jobs:control"])
+    );
+    assert_eq!(
+        retry_api
+            .oneshot(retry_request("bob-admin-token-at-least-24-characters"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    // Historical actor-less records remain usable only in legacy shared-token mode.
+    let legacy_id = uuid::Uuid::new_v4();
+    let mut legacy = pf.clone();
+    legacy["preflightId"] = serde_json::json!(legacy_id);
+    legacy.as_object_mut().unwrap().remove("actor");
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("authorizationEvidence");
+    legacy.as_object_mut().unwrap().remove("preflightDigest");
+    legacy["preflightDigest"] = serde_json::json!(rip_digest::digest(&legacy).unwrap());
+    reopened
+        .repo
+        .save_preflight(legacy_id, &legacy, rip_storage::now() + 300)
+        .await
+        .unwrap();
+    let response = jrip_server::router(reopened.clone())
+        .oneshot(
+            Request::get(format!("/api/v1/print/preflights/{legacy_id}"))
+                .header("authorization", format!("Bearer {TOKEN}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    reopened.credentials.clear();
+    let response = jrip_server::router(reopened)
+        .oneshot(
+            Request::get(format!("/api/v1/print/preflights/{legacy_id}"))
+                .header("authorization", format!("Bearer {TOKEN}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}

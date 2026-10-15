@@ -127,7 +127,7 @@ English: `prune` requires an explicit archive ID, selected vault, retention days
 
 Source audit records, public-key records, historical export acknowledgements and vault files remain. The prune record preserves archive ID, payload/full-file digests, byte count, record range/count, signature profile/key ID, target, cutoff and time. `vault-status` continues to check the external file against the recorded full-file hash after pruning. Replay reports a historical deletion, not current vault integrity. DB export/store for a pruned ID returns not found; recover the original JSON from the retained `{UUID}.json` vault file and use verify/verify-signature/verify-current as appropriate. No automatic import or resigning occurs. list reports only remaining local snapshots; prune-record retrieves evidence by the known ID.
 
-The vault must stay administrator-controlled during and after pruning. Filesystem verification/sync is not a WORM or remote replication guarantee and cannot prevent an administrator changing/deleting the sole retained copy afterward. Apply your legal holds, key trust requirements and backup policy before explicitly invoking --apply. No production pruning was performed during development; tests use temporary databases and directories. SQLite freed pages are reusable; this does not run VACUUM or guarantee a smaller database file. External archive deletion, original-audit pruning, object storage and KMS remain planned.
+The vault must stay administrator-controlled during and after pruning. Filesystem verification/sync is not a WORM or remote replication guarantee and cannot prevent an administrator changing/deleting the sole retained copy afterward. Apply your legal holds, key trust requirements and backup policy before explicitly invoking --apply. No production pruning was performed during development; tests use temporary databases and directories. SQLite freed pages are reusable; this does not run VACUUM or guarantee a smaller database file. Provider-specific S3 deletion, original-audit pruning and KMS remain planned.
 
 日本語：`prune` はID、保管先、保持日数1〜3650、確認したpayload digest、`--apply` を必須とします。SQLite writerトランザクション内で期限・digest・保管ACKを検査し、保管ファイルの再読込と同期後に、削除証跡・DB snapshot削除・監査を原子的に保存します。検証や監査保存の失敗時は削除も取り消します。再送は元の証跡を返し、異なるdigest・保管先は拒否します。
 
@@ -169,3 +169,61 @@ HTTPSのみ許可し、認証付きURL・query・fragment・redirect・環境pro
 仅允许HTTPS，拒绝URL用户凭证、query、fragment、redirect及环境proxy。token通过secret环境配置，不记录到审计或ACK。连接超时5秒、请求30秒、读取上限8 MiB。写入后完整读回匹配，才原子保存remote ACK与审计；重放可恢复中断。remote-status检查当前内容，本地快照删除后可使用删除证据摘要。remote ACK不能单独触发filesystem prune。
 
 测试使用仅测试可用的loopback HTTP模拟服务，生产constructor不允许HTTP或绕过TLS校验。实际HTTPS服务/证书、provider持久性、S3兼容、WORM和远程保留期限仍未验证或实现。成功读回不保证后续保留。
+
+## Remote retention assessment / 外部copyの保持期限確認 / 远程copy保留期限评估
+
+With the same JRIP_AUDIT_VAULT_URL/TOKEN configuration:
+
+```sh
+cargo run -p rip-storage --bin jrip-audit -- remote-retention-preview data/jobs.sqlite3 90 - 20
+```
+
+English: This read-only command assesses remote acknowledgements older than 1–3650 days for the configured endpoint, using the first successful remote acknowledgement time as the age basis. A replay does not reset age. Results use canonical UUID pagination (nextAfter/hasMore), with limit 1–20 to bound network work. Each read can take up to 30 seconds; a 20-entry page may therefore take several minutes. CLI invocations recompute the cutoff; the response records before. Concurrent changes can affect later pages.
+
+A remoteCopyPruneCandidate requires the original local DB snapshot to remain present, valid and equal to the acknowledged full-file digest/size, plus a current matching remote GET. Missing local snapshots are excluded even if a historical local-prune record exists, preventing an assessment that treats the remaining remote copy as disposable. Local evidence problems, missing/changed remote bytes and transport/size failures return explicit reasons and never positive candidates. This policy does not search other filesystem vaults or remote endpoints for alternate copies.
+
+The result always states dryRun:true and remoteDeletionImplemented:true. It does not send DELETE, change acknowledgement times, prune snapshots or add audit events. Conditional remote deletion is described below. Legal-hold evaluation, server lifecycle configuration, WORM and future-retention guarantees are not implemented. Recheck copy survival and object identity atomically at actual deletion time when implementing a provider-specific delete workflow. Source audit records remain retained.
+
+日本語：`remote-retention-preview` は設定済みendpointの最初のremote ACK時刻を基準に、1〜3650日を過ぎたcopyを確認します。再送で経過日数はリセットしません。UUID cursorで1〜20件ずつ返し、各読み込みは最大30秒のため、1ページに数分かかる場合があります。CLIごとにcutoffを再計算し、結果のbeforeに記録します。
+
+ローカルDB snapshotが現存し、ACKの全体hash・容量と一致し、現在のremote GETも一致する場合だけ候補にします。ローカル削除証跡があってもsnapshotがなければ除外し、残る外部copyを候補にしません。他のvaultやendpointのcopyは探索しません。不一致・不明・通信エラーは理由コード付きで除外します。
+
+常にdry-runで、DELETE・ACK時刻更新・snapshot削除は行いません。条件付き削除は後述します。legal hold、事業者lifecycle、WORMは未実装です。実削除の実装時には、その時点でcopyとobject identityを再確認する必要があります。
+
+简体中文：`remote-retention-preview` 以配置endpoint的首次remote ACK时间为基准，评估超过1–3650天的copy；重放不重置年龄。按UUID分页，每页1–20条，每次读取最多30秒，整页可能耗时数分钟。CLI重新计算cutoff并在before中返回。
+
+仅当原本地DB快照仍存在且与ACK完整摘要/大小一致，并且当前remote GET也一致时列为候选。本地快照已删除时，即使保留删除证据也排除，防止将剩余远程copy列为可丢弃。不会搜索其他vault或endpoint。缺失、改变、通信及大小异常均返回原因且不产生正候选。
+
+始终dry-run，不发送DELETE、不更新ACK时间、不删除快照。条件式删除见下文；legal hold、provider lifecycle及WORM仍未实现。未来实际删除必须重新核对copy及object identity。
+
+## Conditional remote deletion / 外部copyの条件付き削除 / 条件式远程删除
+
+Use the same HTTPS vault configuration. Obtain EXPECTED_FILE_DIGEST from remote-store or remote-retention-preview (this is the complete-file hash, not the payload digest).
+
+```sh
+cargo run -p rip-storage --bin jrip-audit -- remote-prune data/jobs.sqlite3 ARCHIVE_UUID 90 sha256:EXPECTED_FILE_DIGEST --apply
+cargo run -p rip-storage --bin jrip-audit -- remote-prune-record data/jobs.sqlite3 ARCHIVE_UUID
+cargo run -p rip-storage --bin jrip-audit -- remote-prune-reconcile data/jobs.sqlite3 ARCHIVE_UUID
+```
+
+English: The gateway must additionally return a strong ETag on GET, synchronously support conditional DELETE with If-Match, return 412 without deleting when it differs, and provide consistent GET/404 observations. [RFC 9110 If-Match](https://www.rfc-editor.org/rfc/rfc9110.html#name-if-match) defines the conditional semantics. Weak/missing ETags are rejected. UUIDs are immutable object identities; do not externally reuse a deleted UUID. S3/versioned delete markers and provider-specific semantics are not covered.
+
+remote-prune requires --apply, a retention age of 1–3650 days, the current stored complete-file digest, a matching live remote copy and a surviving original local snapshot. A short writer transaction rechecks that snapshot and the aged remote acknowledgement, then commits PREPARED intent and an audit event before any DELETE. Per-archive OS locks serialize store/delete/reconciliation across local processes without holding a DB writer lock over network calls. Keep `.jrip-remote-*.lock` files in place while the repository is in use. These locks are not a tested distributed/NFS coordination guarantee.
+
+Exactly one application DELETE attempt is made, with the observed strong ETag in If-Match. HTTP client retries and redirects are disabled. 412 yields REJECTED. Successful 200/204 still requires a subsequent GET/404 to record CONFIRMED_ABSENT. Transport errors, unexpected responses or inconclusive readback yield UNKNOWN. A process crash may leave PREPARED; replay returns that journal instead of resending DELETE. remote-prune-reconcile only performs GET: 404 can settle CONFIRMED_ABSENT, while present objects or unavailable responses stay UNKNOWN. Confirmation means observed absence, not proof of who removed the object.
+
+PREPARED/UNKNOWN journals block local snapshot pruning. Store to an archive/endpoint with any deletion journal is rejected, preventing this application from recreating a deleted object. Terminal deletion records and state-change audit events persist; terminal replays do not duplicate them. Once resolved, local pruning still requires a separately verified filesystem vault copy. remote-retention-preview excludes archives already having a deletion journal.
+
+This is a conservative one-attempt workflow. There is no retry, cancellation or journal-reset command for an unresolved/rejected delete; retain the protected local evidence and investigate the gateway. Indefinite UNKNOWN can require later provider-specific/manual resolution. Strong If-Match support must be enforced by the configured gateway; the client cannot make a noncompliant server safe. Legal holds and backup policy remain administrator responsibilities. Only temporary fake-server objects were deleted in development; actual HTTPS DELETE/provider guarantees remain Pending.
+
+日本語：gatewayはGETでstrong ETagを返し、If-Match付きDELETEを同期的・原子的に処理し、不一致なら412で削除しない必要があります。weak／欠落ETagは拒否します。`remote-prune` は --apply、保持日数、ファイル全体のdigest、現存するローカルsnapshotとremote copyの一致を必須とします。削除前にPREPAREDと監査を永続化します。archive単位OSロックでstore／削除／照会を直列化し、ネットワーク待ちでDB writerを占有しません。稼働中に専用lockファイルを削除しないでください。
+
+DELETEは1回のみで、HTTP clientの自動retryも無効です。412はREJECTED、200/204後のGET/404でCONFIRMED_ABSENT、それ以外はUNKNOWNです。中断時のPREPAREDやUNKNOWNを再送せず、reconcileはGETだけで確認します。存在する／照会不能ならUNKNOWNを保持します。不在確認は削除原因を証明するものではありません。
+
+不明な間はローカルsnapshot削除を拒否します。削除journalがある同一endpoint／IDへのstoreも拒否し、object再作成を防ぎます。確定したjournalと監査は保持します。取消・再試行・journalリセットは未実装で、不明状態は保護した証跡を残して調査が必要です。実HTTPS事業者でのDELETEとNFS分散ロックは未検証です。本番objectは削除せず、開発用模擬objectのみで検証しました。
+
+简体中文：gateway必须提供strong ETag及同步原子If-Match DELETE；不匹配返回412且不删除。拒绝weak或缺失ETag。remote-prune要求 --apply、保留期、完整文件摘要，以及一致的本地快照和远程copy。先原子保存PREPARED与审计，再发送DELETE。每archive OS锁串行化store/删除/核对，网络等待不占用DB writer。运行期间不要移除专用lock文件。
+
+仅发送一次DELETE，并禁用HTTP自动retry。412为REJECTED；200/204后还须GET/404才记为CONFIRMED_ABSENT，其余为UNKNOWN。中断后不重新发送，reconcile仅GET；仍存在或不可查询则保留UNKNOWN。不在场确认不证明删除者身份。
+
+PREPARED/UNKNOWN保护本地快照，任何删除journal都阻止同endpoint/ID再次store以避免重建对象。保留journal及状态审计；取消、retry和journal reset未实现，不明状态需保留证据调查。实际HTTPS provider DELETE及NFS分布式锁仍Pending。开发仅删除临时模拟对象，未删除生产object。
