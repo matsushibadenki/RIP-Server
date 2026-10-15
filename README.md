@@ -280,6 +280,7 @@ Mac native CUPS validation now includes the dedicated [PDF passthrough PPD](adap
 
 ### Additional implemented controls / 追加した制御 / 新增控制
 
+- [Source validation](docs/SOURCE-VALIDATION.md): mandatory standard-worker gate and runtime evidence / 標準workerの必須原稿検証と証跡 / 标准worker强制原稿验证与证据。
 - [Agent control](docs/AGENT-CONTROL.md): durable audit, stage metadata, scoped MCP resources, physical-delivery approval and live printer capabilities / 永続監査・工程履歴・MCP権限・印刷承認・実機能力 / 持久化审计、阶段记录、MCP权限、打印审批及实时能力。
 - [Maintenance](docs/MAINTENANCE.md): opt-in retention, resumable cleanup and shared snapshot budget / 明示的な保持期限・再開可能な清掃・共有予算 / 显式保留期限、可恢复清理及共享预算。
 - [Audit archive](docs/AUDIT-ARCHIVE.md): immutable exports, domain-separated signatures and current key verification / 不変監査出力・専用署名・現在の鍵状態検証 / 不可变审计导出、独立domain签名及当前密钥验证。

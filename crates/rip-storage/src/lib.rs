@@ -10,6 +10,7 @@ pub mod inspection;
 pub mod maintenance;
 pub mod pipeline;
 pub mod receipts;
+pub mod source_validation;
 pub mod unified;
 use rip_core::{Artifact, Job, JobState};
 use sha2::{Digest, Sha256};
@@ -64,6 +65,7 @@ impl Repository {
                     .busy_timeout(Duration::from_secs(5)),
             )
             .await?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS source_validations(job_id TEXT PRIMARY KEY,payload TEXT NOT NULL)").execute(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, payload TEXT NOT NULL, priority INTEGER NOT NULL, created_at INTEGER NOT NULL, revision INTEGER NOT NULL)").execute(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS job_events (sequence INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL, state TEXT NOT NULL, created_at INTEGER NOT NULL)").execute(&pool).await?;
         sqlx::query("CREATE INDEX IF NOT EXISTS job_events_cursor ON job_events(job_id,sequence)")
@@ -649,9 +651,17 @@ async fn store_result_receipt(
     let artifacts: Option<serde_json::Value> = artifact_row
         .map(|r| serde_json::from_str(r.get("payload")))
         .transpose()?;
+    let validation: Option<String> =
+        sqlx::query_scalar("SELECT payload FROM source_validations WHERE job_id=?")
+            .bind(job.id.to_string())
+            .fetch_optional(&mut **tx)
+            .await?;
+    let validation: Option<serde_json::Value> = validation
+        .map(|value| serde_json::from_str(&value))
+        .transpose()?;
     let result = serde_json::json!({"jobId":job.id,"state":job.state,"revision":job.revision,
         "errorCode":job.error_code,"selectedEngine":job.selected_engine,"sourceSha256":job.source_sha256,
-        "completionMeaning":"raster_export","artifactHashesVerified":artifacts.is_some(),"pageCount":artifacts.as_ref().and_then(|v| v.as_array()).map(Vec::len),"artifacts":artifacts});
+        "completionMeaning":"raster_export","sourceValidation":validation,"artifactHashesVerified":artifacts.is_some(),"pageCount":artifacts.as_ref().and_then(|v| v.as_array()).map(Vec::len),"artifacts":artifacts});
     let mut receipt = serde_json::json!({"acx":"0.1","receiptId":format!("{}:result",job.id),
         "provider":accepted["provider"],"capability":accepted["capability"],"requestHash":accepted["requestHash"],
         "status":status,"issuedAt":row.get::<String,_>("issued_at"),

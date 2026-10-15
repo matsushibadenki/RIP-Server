@@ -36,11 +36,13 @@ async fn independent_ipp_pdf_to_tiff_and_restart() {
             std::fs::copy(corpus.join("colors.pdf"), &pdf).unwrap();
         } else {
             // Generate a valid one-page PDF including accurate xref offsets.
+            let stream = "1 0 0 rg 0 0 20 20 re f\n";
+            let content = format!("<< /Length {} >>\nstream\n{stream}endstream", stream.len());
             let objects = [
                 "<< /Type /Catalog /Pages 2 0 R >>",
                 "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
                 "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 20 20] /Resources << >> /Contents 4 0 R >>",
-                "<< /Length 22 >>\nstream\n1 0 0 rg 0 0 20 20 re f\nendstream",
+                content.as_str(),
             ];
             let mut bytes = b"%PDF-1.4\n".to_vec();
             let mut offsets = vec![0];
@@ -78,7 +80,17 @@ async fn independent_ipp_pdf_to_tiff_and_restart() {
         );
         let jobs = repo.list_ipp_jobs().await.unwrap();
         let (ipp_id, job) = jobs.iter().max_by_key(|(id, _)| id).unwrap();
-        assert_eq!(job.state, JobState::Completed);
+        assert_eq!(
+            job.state,
+            JobState::Completed,
+            "{job:?} worker stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let validation = repo.source_validation(job.id).await.unwrap();
+        assert_eq!(validation["allPagesInterpreted"], true);
+        assert_eq!(validation["strictPdfInspection"], true);
+        assert_eq!(validation["sourceSha256"], job.source_sha256);
         let artifacts: Vec<rip_core::Artifact> =
             serde_json::from_value(repo.artifacts(job.id).await.unwrap()).unwrap();
         assert_eq!(artifacts.len(), pages);
@@ -113,7 +125,10 @@ async fn independent_ipp_pdf_to_tiff_and_restart() {
 #[ignore = "requires Docker and jrip-mupdf:local"]
 async fn abandoned_container_cleanup_is_source_scoped() {
     let dir = tempfile::tempdir().unwrap();
-    let source = dir.path().join("document");
+    let job_id = uuid::Uuid::new_v4();
+    let directory = dir.path().join("jobs").join(job_id.to_string());
+    std::fs::create_dir_all(&directory).unwrap();
+    let source = directory.join("document");
     std::fs::write(&source, b"%PDF-1.4").unwrap();
     let source = std::fs::canonicalize(source).unwrap();
     let create = |path: std::path::PathBuf| async move {
@@ -133,15 +148,41 @@ async fn abandoned_container_cleanup_is_source_scoped() {
         String::from_utf8(output.stdout).unwrap().trim().to_string()
     };
     let target = create(source.clone()).await;
+    let snapshot = directory.join("source-validation");
+    std::fs::create_dir(&snapshot).unwrap();
+    let nested = snapshot.join("document");
+    std::fs::write(&nested, b"%PDF-1.4").unwrap();
+    let nested_container = create(std::fs::canonicalize(nested).unwrap()).await;
+
     let unrelated = create(dir.path().join("different-source")).await;
-    rip_interpreter::cleanup_abandoned_source(&source)
+    let repo = rip_storage::Repository::open(&dir.path().join("jobs.sqlite3"))
         .await
         .unwrap();
+    let job:rip_core::Job=serde_json::from_value(serde_json::json!({"id":job_id,"manifest":{"name":"orphan.pdf","format":"application/pdf","dpi":72},"state":"FAILED","source_sha256":"f".repeat(64),"created_at":0,"updated_at":0,"revision":0,"error_code":"container_cleanup_failed","selected_engine":"mupdf","worker_run_id":null})).unwrap();
+    repo.insert(&job).await.unwrap();
+    let recovered = tokio::process::Command::new(env!("CARGO_BIN_EXE_jrip-dispatcher"))
+        .arg("--once")
+        .env("JRIP_DATA_ROOT", dir.path())
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        recovered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&recovered.stderr)
+    );
     let missing = tokio::process::Command::new("docker")
         .args(["inspect", &target])
         .output()
         .await
         .unwrap();
+    let nested_missing = tokio::process::Command::new("docker")
+        .args(["inspect", &nested_container])
+        .output()
+        .await
+        .unwrap();
+    assert!(!nested_missing.status.success());
+    assert!(!snapshot.exists());
     let kept = tokio::process::Command::new("docker")
         .args(["inspect", &unrelated])
         .output()

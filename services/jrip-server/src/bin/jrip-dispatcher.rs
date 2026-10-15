@@ -38,7 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if job.state == JobState::Failed
                 && matches!(
                     job.error_code.as_deref(),
-                    Some("LEASE_EXPIRED" | "WORKER_EXIT")
+                    Some("LEASE_EXPIRED" | "WORKER_EXIT" | "container_cleanup_failed")
                 )
             {
                 rip_interpreter::cleanup_abandoned_source(
@@ -81,7 +81,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let current =
                 jrip_server::dispatch::reconcile_worker_exit(&repo, job.id, run_id).await?;
             tracing::info!(job_id=%job.id, ?status, state=?current.state, "worker exited");
-            if current.error_code.as_deref() == Some("WORKER_EXIT") {
+            if matches!(
+                current.error_code.as_deref(),
+                Some("WORKER_EXIT" | "container_cleanup_failed")
+            ) {
                 rip_interpreter::cleanup_abandoned_source(
                     &root.join("jobs").join(job.id.to_string()).join("document"),
                 )

@@ -1,5 +1,5 @@
 use rip_core::JobState;
-use rip_interpreter::{DocumentInterpreter, HybridInterpreter};
+use rip_interpreter::HybridInterpreter;
 use rip_storage::Repository;
 use uuid::Uuid;
 
@@ -52,9 +52,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Ok(image) = std::env::var("JRIP_MUPDF_IMAGE") {
         engine.mupdf.sandbox.image = image;
     }
-    let rendered = engine
-        .render(&directory.join("document"), &staging, &job.manifest)
-        .await;
+    let rendered =
+        jrip_server::source_validation::render(&root, &directory, &job, &engine, &staging).await;
     let current = repo.get(id).await?;
     // A concurrent cancel wins. The bounded interpreter finishes before its output is discarded.
     if current.state == JobState::Cancelled {
@@ -64,9 +63,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     match rendered {
-        Ok(rendered) => {
+        Ok(validated) => {
+            let rendered = validated.rendered;
             let result = async {
                 let artifacts = jrip_server::artifacts::hash_pages(&rendered.pages).await?;
+                repo.record_source_validation(
+                    id,
+                    run_id,
+                    &job.source_sha256,
+                    validated.source_bytes,
+                    rendered.pages.len() as u32,
+                    validated.strict_pdf,
+                )
+                .await
+                .map_err(std::io::Error::other)?;
                 // Publish only complete, validated output sets.
                 tokio::fs::rename(&staging, directory.join("raster")).await?;
                 Ok::<_, std::io::Error>(artifacts)

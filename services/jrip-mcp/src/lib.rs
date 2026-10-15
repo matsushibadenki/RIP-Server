@@ -528,6 +528,11 @@ impl Session {
                     ("", "jobs:read", "Job / ジョブ / 任务"),
                     ("/events", "jobs:read", "Events / 履歴 / 历史"),
                     ("/manifest", "jobs:read", "Manifest / 設定 / 设置"),
+                    (
+                        "/source-validation",
+                        "jobs:read",
+                        "Source validation / 原稿検証 / 原稿验证",
+                    ),
                     ("/artifacts", "artifacts:read", "Artifacts / 成果物 / 产物"),
                 ] {
                     if self.allowed(scope) {
@@ -665,7 +670,11 @@ impl Session {
 fn job_resource(uri: &str) -> Option<(Uuid, &str)> {
     let tail = uri.strip_prefix("jrip://jobs/")?;
     let (id, suffix) = tail.split_once('/').unwrap_or((tail, ""));
-    if !matches!(suffix, "" | "events" | "manifest" | "artifacts") || tail.ends_with('/') {
+    if !matches!(
+        suffix,
+        "" | "events" | "manifest" | "artifacts" | "source-validation"
+    ) || tail.ends_with('/')
+    {
         return None;
     }
     Some((Uuid::parse_str(id).ok()?, suffix))

@@ -28,6 +28,7 @@ mod pipeline_preflight;
 mod preflight;
 pub mod print;
 mod retry;
+pub mod source_validation;
 pub use authorization::Credential;
 use authorization::authorize;
 
@@ -184,6 +185,10 @@ pub fn router(app: App) -> Router {
         )
         .route("/api/v1/jobs/{id}/receipt", get(preflight::receipt))
         .route("/api/v1/jobs/{id}/artifacts", get(preflight::artifacts))
+        .route(
+            "/api/v1/jobs/{id}/source-validation",
+            get(preflight::source_validation),
+        )
         .route(
             "/api/v1/jobs/{id}/artifacts/{name}",
             get(artifacts::download),

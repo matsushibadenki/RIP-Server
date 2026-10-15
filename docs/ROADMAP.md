@@ -79,7 +79,7 @@
 - 🟢 [Done] ワーカーがTIFFページを逐次hash計算し、ページ順・名前・サイズ・SHA-256を完了状態と同じトランザクションで保存。結果Receiptにも結び付け、認証付き成果物一覧APIを追加。hash計算中もleaseを更新する。
 - 🟢 [Done] dry-run既定の保持期限CLI、終端ジョブと既知の孤立ファイル清掃、処理中／UNKNOWN除外、途中終了後の再開、履歴・Receipt保持。詳細は[MAINTENANCE.md](MAINTENANCE.md)。 / Resumable opt-in retention / 可恢复的可选保留期限清理。
 - 🟢 [Done] 未登録アップロード残骸のwriter-lock連携清掃。REST・IPP・MCP投入/commit/retryを保護し、登録証跡・期限を再確認し、永続journalで中断復旧、dry-runと監査付き適用を追加。 / Writer-locked orphan upload reclamation with durable recovery / writer lock保护的孤立上传回收与持久恢复。
-- 🟠 [Next] 分散予算・監査アーカイブの保持期限。 / Distributed budgets and audit archive retention / 分布式预算及审计归档保留期限。
+- 🟠 [Next] 分散予算。監査archiveの保持期限実装・外部受入のPendingは下記を参照。 / Distributed budgets; audit-retention milestones below / 分布式预算；审计归档保留期限进度见下文。
 
 - 🟢 [Done] commit経由ジョブの終端状態と同一トランザクションでACX結果Receiptを保存。完了・失敗・取消・lease失効を記録し、結果JSONのSHA-256と受付Receiptを関連付ける。認証付き `GET /api/v1/jobs/{id}/result-receipt` で取得でき、ジョブ削除後も保持する。
 - 🟢 [Done] 新ワーカーの結果JSONに成果物のページ数・サイズ・SHA-256一覧を含めた。resultHashはこの結果JSONを対象とする。
@@ -107,7 +107,7 @@
 
 - 🟢 [Done] preflight digest、原稿SHA-256、形式、有効期限を検証するmultipart commit APIを実装。保存済みticketからジョブを登録し、SQLiteトランザクションで同一preflightの同時再送を重複排除する。共通Bearerトークンによる認可を使用。
 - 🟢 [Done] 設定／物理preflightとretryの主体拘束、操作ごとのscope検査、受付Receiptへの方式・主体・検査証跡。Receipt、期限切れpreflightと孤立ファイルの清掃は既存実装で検証済み。 / Owner-bound requests and scoped evidence / 身份绑定请求与scope证据。
-- 🟠 [Next] すべての投入経路での原稿構造全体の検証。 / Full structural document validation across every submission path / 全部提交路径的完整文档结构验证。
+- 🟢 [Done] 全投入経路が合流する標準workerで必須の原稿SHA再確認・私有snapshot・PDF厳密全ページ検査・PDF/PS/EPS全体のbounded解釈を実装。公開前の証跡保存、結果Receipt・API/MCP resource、IPP／模擬実機完了と異常原稿拒否を検証。規格認証や添付全object検査とは区別。[SOURCE-VALIDATION.md](SOURCE-VALIDATION.md)。 / Mandatory bounded source validation in the standard worker / 标准worker强制有界原稿验证。
 
 - 🟢 [Done] 設定preflightの永続化、5分の期限、確定ticketのrequestHash、preflightDigest、再起動後の取得、期限切れ拒否。新規v2は共有JCS bounded profile、明示選択したv1は旧encoding。保存済み方式を維持。 / Versioned durable preflight / 版本化持久预检。
 - 🟢 [Done] 主体別の認可証跡とJRIP/ACX実験的print profileの共有JCS digestに対応。設定preflightの作成だけでは実行を許可しない。 [AGENT-CONTROL.md](AGENT-CONTROL.md)。 / Owner evidence and shared experimental JCS profile / 身份证据及共享实验性JCS profile。

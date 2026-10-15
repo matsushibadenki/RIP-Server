@@ -1524,3 +1524,180 @@ async fn receipt_key_revocation_tool_is_admin_only_and_persists() {
             .any(|r| r["operation"] == "print_revoke_receipt_key" && r["status"] == 200)
     );
 }
+
+#[tokio::test]
+async fn source_validation_resource_is_trusted_read_only_evidence() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = jrip_server::open(dir.path().into(), TOKEN.into())
+        .await
+        .unwrap();
+    let id = uuid::Uuid::new_v4();
+    let run = uuid::Uuid::new_v4();
+    let job:rip_core::Job=serde_json::from_value(json!({"id":id,"manifest":{"name":"proof.ps","format":"application/postscript","dpi":72},"state":"QUEUED","source_sha256":"a".repeat(64),"created_at":0,"updated_at":0,"revision":0,"error_code":null,"selected_engine":"ghostscript","worker_run_id":null})).unwrap();
+    app.repo.insert(&job).await.unwrap();
+    app.repo
+        .claim_queued(job, run, rip_storage::now() + 60)
+        .await
+        .unwrap();
+    let report = app
+        .repo
+        .record_source_validation(id, run, &"a".repeat(64), 100, 1, false)
+        .await
+        .unwrap();
+    let router = jrip_server::router(app);
+    let mut reader = Session::new(router.clone(), TOKEN.into()).with_access(
+        "reader".into(),
+        vec!["jobs:read".into()],
+        None,
+    );
+    initialize(&mut reader).await;
+    let uri = format!("jrip://jobs/{id}/source-validation");
+    let reply = reader
+        .handle(req(5, "resources/read", json!({"uri":uri})))
+        .await
+        .unwrap();
+    let actual: Value =
+        serde_json::from_str(reply["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(actual, report);
+    let templates = reader
+        .handle(req(6, "resources/templates/list", json!({})))
+        .await
+        .unwrap();
+    assert!(
+        templates["result"]["resourceTemplates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["uriTemplate"] == "jrip://jobs/{jobId}/source-validation")
+    );
+    let mut denied = Session::new(router, TOKEN.into()).with_access(
+        "writer".into(),
+        vec!["jobs:submit".into()],
+        None,
+    );
+    initialize(&mut denied).await;
+    assert_eq!(
+        denied
+            .handle(req(7, "resources/read", json!({"uri":uri})))
+            .await
+            .unwrap()["error"]["code"],
+        -32001
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker, both RIP images and built jrip-worker in the target profile directory"]
+async fn mcp_submission_runs_the_mandatory_worker_validation_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = jrip_server::open(dir.path().into(), TOKEN.into())
+        .await
+        .unwrap();
+    let root = app.root.clone();
+    let repo = app.repo.clone();
+    let inbox = dir.path().join("inbox");
+    std::fs::create_dir(&inbox).unwrap();
+    std::fs::write(
+        inbox.join("proof.pdf"),
+        include_bytes!("../../../tests/corpus/colors.pdf"),
+    )
+    .unwrap();
+    std::fs::write(
+        inbox.join("bad.ps"),
+        b"%!PS-Adobe-3.0\nshowpage\nTHIS_OPERATOR_DOES_NOT_EXIST\n",
+    )
+    .unwrap();
+    let mut session = Session::new(jrip_server::router(app), TOKEN.into()).with_access(
+        "agent".into(),
+        vec!["admin".into()],
+        Some(inbox.clone()),
+    );
+    initialize(&mut session).await;
+    let executable = std::env::current_exe().unwrap();
+    let worker = executable
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(format!("jrip-worker{}", std::env::consts::EXE_SUFFIX));
+    assert!(
+        worker.is_file(),
+        "build jrip-server --bin jrip-worker first"
+    );
+    for (name, format, valid) in [
+        ("proof.pdf", "application/pdf", true),
+        ("bad.ps", "application/postscript", false),
+    ] {
+        use sha2::{Digest, Sha256};
+        let data = std::fs::read(inbox.join(name)).unwrap();
+        let intent = json!({"document":{"uri":format!("https://example.org/{name}"),"mediaType":format,"sha256":format!("{:x}",Sha256::digest(data))},"dpi":{"mode":"required","value":72},"copies":{"mode":"required","value":1},"output":{"destination":"artifact"}});
+        let pf = tool_value(
+            session
+                .handle(req(
+                    9,
+                    "tools/call",
+                    json!({"name":"print_create_preflight","arguments":{"intent":intent}}),
+                ))
+                .await
+                .unwrap(),
+        );
+        let reply=session.handle(req(10,"tools/call",json!({"name":"rip_submit","arguments":{"preflightId":pf["preflightId"],"preflightDigest":pf["preflightDigest"],"sourceName":name}}))).await.unwrap();
+        assert_ne!(reply["result"]["isError"], true, "{reply}");
+        let submitted = tool_value(reply);
+        let id: uuid::Uuid = submitted["job"]["id"].as_str().unwrap().parse().unwrap();
+        let result = tokio::process::Command::new(&worker)
+            .arg(id.to_string())
+            .env("JRIP_DATA_ROOT", &root)
+            .output()
+            .await
+            .unwrap();
+        assert_eq!(
+            result.status.success(),
+            valid,
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            repo.get(id).await.unwrap().state,
+            if valid {
+                rip_core::JobState::Completed
+            } else {
+                rip_core::JobState::Failed
+            }
+        );
+        let resource = session
+            .handle(req(
+                11,
+                "resources/read",
+                json!({"uri":format!("jrip://jobs/{id}/source-validation")}),
+            ))
+            .await
+            .unwrap();
+        if valid {
+            let report: Value =
+                serde_json::from_str(resource["result"]["contents"][0]["text"].as_str().unwrap())
+                    .unwrap();
+            assert_eq!(report["allPagesInterpreted"], true);
+            assert_eq!(report["strictPdfInspection"], true);
+            let receipt = tool_value(
+                session
+                    .handle(req(
+                        12,
+                        "tools/call",
+                        json!({"name":"print_get_result_receipt","arguments":{"jobId":id}}),
+                    ))
+                    .await
+                    .unwrap(),
+            );
+            assert_eq!(receipt["proof"]["result"]["sourceValidation"], report);
+        } else {
+            assert_eq!(resource["error"]["code"], -32002);
+            assert!(
+                !root
+                    .join("jobs")
+                    .join(id.to_string())
+                    .join("raster")
+                    .exists()
+            );
+        }
+    }
+}

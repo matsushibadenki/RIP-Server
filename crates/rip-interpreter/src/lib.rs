@@ -322,6 +322,31 @@ impl DocumentInterpreter for HybridInterpreter {
 /// Remove only this interpreter's containers for a source whose worker lease has failed.
 pub async fn cleanup_abandoned_source(source: &Path) -> Result<(), InterpreterError> {
     let source = tokio::fs::canonicalize(source).await?;
+    cleanup_one_source(&source).await?;
+    let snapshot = source
+        .parent()
+        .ok_or(InterpreterError::Rejected("invalid_path"))?
+        .join("source-validation");
+    match tokio::fs::symlink_metadata(&snapshot).await {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            let nested = snapshot.join("document");
+            if tokio::fs::try_exists(&nested).await? {
+                let metadata = tokio::fs::symlink_metadata(&nested).await?;
+                if !metadata.is_file() || metadata.file_type().is_symlink() {
+                    return Err(InterpreterError::Rejected("invalid_validation_snapshot"));
+                }
+                cleanup_one_source(&nested).await?;
+            }
+            tokio::fs::remove_dir_all(snapshot).await?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(_) => return Err(InterpreterError::Rejected("invalid_validation_snapshot")),
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+async fn cleanup_one_source(source: &Path) -> Result<(), InterpreterError> {
+    let source = tokio::fs::canonicalize(source).await?;
     let source = source
         .to_str()
         .ok_or(InterpreterError::Rejected("invalid_path"))?;
@@ -377,9 +402,16 @@ pub async fn inspect_pdf_attempt(
     source: &Path,
     id: uuid::Uuid,
 ) -> Result<serde_json::Value, InterpreterError> {
+    inspect_pdf_attempt_with_image(source, id, "jrip-mupdf:local").await
+}
+pub async fn inspect_pdf_attempt_with_image(
+    source: &Path,
+    id: uuid::Uuid,
+    image: &str,
+) -> Result<serde_json::Value, InterpreterError> {
     let source = tokio::fs::canonicalize(source).await?;
     let config = SandboxConfig {
-        image: "jrip-mupdf:local".into(),
+        image: image.into(),
         timeout: Duration::from_secs(120),
         max_pages: 1,
         max_spool_bytes: 1024 * 1024,

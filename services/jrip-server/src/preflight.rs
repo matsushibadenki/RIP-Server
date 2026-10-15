@@ -235,6 +235,14 @@ pub async fn receipt(
     Ok(Json(app.repo.get_print_receipt(id).await?))
 }
 
+pub async fn source_validation(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    authorize(&app, &headers, "jobs:read")?;
+    Ok(Json(app.repo.source_validation(id).await?))
+}
 pub async fn result_receipt(
     State(app): State<App>,
     headers: HeaderMap,
