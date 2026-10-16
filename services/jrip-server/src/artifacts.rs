@@ -4,6 +4,18 @@ use std::{io, path::PathBuf};
 use tokio::io::AsyncReadExt;
 
 pub async fn hash_pages(pages: &[PathBuf]) -> io::Result<Vec<Artifact>> {
+    hash_pages_with_progress(pages, |_, _| async { Ok(()) }).await
+}
+
+/// Reports only pages whose complete bytes have been read and hashed.
+pub async fn hash_pages_with_progress<F, Fut>(
+    pages: &[PathBuf],
+    mut progress: F,
+) -> io::Result<Vec<Artifact>>
+where
+    F: FnMut(u32, u32) -> Fut,
+    Fut: std::future::Future<Output = io::Result<()>>,
+{
     if pages.is_empty() || pages.len() > 100 {
         return Err(io::Error::other("invalid page count"));
     }
@@ -46,6 +58,7 @@ pub async fn hash_pages(pages: &[PathBuf]) -> io::Result<Vec<Artifact>> {
             bytes,
             sha256: format!("{:x}", hash.finalize()),
         });
+        progress(page, pages.len() as u32).await?;
     }
     Ok(result)
 }
@@ -61,6 +74,36 @@ use axum::{
 use serde_json::{Value, json};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use uuid::Uuid;
+
+/// Own the snapshot and release remote quota only after unlink succeeds.
+pub(crate) struct SnapshotFile {
+    file: Option<tempfile::NamedTempFile>,
+    reservation: Option<rip_storage::budget_client::Reservation>,
+}
+impl SnapshotFile {
+    pub fn path(&self) -> &std::path::Path {
+        self.file.as_ref().unwrap().path()
+    }
+}
+impl Drop for SnapshotFile {
+    fn drop(&mut self) {
+        let cleaned = self.file.take().is_none_or(|file| file.close().is_ok());
+        if let Some(reservation) = self.reservation.take() {
+            if cleaned {
+                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                    runtime.spawn(async move {
+                        let id = reservation.id;
+                        if let Err(error) = reservation.release().await {
+                            tracing::warn!(reservation_id=%id, %error, "snapshot release unconfirmed; quota retained");
+                        }
+                    });
+                }
+            } else {
+                tracing::warn!(reservation_id=%reservation.id, "snapshot cleanup failed; quota retained");
+            }
+        }
+    }
+}
 
 pub(crate) struct SnapshotBudget {
     _local: tokio::sync::OwnedSemaphorePermit,
@@ -113,15 +156,7 @@ pub(crate) async fn verified_snapshot(
     app: &App,
     id: Uuid,
     name: &str,
-) -> Result<
-    (
-        tokio::fs::File,
-        tempfile::NamedTempFile,
-        Artifact,
-        SnapshotBudget,
-    ),
-    ApiError,
-> {
+) -> Result<(tokio::fs::File, SnapshotFile, Artifact, SnapshotBudget), ApiError> {
     let artifacts: Vec<Artifact> =
         serde_json::from_value(app.repo.artifacts(id).await?).map_err(internal)?;
     let artifact = artifacts
@@ -147,12 +182,7 @@ pub(crate) async fn verified_snapshot(
         .join(name);
     snapshot_file(app, path, artifact).await
 }
-pub(crate) type Snapshot = (
-    tokio::fs::File,
-    tempfile::NamedTempFile,
-    Artifact,
-    SnapshotBudget,
-);
+pub(crate) type Snapshot = (tokio::fs::File, SnapshotFile, Artifact, SnapshotBudget);
 pub(crate) async fn snapshot_file(
     app: &App,
     path: PathBuf,
@@ -217,13 +247,39 @@ pub(crate) async fn snapshot_file(
     {
         return Err(internal("invalid snapshot root"));
     }
-    let guard = tempfile::Builder::new()
-        .prefix("artifact-snapshot-")
-        .suffix(".part")
-        .tempfile_in(snapshots)
-        .map_err(internal)?;
-    guard.as_file().try_lock().map_err(internal)?;
-    let mut snapshot = tokio::fs::File::from_std(guard.reopen().map_err(internal)?);
+    let reservation = if let Some(coordinator) = &app.snapshot_coordinator {
+        Some(coordinator.reserve(artifact.bytes).await.map_err(|error| {
+            tracing::warn!(%error,"distributed snapshot admission failed");
+            ApiError(
+                StatusCode::SERVICE_UNAVAILABLE,
+                if error.kind() == io::ErrorKind::WouldBlock {
+                    "artifact_budget_exhausted"
+                } else {
+                    "snapshot_coordinator_unavailable"
+                },
+            )
+        })?)
+    } else {
+        None
+    };
+    let prefix = reservation.as_ref().map_or_else(
+        || "artifact-snapshot-".to_string(),
+        |reservation| format!("artifact-snapshot-{}-", reservation.id),
+    );
+    let mut guard = SnapshotFile {
+        file: None,
+        reservation,
+    };
+    guard.file = Some(
+        tempfile::Builder::new()
+            .prefix(&prefix)
+            .suffix(".part")
+            .tempfile_in(snapshots)
+            .map_err(internal)?,
+    );
+    let tempfile = guard.file.as_ref().unwrap();
+    tempfile.as_file().try_lock().map_err(internal)?;
+    let mut snapshot = tokio::fs::File::from_std(tempfile.reopen().map_err(internal)?);
     let mut hash = Sha256::new();
     let mut size = 0u64;
     let mut buffer = [0u8; 65536];
@@ -425,5 +481,34 @@ mod budget_tests {
                 .len(),
             64
         );
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+    #[tokio::test]
+    async fn reports_only_complete_pages_and_stops_when_observer_fails() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("page-000001.tiff");
+        let second = root.path().join("page-000002.tiff");
+        tokio::fs::write(&first, b"page bytes").await.unwrap();
+        tokio::fs::write(&second, b"").await.unwrap();
+        let mut observed = Vec::new();
+        let result = hash_pages_with_progress(&[first.clone(), second.clone()], |page, total| {
+            observed.push((page, total));
+            async { Ok(()) }
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(observed, vec![(1, 2)]);
+        observed.clear();
+        let result = hash_pages_with_progress(&[first, second], |page, total| {
+            observed.push((page, total));
+            async { Err(io::Error::other("lease lost")) }
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(observed, vec![(1, 2)]);
     }
 }

@@ -5,9 +5,12 @@
 - 🔴 [Later] planned, but not the closest next step / 後続の作業 / 后续计划
 - ⭕️ [Pending] cannot be tested in the dev environment; on hold / 開発環境で検証できないため保留 / 开发环境无法验证，暂缓
 
-- 🟢 [Done] Agent向けジョブ状態履歴API：`GET /api/v1/jobs/{id}/events?after=0&limit=50`。Bearer認証、永続sequenceによる差分取得、最大100件、再起動・メタデータ削除後の履歴参照に対応。現段階では状態変更のみを記録する。 / Authenticated, persistent, resumable state history / 认证、持久化、可恢复的状态历史。
-- 🟢 [Done] 新規履歴に工程・reason code・revision・再試行ヒント・TIFF完了種別を同一トランザクションで保存。途中進捗率はnull。旧履歴は元の情報を保持。 / Durable stage and reason metadata / 持久化阶段与原因元数据。
-- 🟠 [Next] ページ単位の進捗とColor Management／実機工程の共通イベント統合。 / Per-page progress and cross-stage event integration / 页级进度及跨阶段事件整合。
+- 🟢 [Done] Agent向けジョブ状態履歴API：`GET /api/v1/jobs/{id}/events?after=0&limit=50`。Bearer認証、永続sequenceによる差分取得、最大100件、再起動・メタデータ削除後の履歴参照に対応。状態変更と実測したページ成果物検証進捗を記録する。 / Authenticated, persistent, resumable state history / 认证、持久化、可恢复的状态历史。
+- 🟢 [Done] 新規履歴に工程・reason code・revision・再試行ヒント・TIFF完了種別を同一トランザクションで保存。未計測の工程の途中進捗率はnull。旧履歴は元の情報を保持。 / Durable stage and reason metadata / 持久化阶段与原因元数据。
+- 🟢 [Done] TIFFのページ単位の検証進捗を永続化し、REST履歴・SSE・MCPと既存のRIP／色管理／実機共通timelineへ接続。進捗はartifact-verification工程だけを示す。 / Durable measured TIFF verification progress across event transports and the unified timeline / 持久化TIFF逐页验证进度，并接入事件接口及统一时间线。
+- 🟢 [Done] 色管理のページ変換・出力検査進捗を `color-conversion` として共通timelineに統合。総数・順序・リースを検査し、変換100%と成果物公開完了を区別。 / Measured color-conversion progress with bounded counts, ordered updates and lease checks; publication remains separate / 色彩转换进度接入统一时间线，检查总数、顺序与租约，并区分转换完成和成果发布。
+- 🟢 [Done] MuPDF／Ghostscriptの描画中ページ計測。閉じられたページ出力を容量制限付きstreamで受信・検査し、`rendering` 進捗を永続化。原稿ログは使用せず、PDF総数は事前検査、PS/EPSの未確定総数・率はnull。取消・後続失敗・timeoutでは公開せず、観測済み進捗だけを残す。 / Live bounded page streaming from both engines, durable observations without trusting document logs / 两引擎实时页输出流与持久化进度，不信任原稿日志。 [詳細 / Details / 详情](RENDER-PROGRESS.md)
+- ⭕️ [Pending] 実機のページ進捗はbackendが確認できる場合だけ公開する。実機受入試験は未実施。 / Device page progress requires backend evidence and real-printer acceptance / 实机页级进度须有设备依据，尚待实机验收。
 
 最初の利用目標は、同じLANのMacからJ-RIPを選択してPDFジョブを投入し、RIP結果をファイルとして確認できること。その後、実機プリンターへ出力する。並行して、**Agentが印刷機を操作できるPrint Infrastructure**として、Agent → Print API → RIP → Color Management → Queue → Printerを標準化する。AIクライアントはMCP経由で各層の能力を発見し、印刷意図の指定、検証、投入、監視、成果物確認、取消、再実行まで一貫して操作できる。IPP受付、Print API、MCP制御、RIP、色管理、キュー、プリンターバックエンドは交換可能な境界として分離する。仕様書のMVP 1 / MVP 2はまだ完成していない。
 
@@ -79,7 +82,9 @@
 - 🟢 [Done] ワーカーがTIFFページを逐次hash計算し、ページ順・名前・サイズ・SHA-256を完了状態と同じトランザクションで保存。結果Receiptにも結び付け、認証付き成果物一覧APIを追加。hash計算中もleaseを更新する。
 - 🟢 [Done] dry-run既定の保持期限CLI、終端ジョブと既知の孤立ファイル清掃、処理中／UNKNOWN除外、途中終了後の再開、履歴・Receipt保持。詳細は[MAINTENANCE.md](MAINTENANCE.md)。 / Resumable opt-in retention / 可恢复的可选保留期限清理。
 - 🟢 [Done] 未登録アップロード残骸のwriter-lock連携清掃。REST・IPP・MCP投入/commit/retryを保護し、登録証跡・期限を再確認し、永続journalで中断復旧、dry-runと監査付き適用を追加。 / Writer-locked orphan upload reclamation with durable recovery / writer lock保护的孤立上传回收与持久恢复。
-- 🟠 [Next] 分散予算。監査archiveの保持期限実装・外部受入のPendingは下記を参照。 / Distributed budgets; audit-retention milestones below / 分布式预算；审计归档保留期限进度见下文。
+- 🟢 [Done] 成果物snapshotの分散予算。認証付き中央API、原子的な容量判定、主体拘束・冪等予約／解放、別rootからの取得・検証への接続、清掃後解放、未確認予約の恒久保持と管理者復旧を実装。既存の単一host制限も併用。[DISTRIBUTED-BUDGET.md](DISTRIBUTED-BUDGET.md)。 / Central HTTP admission for distributed artifact snapshots with conservative crash recovery / 成果快照的中央HTTP分布式预算与保守崩溃恢复。
+- ⭕️ [Pending] 実VPS間HTTPS・証明書・回線分断の受入試験。開発環境では独立rootとlocalhost HTTPで検証。 / Actual cross-VPS HTTPS and network-partition acceptance / 实际跨VPS HTTPS及网络分区验收。
+- 🔴 [Later] 原稿検査・RIP staging・色変換一時領域を含む全工程の分散資源予算。 / Distributed resource budgets for source inspection and RIP/color staging / 原稿检查与RIP、色彩暂存的全阶段分布式资源预算。
 
 - 🟢 [Done] commit経由ジョブの終端状態と同一トランザクションでACX結果Receiptを保存。完了・失敗・取消・lease失効を記録し、結果JSONのSHA-256と受付Receiptを関連付ける。認証付き `GET /api/v1/jobs/{id}/result-receipt` で取得でき、ジョブ削除後も保持する。
 - 🟢 [Done] 新ワーカーの結果JSONに成果物のページ数・サイズ・SHA-256一覧を含めた。resultHashはこの結果JSONを対象とする。

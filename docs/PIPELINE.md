@@ -110,7 +110,7 @@ Trusted local CLI (same data root and credential configuration as the server):
 cargo run -p jrip-server --bin jrip-inspect-document -- /absolute/path/source.pdf
 ```
 
-Configure `JRIP_DATA_ROOT` and `JRIP_API_TOKEN` before running. The credential needs jobs:submit (or admin). Rebuild the image after updating: `docker build -t jrip-mupdf:local adapters/mupdf`.
+Configure `JRIP_DATA_ROOT` and `JRIP_API_TOKEN` before running. The credential needs jobs:submit (or admin). Rebuild the image after updating: `docker build -f adapters/mupdf/Dockerfile -t jrip-mupdf:local .`.
 
 **日本語：** CLIは最大32 MiBの原稿を私有snapshotへコピーし、ハッシュを確定してから、ネットワークなし・512 MiBメモリ・1 CPU・PID制限・読み取り専用のMuPDFコンテナーで検査する。100ページ、出力64 KiB、全体120秒を上限とし、通常終了・失敗・timeoutでコンテナーを削除する。コピーは既存のホスト共有1 GiB snapshot予算を使用する。cleanup失敗時は検査結果を保存せず、snapshotを保持してCLIへ場所を表示する。検査はページ内容をdisplay listへ解釈し、画像を生成しない。実効ページ寸法はCropBox、継承した回転、UserUnitを含めMuPDFに解決させる。暗号化PDF、修復警告・内容解釈警告、上限超過は採用しない。特定のMuPDFビルドのICC機能未搭載警告だけを許容し、ICC処理は既存の色エンジンで別途検証する。
 

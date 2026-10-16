@@ -1,6 +1,6 @@
 //! One worker gate for every transport; no Docker privileges are added to frontends.
 use rip_core::{DocumentFormat, Job};
-use rip_interpreter::{DocumentInterpreter, HybridInterpreter, InterpreterError, RenderedDocument};
+use rip_interpreter::{HybridInterpreter, InterpreterError, RenderedDocument};
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -73,6 +73,7 @@ pub async fn render(
     job: &Job,
     engine: &HybridInterpreter,
     output: &Path,
+    repo: &rip_storage::Repository,
 ) -> Result<ValidatedRender, InterpreterError> {
     let mut snapshot = Snapshot::open(root, directory, job).await?;
     let source = snapshot.directory.join("document");
@@ -94,7 +95,16 @@ pub async fn render(
         } else {
             None
         };
-        let rendered = engine.render(&source, output, &job.manifest).await?;
+        let run = job
+            .worker_run_id
+            .ok_or(InterpreterError::Rejected("missing_worker_run"))?;
+        let rendered = engine
+            .render_with_progress(&source, output, &job.manifest, |completed| async move {
+                repo.record_render_progress(job.id, run, completed, inspected.map(|n| n as u32))
+                    .await
+                    .map_err(|_| InterpreterError::Rejected("progress_record_failed"))
+            })
+            .await?;
         if inspected.is_some_and(|count| count != rendered.pages.len()) {
             return Err(InterpreterError::Rejected("source_page_count_mismatch"));
         }

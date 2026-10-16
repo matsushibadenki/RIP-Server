@@ -7,7 +7,6 @@ rip-core.workspace = true
 tokio.workspace = true
 uuid.workspace = true
 thiserror.workspace = true
-tar = "0.4"
 serde_json.workspace = true
 [dev-dependencies]
 tempfile = "3"

@@ -11,7 +11,7 @@ English: The default is a dry-run. `--apply` removes source/raster files and job
 
 简体中文：默认仅显示候选项。`--apply` 删除超过保留期限的已结束任务原稿、栅格文件及任务／产物记录。存在Worker租约或排队、发送、受理、UNKNOWN投递时排除。已删除元数据的孤立目录仅在持久化历史能确认终端状态及期限时清理；不删除正在上传的原稿或任意目录。先记录DB清理标记，中断后下次继续。结束投递的PWG／注册文件也删除，但保留历史、Receipt及审计。清理未commit的过期预检和审批。单次处理有数量限制，应重复运行至无待办；运行期间不要删除锁文件。
 
-Artifact downloads reserve up to 1 GiB across processes sharing the canonical data root using 64 OS-locked 16 MiB slots, in addition to the local semaphore. Reservations release on download completion, disconnection or process exit. This is a single-host/shared-root budget, not a distributed storage quota. Budget lock files are persistent coordination files; do not delete them while a process is using the root.
+Artifact downloads reserve up to 1 GiB across processes sharing the canonical data root using 64 OS-locked 16 MiB slots, in addition to the local semaphore. Reservations release on download completion, disconnection or process exit. This remains the single-host/shared-root limit. An optional [central HTTP budget](DISTRIBUTED-BUDGET.md) additionally coordinates artifact snapshots across independent roots; it is admission control, not a filesystem storage quota. Budget lock files are persistent coordination files; do not delete them while a process is using the root.
 
 日本語：成果物の取得は同一データrootのプロセス間で合計1GiBまで予約し、16MiB単位・64枠のOSロックで共有します。配信完了・切断・プロセス終了で解放します。複数ホストの分散容量管理ではありません。使用中の予算ロックファイルを削除しないでください。
 

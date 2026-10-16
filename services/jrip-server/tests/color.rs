@@ -212,6 +212,15 @@ async fn isolated_worker_publishes_two_pages_reports_and_preserves_original() {
             .len(),
         5
     );
+    let history = app.repo.color_events(id, 0, 100).await.unwrap();
+    let events = history["events"].as_array().unwrap();
+    assert_eq!(events[2]["progressPercent"], 50);
+    assert_eq!(events[3]["progressPercent"], 100);
+    assert_eq!(events[3]["state"], "RUNNING");
+    assert_eq!(events[3]["totalPages"], 2);
+    assert_eq!(events[3]["progressPhase"], "color-conversion");
+    assert!(events[3]["completionKind"].is_null());
+    assert_eq!(events[4]["completionKind"], "color-managed-tiff-export");
     assert!(!jrip_server::color::tick(&app).await.unwrap());
     // Tampering is caught before native interpretation and leaves no published color output.
     let failed = Uuid::new_v4();

@@ -11,8 +11,8 @@ Rust（rustup）、Docker（TIFF変換時）が必要です。API自体はDocker
 
 ```sh
 cargo build --workspace --locked
-docker build -t jrip-ghostscript:local adapters/ghostscript
-docker build -t jrip-mupdf:local adapters/mupdf
+docker build -f adapters/ghostscript/Dockerfile -t jrip-ghostscript:local .
+docker build -f adapters/mupdf/Dockerfile -t jrip-mupdf:local .
 export JRIP_API_TOKEN='replace-with-a-random-secret-at-least-24-characters'
 export JRIP_DATA_ROOT="$PWD/data"
 export RUST_LOG=info
@@ -165,7 +165,7 @@ HTTPフレームワークの抽出エラー（不正UUIDなど）は標準レス
 
 両エンジンはネットワークなし、read-only root、追加capabilityなし、no-new-privileges、CPU 1、メモリ／swap上限512 MiB、PID上限64、120秒のタイムアウトで動きます。
 入力だけをread-only bind mountし、出力は最大1 GiBのtmpfs、作業領域は64 MiBのtmpfsです。
-出力はサイズ上限付きアーカイブ経由で回収し、通常TIFFファイルだけを新規作成で展開します。最大100ページで、101ページ目を検出した場合は失敗します。
+出力はページ単位の容量制限付きバイナリstreamで回収し、TIFFヘッダーを検査してファイルを新規作成します。描画中のページ進捗は[描画進捗仕様](docs/RENDER-PROGRESS.md)を参照してください。最大100ページで、101ページ目を検出した場合は失敗します。
 tmpfsもコンテナーメモリに算入されるため、実効出力上限はRAM予算にも制約されます。巨大ページは失敗することがあり、独自タイルRIPは今後の実装です。
 
 Docker CLIの終了だけではコンテナーが停止しないため、処理終了・タイムアウト後にコンテナーを明示的に削除します。
@@ -287,3 +287,6 @@ Mac native CUPS validation now includes the dedicated [PDF passthrough PPD](adap
 - [Color processing](docs/COLOR-MANAGEMENT.md): LittleCMS conversion, immutable ICC registry, isolated worker, color API/MCP and profile-bound delivery / ICC変換・隔離Worker・API／MCP・profile照合送信 / ICC转换、隔离Worker、API／MCP及profile匹配投递。
 
 PrintIntent事前確認・原稿一括受付・RIP待機・ICC処理・承認・実機送信は [PIPELINE.md](docs/PIPELINE.md) を参照。 / See the guide for physical PrintIntent preflight, atomic source acceptance, RIP, ICC and device delivery. / 实体PrintIntent预检、源文档原子接收、RIP、ICC及设备投递请参阅流程指南。
+
+
+- [Distributed snapshot budget](docs/DISTRIBUTED-BUDGET.md): optional central HTTP admission and conservative recovery / 分散snapshot予算と復旧 / 分布式快照预算及恢复。

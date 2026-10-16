@@ -26,7 +26,8 @@ fn parse(bytes: &[u8]) -> Result<Vec<Credential>, Box<dyn std::error::Error>> {
             || credential.scopes.iter().any(|scope| {
                 !matches!(
                     scope.as_str(),
-                    "jobs:read"
+                    "budgets:reserve"
+                        | "jobs:read"
                         | "jobs:submit"
                         | "jobs:control"
                         | "artifacts:read"

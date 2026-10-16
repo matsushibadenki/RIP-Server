@@ -7,6 +7,11 @@
 !services/
 !services/**
 !adapters/
+!adapters/stream_pages.py
+!adapters/mupdf/
+!adapters/mupdf/**
+!adapters/ghostscript/
+!adapters/ghostscript/**
 !adapters/color/
 !adapters/color/**
 **/target

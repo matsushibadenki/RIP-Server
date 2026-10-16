@@ -53,7 +53,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         engine.mupdf.sandbox.image = image;
     }
     let rendered =
-        jrip_server::source_validation::render(&root, &directory, &job, &engine, &staging).await;
+        jrip_server::source_validation::render(&root, &directory, &job, &engine, &staging, &repo)
+            .await;
     let current = repo.get(id).await?;
     // A concurrent cancel wins. The bounded interpreter finishes before its output is discarded.
     if current.state == JobState::Cancelled {
@@ -66,7 +67,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(validated) => {
             let rendered = validated.rendered;
             let result = async {
-                let artifacts = jrip_server::artifacts::hash_pages(&rendered.pages).await?;
+                let artifacts = jrip_server::artifacts::hash_pages_with_progress(
+                    &rendered.pages,
+                    |completed, total| {
+                        let repo = repo.clone();
+                        async move {
+                            repo.record_page_progress(id, run_id, completed, total)
+                                .await
+                                .map_err(std::io::Error::other)
+                        }
+                    },
+                )
+                .await?;
                 repo.record_source_validation(
                     id,
                     run_id,

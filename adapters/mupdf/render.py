@@ -6,8 +6,11 @@ Both rendering and packaging run inside the same bounded sandbox.
 import pathlib
 import shutil
 import struct
-import subprocess
 import sys
+
+# Explicit pinned sibling path; isolated Python does not import from cwd.
+sys.path.insert(0, "/usr/local/lib/jrip")
+from stream_pages import stream_pages
 
 
 def pam_to_tiff(source, destination, dpi, mode):
@@ -84,18 +87,17 @@ def main():
     dpi, mode, last_page = int(sys.argv[1]), sys.argv[2], int(sys.argv[3])
     if not 72 <= dpi <= 2400 or mode not in ("rgb", "cmyk", "gray") or not 2 <= last_page <= 10001:
         raise ValueError("invalid render options")
-    subprocess.run([
+    def prepare(page):
+        target = page.with_suffix(".tiff")
+        pam_to_tiff(page, target, dpi, mode)
+        page.unlink()
+        return target
+
+    stream_pages([
         "mutool", "draw", "-q", "-F", "pam", "-c", mode,
         "-r", str(dpi), "-B", "128", "-o", "/output/page-%06d.pam",
         "/input/document", "1-" + str(last_page),
-    ], check=True, stdout=sys.stderr)
-    pages = sorted(pathlib.Path("/output").glob("page-*.pam"))
-    if not pages or len(pages) >= last_page:
-        raise ValueError("empty output or page limit exceeded")
-    for page in pages:
-        pam_to_tiff(page, page.with_suffix(".tiff"), dpi, mode)
-        page.unlink()
-    subprocess.run(["tar", "-C", "/output", "-cf", "-", "."], check=True)
+    ], "pam", last_page - 1, prepare)
 
 
 if __name__ == "__main__":

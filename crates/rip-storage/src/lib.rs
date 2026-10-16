@@ -3,12 +3,15 @@ pub mod audit;
 pub mod audit_archive;
 pub mod audit_remote;
 pub mod audit_vault;
+pub mod budget;
+pub mod budget_client;
 pub mod color;
 pub mod delivery;
 pub mod delivery_receipt;
 pub mod inspection;
 pub mod maintenance;
 pub mod pipeline;
+pub mod progress;
 pub mod receipts;
 pub mod source_validation;
 pub mod unified;
@@ -23,6 +26,8 @@ use uuid::Uuid;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
+    #[error("snapshot_budget_exhausted")]
+    BudgetExhausted,
     #[error(transparent)]
     Db(#[from] sqlx::Error),
     #[error(transparent)]
@@ -64,6 +69,11 @@ impl Repository {
                     .journal_mode(SqliteJournalMode::Wal)
                     .busy_timeout(Duration::from_secs(5)),
             )
+            .await?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS snapshot_budget(id INTEGER PRIMARY KEY CHECK(id=1),capacity INTEGER NOT NULL)").execute(&pool).await?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS snapshot_reservations(id TEXT PRIMARY KEY,owner TEXT NOT NULL,bytes INTEGER NOT NULL,state TEXT NOT NULL,payload TEXT NOT NULL)").execute(&pool).await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS snapshot_held ON snapshot_reservations(state,id)")
+            .execute(&pool)
             .await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS source_validations(job_id TEXT PRIMARY KEY,payload TEXT NOT NULL)").execute(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, payload TEXT NOT NULL, priority INTEGER NOT NULL, created_at INTEGER NOT NULL, revision INTEGER NOT NULL)").execute(&pool).await?;

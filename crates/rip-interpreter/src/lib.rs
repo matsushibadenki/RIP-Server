@@ -1,3 +1,5 @@
+mod page_stream;
+use page_stream::read_page_stream;
 use rip_core::{ColorMode, DocumentFormat, EngineKind, Manifest};
 use std::{
     path::{Path, PathBuf},
@@ -149,13 +151,18 @@ impl SandboxConfig {
 }
 
 impl SandboxConfig {
-    async fn render(
+    async fn render<F, Fut>(
         &self,
         engine: EngineKind,
         source: &Path,
         output: &Path,
         manifest: &Manifest,
-    ) -> Result<RenderedDocument, InterpreterError> {
+        mut progress: F,
+    ) -> Result<RenderedDocument, InterpreterError>
+    where
+        F: FnMut(u32) -> Fut + Send,
+        Fut: std::future::Future<Output = Result<(), InterpreterError>> + Send,
+    {
         let source = tokio::fs::canonicalize(source).await?;
         // Caller must provide a fresh directory. Refuse to mix old and new rasters.
         tokio::fs::create_dir(output).await?;
@@ -177,24 +184,24 @@ impl SandboxConfig {
             .stderr(Stdio::null())
             .kill_on_drop(true)
             .spawn()?;
-        let archive_path = output.join("output.tar");
-        let limit = self
-            .max_spool_bytes
-            .checked_add(1024 * 1024 + 1)
-            .ok_or(InterpreterError::Rejected("invalid_limits"))?;
         let result = tokio::time::timeout(self.timeout, async {
             let mut stdout = child
                 .stdout
                 .take()
-                .ok_or(InterpreterError::Rejected("missing_output"))?
-                .take(limit + 1);
-            let mut archive = tokio::fs::File::create(&archive_path).await?;
-            let bytes = tokio::io::copy(&mut stdout, &mut archive).await?;
-            archive.flush().await?;
-            if bytes > limit {
-                return Err(InterpreterError::Rejected("resource_limit"));
+                .ok_or(InterpreterError::Rejected("missing_output"))?;
+            let pages = read_page_stream(
+                &mut stdout,
+                &output,
+                self.max_pages,
+                self.max_spool_bytes,
+                &mut progress,
+            )
+            .await?;
+            let status = child.wait().await?;
+            if !status.success() {
+                return Err(InterpreterError::Rejected("interpreter_failed"));
             }
-            Ok::<_, InterpreterError>(child.wait().await?)
+            Ok::<_, InterpreterError>(RenderedDocument { pages })
         })
         .await;
         if !matches!(&result, Ok(Ok(_))) {
@@ -214,46 +221,7 @@ impl SandboxConfig {
         if !matches!(cleanup,Ok(Ok(status)) if status.success()) {
             return Err(InterpreterError::Rejected("container_cleanup_failed"));
         }
-        let status = result.map_err(|_| InterpreterError::Rejected("resource_limit_timeout"))??;
-        if !status.success() {
-            return Err(InterpreterError::Rejected("interpreter_failed"));
-        }
-        let extraction_output = output.clone();
-        let max_pages = self.max_pages;
-        let max_bytes = self.max_spool_bytes;
-        let mut pages = tokio::task::spawn_blocking(move || {
-            let file = std::fs::File::open(&archive_path)?;
-            let mut archive = tar::Archive::new(file);
-            let mut pages = Vec::new();
-            let mut total = 0u64;
-            for entry in archive.entries()? {
-                let mut entry = entry?;
-                if entry.header().entry_type().is_dir() { continue; }
-                let path = entry.path()?.into_owned();
-                let filename = path.file_name().and_then(|s| s.to_str()).ok_or(InterpreterError::Rejected("invalid_output"))?;
-                let number = filename.strip_prefix("page-").and_then(|s| s.strip_suffix(".tiff"));
-                if !entry.header().entry_type().is_file() || !matches!(number, Some(n) if n.len()==6 && n.bytes().all(|b|b.is_ascii_digit())) {
-                    return Err(InterpreterError::Rejected("invalid_output"));
-                }
-                let size = entry.size();
-                total = total.checked_add(size).ok_or(InterpreterError::Rejected("resource_limit"))?;
-                if size < 8 || total > max_bytes || pages.len() >= max_pages as usize { return Err(InterpreterError::Rejected("resource_limit")); }
-                let destination = extraction_output.join(filename);
-                let mut file = std::fs::OpenOptions::new().create_new(true).write(true).open(&destination)?;
-                std::io::copy(&mut entry, &mut file)?;
-                file.sync_all()?;
-                let mut header = [0u8;4];
-                use std::io::Read;
-                std::fs::File::open(&destination)?.read_exact(&mut header)?;
-                if header != *b"II\x2a\x00" && header != *b"MM\x00\x2a" { return Err(InterpreterError::Rejected("invalid_tiff")); }
-                pages.push(destination);
-            }
-            if pages.is_empty() { return Err(InterpreterError::Rejected("empty_output")); }
-            std::fs::remove_file(archive_path)?;
-            Ok::<_,InterpreterError>(pages)
-        }).await.map_err(|_| InterpreterError::Rejected("output_task_failed"))??;
-        pages.sort();
-        Ok(RenderedDocument { pages })
+        result.map_err(|_| InterpreterError::Rejected("resource_limit_timeout"))?
     }
 }
 #[derive(Default)]
@@ -281,7 +249,13 @@ impl DocumentInterpreter for GhostscriptInterpreter {
         manifest: &Manifest,
     ) -> Result<RenderedDocument, InterpreterError> {
         self.sandbox
-            .render(EngineKind::Ghostscript, source, output, manifest)
+            .render(
+                EngineKind::Ghostscript,
+                source,
+                output,
+                manifest,
+                |_| async { Ok(()) },
+            )
             .await
     }
 }
@@ -293,7 +267,9 @@ impl DocumentInterpreter for MuPdfInterpreter {
         manifest: &Manifest,
     ) -> Result<RenderedDocument, InterpreterError> {
         self.sandbox
-            .render(EngineKind::MuPdf, source, output, manifest)
+            .render(EngineKind::MuPdf, source, output, manifest, |_| async {
+                Ok(())
+            })
             .await
     }
 }
@@ -301,6 +277,33 @@ impl DocumentInterpreter for MuPdfInterpreter {
 pub struct HybridInterpreter {
     pub ghostscript: GhostscriptInterpreter,
     pub mupdf: MuPdfInterpreter,
+}
+impl HybridInterpreter {
+    /// Observations of complete TIFF page frames, while the engine may still be running.
+    /// Callback failure terminates the bounded render and removes its container.
+    pub async fn render_with_progress<F, Fut>(
+        &self,
+        source: &Path,
+        output: &Path,
+        manifest: &Manifest,
+        progress: F,
+    ) -> Result<RenderedDocument, InterpreterError>
+    where
+        F: FnMut(u32) -> Fut + Send,
+        Fut: std::future::Future<Output = Result<(), InterpreterError>> + Send,
+    {
+        let engine = manifest
+            .engine
+            .resolve(manifest.format)
+            .map_err(|e| InterpreterError::Rejected(e.0))?;
+        let sandbox = match engine {
+            EngineKind::MuPdf => &self.mupdf.sandbox,
+            EngineKind::Ghostscript => &self.ghostscript.sandbox,
+        };
+        sandbox
+            .render(engine, source, output, manifest, progress)
+            .await
+    }
 }
 impl DocumentInterpreter for HybridInterpreter {
     async fn render(

@@ -76,7 +76,7 @@ impl Repository {
                 "printer" => "printer",
                 _ => raw["stage"].as_str().unwrap_or("orchestration"),
             };
-            events.push(json!({"schemaVersion":1,"sequence":cursor,"pipelineId":id,"sourceJob":source,"stage":stage,"state":state,"createdAt":raw["createdAt"],"reasonCode":details.get("reasonCode").or_else(||details.get("reason")).cloned().unwrap_or(Value::Null),"revision":details["revision"],"progressPercent":details["progressPercent"],"retryable":details["retryable"].as_bool().unwrap_or(false),"automaticRetry":false,"completionMeaning":completion,"historicalImport":row.get::<i64,_>("historical")==1,"origin":{"kind":kind,"subjectId":row.get::<String,_>("subject"),"sequence":row.get::<i64,_>("origin_sequence")},"details":details}));
+            events.push(json!({"schemaVersion":1,"sequence":cursor,"pipelineId":id,"sourceJob":source,"stage":stage,"state":state,"createdAt":raw["createdAt"],"reasonCode":details.get("reasonCode").or_else(||details.get("reason")).cloned().unwrap_or(Value::Null),"revision":details["revision"],"progressPercent":details["progressPercent"],"progressPhase":details["progressPhase"],"completedPages":details["completedPages"],"totalPages":details["totalPages"],"retryable":details["retryable"].as_bool().unwrap_or(false),"automaticRetry":false,"completionMeaning":completion,"historicalImport":row.get::<i64,_>("historical")==1,"origin":{"kind":kind,"subjectId":row.get::<String,_>("subject"),"sequence":row.get::<i64,_>("origin_sequence")},"details":details}));
         }
         Ok(
             json!({"schemaVersion":1,"pipelineId":id,"events":events,"nextAfter":cursor,"hasMore":has_more,"ordering":"durable-arrival-order"}),

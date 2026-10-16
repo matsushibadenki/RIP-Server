@@ -1475,7 +1475,6 @@ version = "0.1.0"
 dependencies = [
  "rip-core",
  "serde_json",
- "tar",
  "tempfile",
  "thiserror",
  "tiff",

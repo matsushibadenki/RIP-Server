@@ -17,6 +17,7 @@ mod approvals;
 pub mod artifacts;
 mod audit;
 mod authorization;
+mod budget;
 pub mod color;
 pub mod delivery;
 pub mod dispatch;
@@ -43,6 +44,7 @@ pub struct App {
     pub require_print_approval: bool,
     pub printer_security: Vec<delivery::PrinterSecurity>,
     pub delivery_preparation: Arc<tokio::sync::Semaphore>,
+    pub snapshot_coordinator: Option<rip_storage::budget_client::SnapshotCoordinator>,
     pub artifact_budget: Arc<tokio::sync::Semaphore>,
     pub event_streams: Arc<tokio::sync::Semaphore>,
 }
@@ -50,7 +52,14 @@ pub async fn open(root: PathBuf, token: String) -> Result<App, Box<dyn std::erro
     tokio::fs::create_dir_all(root.join("jobs")).await?;
     let root = tokio::fs::canonicalize(root).await?;
     let repo = Repository::open(&root.join("jobs.sqlite3")).await?;
+    let capacity = match std::env::var("JRIP_SNAPSHOT_BUDGET_BYTES") {
+        Ok(value) => value.parse()?,
+        Err(std::env::VarError::NotPresent) => rip_storage::budget::DEFAULT_CAPACITY,
+        Err(error) => return Err(error.into()),
+    };
+    repo.configure_snapshot_budget(capacity).await?;
     Ok(App {
+        snapshot_coordinator: rip_storage::budget_client::SnapshotCoordinator::from_env()?,
         repo,
         printers: delivery::load()?,
         require_print_approval: match std::env::var("JRIP_REQUIRE_PRINT_APPROVAL").as_deref() {
@@ -82,6 +91,19 @@ pub fn router(app: App) -> Router {
         .route("/api/v1/approvals", post(approvals::create))
         .route("/api/v1/approvals/{id}/revoke", post(approvals::revoke))
         .route("/api/v1/audit", get(audit::list))
+        .route("/api/v1/budgets/snapshots", get(budget::status))
+        .route(
+            "/api/v1/budgets/snapshots/reservations",
+            post(budget::reserve).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
+            "/api/v1/budgets/snapshots/reservations/{id}/release",
+            post(budget::release).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
+            "/api/v1/budgets/snapshots/reservations/{id}/reconcile",
+            post(budget::reconcile).layer(DefaultBodyLimit::max(2048)),
+        )
         .route("/api/v1/color/capabilities", get(color::capabilities))
         .route(
             "/api/v1/color/profiles",
@@ -291,6 +313,16 @@ fn messages(code: &str) -> serde_json::Value {
             "afterは0以上、limitは1から100で指定してください",
             "after必须为非负数，limit必须在1到100之间",
         ),
+        "snapshot_coordinator_unavailable" => (
+            "Snapshot coordinator unavailable; no local fallback was used",
+            "分散予算を確認できません。ローカル予算への切替は行いません",
+            "无法确认分布式预算，未回退到本地预算",
+        ),
+        "snapshot_cleanup_required" => (
+            "Confirm snapshot cleanup before releasing the reservation",
+            "予約の解放前にスナップショットの清掃を確認してください",
+            "释放预留前请确认快照已清理",
+        ),
         "artifact_budget_exhausted" => (
             "Temporary artifact budget exhausted; retry after current downloads finish",
             "成果物用の一時容量予算が不足しています。進行中の取得が完了してから再試行してください",
@@ -328,6 +360,9 @@ fn messages(code: &str) -> serde_json::Value {
 impl From<StorageError> for ApiError {
     fn from(e: StorageError) -> Self {
         match e {
+            StorageError::BudgetExhausted => {
+                Self(StatusCode::SERVICE_UNAVAILABLE, "artifact_budget_exhausted")
+            }
             StorageError::NotFound => Self(StatusCode::NOT_FOUND, "not_found"),
             StorageError::Conflict => Self(StatusCode::CONFLICT, "state_conflict"),
             StorageError::ReceiptKeyRevoked => Self(

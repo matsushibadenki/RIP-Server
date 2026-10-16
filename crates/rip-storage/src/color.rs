@@ -10,14 +10,9 @@ async fn event(
         .as_array()
         .map_or(0, Vec::len);
     let completed = payload["completedPages"].as_u64().unwrap_or(0);
-    let progress = if payload["state"] == "COMPLETED" {
-        100
-    } else if total > 0 {
-        (completed * 100 / total as u64).min(99)
-    } else {
-        0
-    };
-    let payload = json!({"schemaVersion":1,"attemptId":id,"sourceJob":payload["sourceJob"],"state":payload["state"],"stage":"COLOR_MANAGING","revision":payload["revision"],"completedPages":completed,"pageCount":total,"progressPercent":progress,"reasonCode":payload["reasonCode"],"createdAt":payload["updatedAt"],"retryable":payload["reasonCode"]=="COLOR_WORKER_TIMEOUT" || payload["reasonCode"]=="COLOR_WORKER_LEASE_EXPIRED","completionKind":if payload["state"]=="COMPLETED" {Some("color-managed-tiff-export")}else{None}});
+    // This measures conversion + per-page output checks, not final publication.
+    let progress = (total > 0).then(|| completed * 100 / total as u64);
+    let payload = json!({"schemaVersion":1,"attemptId":id,"sourceJob":payload["sourceJob"],"state":payload["state"],"stage":"COLOR_MANAGING","revision":payload["revision"],"completedPages":completed,"pageCount":total,"totalPages":total,"progressPhase":"color-conversion","progressPercent":progress,"reasonCode":payload["reasonCode"],"createdAt":payload["updatedAt"],"retryable":payload["reasonCode"]=="COLOR_WORKER_TIMEOUT" || payload["reasonCode"]=="COLOR_WORKER_LEASE_EXPIRED","completionKind":if payload["state"]=="COMPLETED" {Some("color-managed-tiff-export")}else{None}});
     sqlx::query("INSERT INTO color_events(attempt_id,payload) VALUES(?,?)")
         .bind(id.to_string())
         .bind(serde_json::to_string(&payload)?)
@@ -83,11 +78,12 @@ impl Repository {
         reason: Option<&str>,
     ) -> Result<Value, StorageError> {
         let mut tx = self.pool.begin().await?;
-        let row = sqlx::query("SELECT payload,state,revision FROM color_attempts WHERE id=?")
-            .bind(id.to_string())
-            .fetch_optional(&mut *tx)
-            .await?
-            .ok_or(StorageError::NotFound)?;
+        let row =
+            sqlx::query("SELECT payload,state,revision,lease_until FROM color_attempts WHERE id=?")
+                .bind(id.to_string())
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or(StorageError::NotFound)?;
         let state: &str = row.get("state");
         if row.get::<i64, _>("revision") != revision
             || !matches!(
@@ -102,7 +98,23 @@ impl Repository {
             return Err(StorageError::Conflict);
         }
         let mut payload: Value = serde_json::from_str(row.get("payload"))?;
-        if u64::from(pages) < payload["completedPages"].as_u64().unwrap_or(0) {
+        let previous = payload["completedPages"].as_u64().unwrap_or(0);
+        let total = payload["ticket"]["sourceArtifacts"]
+            .as_array()
+            .map_or(0, Vec::len) as u64;
+        let pages = u64::from(pages);
+        if pages < previous
+            || pages > total
+            || (state == "QUEUED" && pages != 0)
+            || (state == "RUNNING" && next == "RUNNING" && pages > previous + 1)
+            || (next == "FAILED" && pages != previous)
+            || (next == "COMPLETED" && (total == 0 || pages != total || previous != total))
+            || (state == "RUNNING"
+                && matches!(next, "RUNNING" | "COMPLETED")
+                && row
+                    .get::<Option<i64>, _>("lease_until")
+                    .is_none_or(|expiry| expiry <= now()))
+        {
             return Err(StorageError::Conflict);
         }
         payload["state"] = json!(next);
@@ -177,6 +189,91 @@ impl Repository {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn measured_color_progress_is_bounded_durable_and_unified() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        let repo = Repository::open(&path).await.unwrap();
+        let job: Job = serde_json::from_value(json!({"id":Uuid::new_v4(),"manifest":{"name":"test.pdf","format":"application/pdf"},"state":"COMPLETED","source_sha256":"a".repeat(64),"created_at":now(),"updated_at":now(),"revision":0,"error_code":null,"selected_engine":null,"worker_run_id":null})).unwrap();
+        repo.insert(&job).await.unwrap();
+        let id = Uuid::new_v4();
+        repo.create_pipeline(id, job.id, 0, json!({}))
+            .await
+            .unwrap();
+        repo.create_color(id, job.id, 0, json!({"sourceArtifacts":[{},{}]}))
+            .await
+            .unwrap();
+        assert!(
+            repo.update_color(id, 0, "RUNNING", 1, None, None)
+                .await
+                .is_err()
+        );
+        repo.update_color(id, 0, "RUNNING", 0, None, None)
+            .await
+            .unwrap();
+        assert!(
+            repo.update_color(id, 1, "RUNNING", 2, None, None)
+                .await
+                .is_err()
+        );
+        assert!(
+            repo.update_color(id, 1, "COMPLETED", 2, None, None)
+                .await
+                .is_err()
+        );
+        repo.update_color(id, 1, "RUNNING", 1, None, None)
+            .await
+            .unwrap();
+        assert!(
+            repo.update_color(id, 2, "RUNNING", 3, None, None)
+                .await
+                .is_err()
+        );
+        sqlx::query("UPDATE color_attempts SET lease_until=? WHERE id=?")
+            .bind(now() - 1)
+            .bind(id.to_string())
+            .execute(&repo.pool)
+            .await
+            .unwrap();
+        assert!(
+            repo.update_color(id, 2, "RUNNING", 2, None, None)
+                .await
+                .is_err()
+        );
+        sqlx::query("UPDATE color_attempts SET lease_until=? WHERE id=?")
+            .bind(now() + 600)
+            .bind(id.to_string())
+            .execute(&repo.pool)
+            .await
+            .unwrap();
+        repo.update_color(id, 2, "RUNNING", 2, None, None)
+            .await
+            .unwrap();
+        let reopened = Repository::open(&path).await.unwrap();
+        let timeline = reopened.unified_pipeline_events(id, 0, 100).await.unwrap();
+        let events: Vec<_> = timeline["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["stage"] == "color_management")
+            .collect();
+        assert_eq!(events.len(), 4);
+        assert_eq!(events[2]["progressPercent"], 50);
+        assert_eq!(events[3]["progressPercent"], 100);
+        assert_eq!(events[3]["totalPages"], 2);
+        assert_eq!(events[3]["progressPhase"], "color-conversion");
+        assert!(events[3]["completionMeaning"].is_null());
+        reopened
+            .update_color(id, 3, "COMPLETED", 2, Some(json!({})), None)
+            .await
+            .unwrap();
+        assert!(
+            reopened
+                .update_color(id, 3, "RUNNING", 2, None, None)
+                .await
+                .is_err()
+        );
+    }
     #[tokio::test]
     async fn expired_attempts_remain_failed_and_stale_updates_cannot_publish() {
         let root = tempfile::tempdir().unwrap();

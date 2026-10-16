@@ -78,3 +78,61 @@ Historical settings/retry records without actor remain available only in shared-
 简体中文：新设置预检的actor及scope检查证据纳入摘要，读取、commit及重放均检查相同identity及当前jobs:submit。管理员scope不能绕过归属。同identity可轮换token，但每次重新检查权限。实体预检记录4个workflow scope，retry记录submit/control并将requestId绑定身份。
 
 接收回执记录机制、主体及保存的scope检查证据，不保存token或完整授权列表，也不将证据视为执行token、人工审批或原稿结构验证。历史回执不重写。无actor的旧设置／retry仅在共享token模式可用；显式policy下须创建新请求。保持JCS v2及旧v1摘要规则，不宣称完整ACX lifecycle或全部job的tenant隔离已完成。
+
+### Measured page progress / 実測ページ進捗 / 实测页级进度
+
+The standard worker emits `PAGE_ARTIFACT_VERIFIED` after hashing each complete TIFF.
+`progressPhase: artifact-verification`, `completedPages`, `totalPages`, and
+`progressPercent` describe that phase only. Rendering has already finished; 100%
+does not mean publication, color conversion, or physical printing has completed.
+The event keeps state `RIPPING`, never advances the control revision, and requires
+the current unexpired worker lease. Events are durable and resumable through the
+existing job history, SSE, MCP, and unified pipeline timeline. Color conversion emits its own measured phase as described below; unmeasured
+device page counts remain null. Earlier progress remains evidence of work
+performed even if later publication fails or cancellation wins.
+
+標準workerは各TIFF全体のハッシュ計算後に `PAGE_ARTIFACT_VERIFIED` を記録します。
+ページ数・進捗率は成果物検証工程のみを表し、描画中の進捗ではありません。
+100%でも公開・色変換・紙への印刷完了を意味しません。状態は `RIPPING` のまま、
+操作revisionも変更しません。有効な実行リースを検査し、履歴・SSE・MCP・共通timelineに
+永続化します。色管理は下記の別工程として計測し、未計測の実機ページ数はnullです。後の公開失敗や取消でも、
+それまでの作業記録は残ります。
+
+标准worker在完整读取并计算每页TIFF哈希后记录 `PAGE_ARTIFACT_VERIFIED`。
+页数与百分比仅表示成果验证阶段，而非渲染中的进度；100%不代表发布、色彩转换或实机打印完成。
+状态保持 `RIPPING`，不改变控制revision，并检查当前有效worker租约。
+历史、SSE、MCP与统一时间线均可恢复读取。色彩转换采用下述独立阶段，未测量的设备页数保留null；
+后续发布失败或取消不会删除已经完成的工作记录。
+
+
+Color events now include `progressPhase: color-conversion` and `totalPages`
+(`pageCount` remains for compatibility). A page is counted after the worker has
+validated its conversion report, geometry, profile and staged raster. This is
+before final hashing and publication: a RUNNING event may reach 100%, while
+`completionMeaning` remains null. Only COMPLETED confirms color-managed export.
+Known counts cannot exceed the ticket, skip pages or regress; RUNNING/COMPLETED
+updates require an unexpired lease and the expected revision. Terminal failures
+preserve the last measured count. Old events are not rewritten.
+
+色管理イベントは `progressPhase: color-conversion` と `totalPages` を返します。
+互換性のため `pageCount` も保持します。変換report・寸法・profile・保存済みラスターを
+workerが検査したページだけを数えます。最終ハッシュ計算と公開は後続のため、
+RUNNINGの100%は公開完了ではありません。総数超過・飛び越し・逆戻りを拒否し、
+RUNNING／COMPLETEDの更新には有効なリースと期待revisionが必要です。
+失敗時は最後の実測数を保持し、過去のイベントは書き換えません。
+
+色彩事件新增 `progressPhase: color-conversion` 与 `totalPages`，并保留 `pageCount`。
+worker检查转换报告、尺寸、profile及暂存光栅后才累计页数。最终哈希与发布尚未完成时，
+RUNNING也可达到100%，但不表示成果已发布。拒绝超限、跳页和倒退；
+RUNNING及COMPLETED更新须具备有效租约与预期revision。失败保留最后实测页数，历史事件不变。
+
+
+Live rendering progress is now available in `progressPhase: rendering`, before
+artifact verification. See [rendering progress](RENDER-PROGRESS.md) for the adapter
+protocol, unknown PS/EPS totals and failure/cancellation semantics.
+
+描画中のページ進捗は `progressPhase: rendering` で取得できます。
+成果物検証前の計測であり、[描画進捗仕様](RENDER-PROGRESS.md)に未知の総数・失敗・取消の意味を定義します。
+
+渲染过程的页级进度使用 `progressPhase: rendering`，发生于成果验证之前。
+未知总数、失败及取消的含义见[渲染进度规范](RENDER-PROGRESS.md)。

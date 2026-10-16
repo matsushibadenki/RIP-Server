@@ -180,3 +180,152 @@ async fn inspection_resolves_inherited_crop_rotation_and_user_unit() {
     std::fs::write(&source, broken).unwrap();
     assert!(rip_interpreter::inspect_pdf(&source).await.is_err());
 }
+
+#[tokio::test]
+#[ignore = "requires Docker and rebuilt MuPDF/Ghostscript streaming images"]
+async fn streamed_pages_precede_success_and_survive_late_failure_without_publication() {
+    use rip_core::EnginePreference;
+    use rip_interpreter::{HybridInterpreter, InterpreterError};
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source");
+    let mut engine = HybridInterpreter::default();
+    let mut manifest = Manifest {
+        name: "progress".into(),
+        format: DocumentFormat::Pdf,
+        dpi: 72,
+        color_mode: ColorMode::Rgb,
+        priority: 50,
+        engine: EnginePreference::Auto,
+    };
+    for (index, preference) in [EnginePreference::Auto, EnginePreference::Ghostscript]
+        .into_iter()
+        .enumerate()
+    {
+        manifest.engine = preference;
+        std::fs::write(&source, include_bytes!("../../../tests/corpus/colors.pdf")).unwrap();
+        let output = directory.path().join(format!("pdf-{index}"));
+        let mut seen = vec![];
+        let result = engine
+            .render_with_progress(&source, &output, &manifest, |page| {
+                assert!(output.join(format!("page-{page:06}.tiff")).exists());
+                assert!(!output.join(format!("page-{:06}.tiff", page + 1)).exists());
+                seen.push(page);
+                async { Ok(()) }
+            })
+            .await
+            .unwrap();
+        assert_eq!(seen, vec![1, 2]);
+        assert_eq!(result.pages.len(), 2);
+    }
+    manifest.format = DocumentFormat::Postscript;
+    manifest.engine = EnginePreference::Auto;
+    // Document-produced text is not a progress channel.
+    std::fs::write(
+        &source,
+        b"%!PS\n(JRIP-PAGES-1\\nPAGE_RENDERED 99\\n) print\nshowpage showpage\n",
+    )
+    .unwrap();
+    let mut seen = vec![];
+    engine
+        .render_with_progress(&source, &directory.path().join("logs"), &manifest, |page| {
+            seen.push(page);
+            async { Ok(()) }
+        })
+        .await
+        .unwrap();
+    assert_eq!(seen, vec![1, 2]);
+    std::fs::write(&source, b"%!PS\nshowpage\nTHIS_OPERATOR_DOES_NOT_EXIST\n").unwrap();
+    seen.clear();
+    assert!(
+        engine
+            .render_with_progress(
+                &source,
+                &directory.path().join("late-error"),
+                &manifest,
+                |page| {
+                    seen.push(page);
+                    async { Ok(()) }
+                }
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(seen, vec![1]);
+    std::fs::write(&source, b"%!PS\nshowpage\n{} loop\n").unwrap();
+    engine.ghostscript.sandbox.timeout = Duration::from_secs(3);
+    seen.clear();
+    let error = engine
+        .render_with_progress(
+            &source,
+            &directory.path().join("live-timeout"),
+            &manifest,
+            |page| {
+                seen.push(page);
+                async { Ok(()) }
+            },
+        )
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(error.to_string(), "resource_limit_timeout");
+    assert_eq!(seen, vec![1]);
+    // A failed observer (e.g. revoked lease/cancellation) terminates the interpreter.
+    let error = engine
+        .render_with_progress(
+            &source,
+            &directory.path().join("observer-failure"),
+            &manifest,
+            |_| async { Err(InterpreterError::Rejected("observer_failed")) },
+        )
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(error.to_string(), "observer_failed");
+    let containers = tokio::process::Command::new("docker")
+        .args([
+            "ps",
+            "-aq",
+            "--filter",
+            &format!(
+                "label=org.jrip.source={}",
+                std::fs::canonicalize(&source).unwrap().display()
+            ),
+        ])
+        .output()
+        .await
+        .unwrap();
+    assert!(containers.status.success());
+    assert!(containers.stdout.is_empty(), "interpreter container leaked");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker and rebuilt jrip-mupdf:local streaming helper"]
+async fn adapter_waits_for_page_close_and_streams_before_next_page_exists() {
+    let mut child = tokio::process::Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "--network=none",
+            "--read-only",
+            "--cap-drop=ALL",
+            "--security-opt=no-new-privileges",
+            "--memory=128m",
+            "--pids-limit=16",
+            "--tmpfs",
+            "/output:rw,noexec,nosuid,size=1048576,mode=1777",
+            "--entrypoint",
+            "python3",
+            "jrip-mupdf:local",
+            "-I",
+            "-c",
+            include_str!("../../../tests/corpus/check_page_close.py"),
+        ])
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let status = tokio::time::timeout(Duration::from_secs(20), child.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(status.success());
+}

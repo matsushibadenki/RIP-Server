@@ -16,7 +16,7 @@ jobs:
       - name: Install independent IPP test client
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cups-ipp-utils cups-client
       - run: cupstestppd adapters/cups/jrip-pdf-proof.ppd
-      - run: docker build -t jrip-ghostscript:local adapters/ghostscript
-      - run: docker build -t jrip-mupdf:local adapters/mupdf
+      - run: docker build -f adapters/ghostscript/Dockerfile -t jrip-ghostscript:local .
+      - run: docker build -f adapters/mupdf/Dockerfile -t jrip-mupdf:local .
       - run: docker build -f adapters/color/Dockerfile -t jrip-color:local .
       - run: cargo test --workspace --locked -- --ignored
