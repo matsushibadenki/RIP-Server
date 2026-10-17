@@ -17,34 +17,11 @@ impl Repository {
             return Err(StorageError::Conflict);
         }
         let mut tx = self.pool.begin().await?;
-        let rows =
-            sqlx::query("SELECT * FROM audit_records WHERE sequence>? ORDER BY sequence LIMIT ?")
-                .bind(after)
-                .bind(limit)
-                .fetch_all(&mut *tx)
-                .await?;
-        let mut cursor = after;
-        let mut records = Vec::new();
-        for row in rows {
-            let finished: Option<i64> = row.get("finished_at");
-            if !finished.is_some_and(|time| time < before) {
-                break;
-            }
-            cursor = row.get("sequence");
-            records.push(json!({"sequence":cursor,"correlationId":row.get::<String,_>("correlation_id"),
-                "identity":row.get::<String,_>("identity"),"operation":row.get::<String,_>("operation"),
-                "target":row.get::<Option<String>,_>("target"),"startedAt":row.get::<i64,_>("started_at"),
-                "finishedAt":finished,"status":row.get::<Option<i64>,_>("status")}));
-        }
-        if records.is_empty() {
-            return Err(StorageError::NotFound);
-        }
-        let id = Uuid::new_v4();
-        let payload = json!({"profile":PROFILE,"id":id,"createdAt":now(),"after":after,
-            "through":cursor,"before":before,"records":records});
-        let digest = rip_digest::digest(&payload).map_err(|_| StorageError::Conflict)?;
-        let mut archive =
-            json!({"digestProfile":rip_digest::PROFILE,"digest":digest,"payload":payload});
+        let mut archive = prepare_snapshot(&mut tx, after, before, limit).await?;
+        let id = archive["payload"]["id"]
+            .as_str()
+            .ok_or(StorageError::Conflict)?
+            .to_string();
         if let Some(signer) = &self.receipt_signer {
             let key_id = format!("sha256:{:x}", Sha256::digest(signer.public_key()));
             let revoked: i64 = sqlx::query_scalar(
@@ -166,7 +143,10 @@ pub fn verify(archive: &Value) -> bool {
 /// Verify the archive contract and its distinct signature domain using a pinned key.
 pub fn verify_signature(archive: &Value, trusted_key: &[u8]) -> bool {
     verify(archive)
-        && archive["signature"]["profile"] == receipts::AUDIT_PROFILE
+        && matches!(
+            archive["signature"]["profile"].as_str(),
+            Some(receipts::AUDIT_PROFILE | receipts::KMS_AUDIT_PROFILE)
+        )
         && receipts::verify_signed_record(archive, trusted_key)
 }
 
@@ -184,6 +164,45 @@ impl Repository {
             .bind(key_id).fetch_one(&self.pool).await?;
         Ok(valid != 0)
     }
+}
+
+pub(crate) async fn prepare_snapshot(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    after: i64,
+    before: i64,
+    limit: i64,
+) -> Result<Value, StorageError> {
+    if after < 0 || before < 0 || !(1..=1000).contains(&limit) {
+        return Err(StorageError::Conflict);
+    }
+    let rows =
+        sqlx::query("SELECT * FROM audit_records WHERE sequence>? ORDER BY sequence LIMIT ?")
+            .bind(after)
+            .bind(limit)
+            .fetch_all(&mut **tx)
+            .await?;
+    let mut cursor = after;
+    let mut records = Vec::new();
+    for row in rows {
+        let finished: Option<i64> = row.get("finished_at");
+        if !finished.is_some_and(|time| time < before) {
+            break;
+        }
+        cursor = row.get("sequence");
+        records.push(json!({"sequence":cursor,"correlationId":row.get::<String,_>("correlation_id"),
+                "identity":row.get::<String,_>("identity"),"operation":row.get::<String,_>("operation"),
+                "target":row.get::<Option<String>,_>("target"),"startedAt":row.get::<i64,_>("started_at"),
+                "finishedAt":finished,"status":row.get::<Option<i64>,_>("status")}));
+    }
+    if records.is_empty() {
+        return Err(StorageError::NotFound);
+    }
+    let id = Uuid::new_v4();
+    let payload = json!({"profile":PROFILE,"id":id,"createdAt":now(),"after":after,
+            "through":cursor,"before":before,"records":records});
+    let digest = rip_digest::digest(&payload).map_err(|_| StorageError::Conflict)?;
+    let archive = json!({"digestProfile":rip_digest::PROFILE,"digest":digest,"payload":payload});
+    Ok(archive)
 }
 
 #[cfg(test)]

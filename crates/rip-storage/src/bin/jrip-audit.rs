@@ -37,6 +37,17 @@ fn read_archive(path: &str) -> Result<serde_json::Value, Box<dyn std::error::Err
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     match args.as_slice() {
+        [command,database,after,before,limit,output] if command == "create-kms-signed" => {
+            if !Path::new(database).is_file() { return Err("existing repository database required".into()); }
+            if Path::new(output).exists() { return Err("output already exists".into()); }
+            if std::env::var_os("JRIP_RECEIPT_SIGNING_KEY").is_some() { return Err("local and KMS signing must be selected separately".into()); }
+            let signer=rip_storage::kms::KmsSigner::from_env().map_err(|error| error.to_string())?;
+            let repo=Repository::open_with_receipt_signer(Path::new(database),None).await?;
+            let archive=repo.archive_audit_kms(&signer,after.parse()?,before.parse()?,limit.parse()?).await?;
+            println!("archiveId={} digest={}",archive["payload"]["id"].as_str().unwrap(),archive["digest"].as_str().unwrap());
+            std::io::stdout().flush()?;
+            export(&archive,output)?;
+        }
         [command,database,after,before,limit,output] if command == "create" || command == "create-signed" => {
             if !Path::new(database).is_file() { return Err("existing repository database required".into()); }
             // Check existing destination before creating a durable snapshot.
@@ -111,9 +122,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
         [command,database,id] if command == "remote-store" || command == "remote-status" => {
             if !Path::new(database).is_file() { return Err("existing repository database required".into()); }
-            let endpoint = std::env::var("JRIP_AUDIT_VAULT_URL").map_err(|_|"JRIP_AUDIT_VAULT_URL required")?;
-            let token = std::env::var("JRIP_AUDIT_VAULT_TOKEN").map_err(|_|"JRIP_AUDIT_VAULT_TOKEN required")?;
-            let vault = rip_storage::audit_remote::RemoteVault::new(&endpoint,&token)?;
+            let vault = rip_storage::audit_remote::RemoteVault::from_env()?;
             let repo = Repository::open_with_receipt_signer(Path::new(database),None).await?;
             let result = if command=="remote-store" {repo.store_audit_remote(id.parse()?,&vault).await?}
                 else {repo.audit_remote_status(id.parse()?,&vault).await?};
@@ -123,9 +132,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             if !Path::new(database).is_file() { return Err("existing repository database required".into()); }
             let days: i64 = days.parse()?;
             if !(1..=3650).contains(&days) { return Err("retention days must be 1..3650".into()); }
-            let endpoint = std::env::var("JRIP_AUDIT_VAULT_URL").map_err(|_|"JRIP_AUDIT_VAULT_URL required")?;
-            let token = std::env::var("JRIP_AUDIT_VAULT_TOKEN").map_err(|_|"JRIP_AUDIT_VAULT_TOKEN required")?;
-            let vault = rip_storage::audit_remote::RemoteVault::new(&endpoint,&token)?;
+            let vault = rip_storage::audit_remote::RemoteVault::from_env()?;
             let repo = Repository::open_with_receipt_signer(Path::new(database),None).await?;
             println!("{}",serde_json::to_string_pretty(&repo.preview_remote_retention(&vault,rip_storage::now()-days*86400,if after=="-" {""}else{after},limit.parse()?).await?)?);
         }
@@ -133,23 +140,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             if !Path::new(database).is_file() { return Err("existing repository database required".into()); }
             let days: i64 = days.parse()?;
             if !(1..=3650).contains(&days) { return Err("retention days must be 1..3650".into()); }
-            let endpoint = std::env::var("JRIP_AUDIT_VAULT_URL").map_err(|_|"JRIP_AUDIT_VAULT_URL required")?;
-            let token = std::env::var("JRIP_AUDIT_VAULT_TOKEN").map_err(|_|"JRIP_AUDIT_VAULT_TOKEN required")?;
-            let vault = rip_storage::audit_remote::RemoteVault::new(&endpoint,&token)?;
+            let vault = rip_storage::audit_remote::RemoteVault::from_env()?;
             let repo = Repository::open_with_receipt_signer(Path::new(database),None).await?;
             println!("{}",serde_json::to_string_pretty(&repo.prune_audit_remote(id.parse()?,&vault,rip_storage::now()-days*86400,digest).await?)?);
         }
-        [command,database,id] if command == "remote-prune-record" || command == "remote-prune-reconcile" => {
+        [command,database,id] if command == "remote-prune-record" || command == "remote-prune-reconcile" || command == "remote-prune-version-status" => {
             if !Path::new(database).is_file() { return Err("existing repository database required".into()); }
-            let endpoint = std::env::var("JRIP_AUDIT_VAULT_URL").map_err(|_|"JRIP_AUDIT_VAULT_URL required")?;
-            let token = std::env::var("JRIP_AUDIT_VAULT_TOKEN").map_err(|_|"JRIP_AUDIT_VAULT_TOKEN required")?;
-            let vault = rip_storage::audit_remote::RemoteVault::new(&endpoint,&token)?;
+            let vault = rip_storage::audit_remote::RemoteVault::from_env()?;
             let repo = Repository::open_with_receipt_signer(Path::new(database),None).await?;
-            let result = if command=="remote-prune-record" {repo.remote_prune_record(id.parse()?,&vault).await?}
+            let result = if command=="remote-prune-version-status" {repo.s3_prune_evidence(id.parse()?,&vault).await?}
+                else if command=="remote-prune-record" {repo.remote_prune_record(id.parse()?,&vault).await?}
                 else {repo.reconcile_remote_prune(id.parse()?,&vault).await?};
             println!("{}",serde_json::to_string_pretty(&result)?);
         }
-        _ => return Err("usage: jrip-audit create|create-signed DATABASE AFTER BEFORE_UNIX_SECONDS LIMIT OUTPUT.json | export DATABASE ARCHIVE_ID OUTPUT.json | verify INPUT.json PINNED_SHA256 | verify-signature INPUT.json PUBLIC.bin | verify-current DATABASE INPUT.json PUBLIC.bin | store|vault-status DATABASE ARCHIVE_ID VAULT_DIRECTORY | list DATABASE AFTER_UUID_OR_DASH BEFORE_UNIX_SECONDS LIMIT | retention-preview DATABASE VAULT_DIRECTORY DAYS AFTER_UUID_OR_DASH LIMIT | prune DATABASE ARCHIVE_ID VAULT_DIRECTORY DAYS EXPECTED_ARCHIVE_DIGEST --apply | prune-record DATABASE ARCHIVE_ID | remote-store|remote-status DATABASE ARCHIVE_ID | remote-retention-preview DATABASE DAYS AFTER_UUID_OR_DASH LIMIT | remote-prune DATABASE ARCHIVE_ID DAYS EXPECTED_FILE_DIGEST --apply | remote-prune-record|remote-prune-reconcile DATABASE ARCHIVE_ID".into()),
+        _ => return Err("usage: jrip-audit create|create-signed|create-kms-signed DATABASE AFTER BEFORE_UNIX_SECONDS LIMIT OUTPUT.json | export DATABASE ARCHIVE_ID OUTPUT.json | verify INPUT.json PINNED_SHA256 | verify-signature INPUT.json PUBLIC.bin | verify-current DATABASE INPUT.json PUBLIC.bin | store|vault-status DATABASE ARCHIVE_ID VAULT_DIRECTORY | list DATABASE AFTER_UUID_OR_DASH BEFORE_UNIX_SECONDS LIMIT | retention-preview DATABASE VAULT_DIRECTORY DAYS AFTER_UUID_OR_DASH LIMIT | prune DATABASE ARCHIVE_ID VAULT_DIRECTORY DAYS EXPECTED_ARCHIVE_DIGEST --apply | prune-record DATABASE ARCHIVE_ID | remote-store|remote-status DATABASE ARCHIVE_ID | remote-retention-preview DATABASE DAYS AFTER_UUID_OR_DASH LIMIT | remote-prune DATABASE ARCHIVE_ID DAYS EXPECTED_FILE_DIGEST --apply | remote-prune-record|remote-prune-reconcile|remote-prune-version-status DATABASE ARCHIVE_ID".into()),
     }
     Ok(())
 }

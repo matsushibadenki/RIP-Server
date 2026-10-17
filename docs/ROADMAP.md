@@ -108,7 +108,11 @@
 - 🟢 [Done] remote copy保持期限のdry-run確認、初回ACK基準、現存local snapshotと現在のGET照合、最後のcopyの候補除外、bounded paging。 / Conservative remote-retention assessment / 保守远程保留期限评估。
 - 🟢 [Done] HTTPS copyのstrong ETag条件付き単一DELETE、PREPARED journal・監査、UNKNOWN照会復旧、local snapshot保護、store競合防止。 / Conditional remote deletion with durable uncertainty handling / 条件式远程删除与持久不确定状态处理。
 - ⭕️ [Pending] 実HTTPS事業者のIf-Match DELETE・read-after-delete保証と共有NFSロック。 / Live provider conditional deletion and shared NFS locks / 实际provider条件删除及共享NFS锁。
-- 🟠 [Next] S3/provider専用adapter、UNKNOWNのprovider固有解決、KMS。
+- 🟢 [Done] 監査archiveのS3 SigV4 adapter。GET／条件付きPUT／条件付きDELETE、session token、CLI provider設定、既存の読戻しACK・UNKNOWN非再送・local保護を統合。独立botocore署名vectorと署名検証付き模擬S3で検証。[S3-AUDIT-VAULT.md](S3-AUDIT-VAULT.md)。 / S3 SigV4 audit vault adapter with independent signature vectors / S3 SigV4审计归档adapter及独立签名向量验证。
+- ⭕️ [Pending] 実S3／互換providerのTLS・IAM・versioning／Object Lock・耐久性の受入試験。 / Live S3/provider TLS, IAM, versioning, Object Lock and durability acceptance / 实际S3/provider的TLS、IAM、版本及Object Lock验收。
+- 🟢 [Done] S3 version指定GETによるUNKNOWN解決（保持／不在／未確定、DELETE非再送）とAWS KMS Ed25519監査archive署名・公開鍵pin・失効再確認・CLI・模擬試験。 / S3 version-aware recovery and KMS audit signing / S3版本恢复及KMS审计签名。[仕様・検証範囲](PROVIDER-RECOVERY-KMS.md)
+- ⭕️ [Pending] 実AWSのTLS・IAM・region鍵対応・versioning・永続性の受入試験。 / Real AWS acceptance / 实际AWS验收。
+- 🔴 [Later] 永久version削除、Object Lock管理、明示SSE-KMS暗号化設定。 / Permanent version purge, Object Lock and explicit SSE-KMS / 永久版本清除、Object Lock及显式SSE-KMS。
 
 - 🟢 [Done] preflight digest、原稿SHA-256、形式、有効期限を検証するmultipart commit APIを実装。保存済みticketからジョブを登録し、SQLiteトランザクションで同一preflightの同時再送を重複排除する。共通Bearerトークンによる認可を使用。
 - 🟢 [Done] 設定／物理preflightとretryの主体拘束、操作ごとのscope検査、受付Receiptへの方式・主体・検査証跡。Receipt、期限切れpreflightと孤立ファイルの清掃は既存実装で検証済み。 / Owner-bound requests and scoped evidence / 身份绑定请求与scope证据。

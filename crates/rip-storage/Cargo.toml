@@ -13,6 +13,8 @@ tokio.workspace = true
 thiserror.workspace = true
 sha2 = "0.10"
 ring = "0.17"
+base64 = "0.22"
+time = { version = "=0.3.55", default-features = false }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "stream"] }
 [dev-dependencies]
 tempfile = "3"

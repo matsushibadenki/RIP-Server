@@ -1,0 +1,86 @@
+[
+  {
+    "method": "GET",
+    "url": "https://examplebucket.s3.amazonaws.com/audit/00000000-0000-0000-0000-000000000001.json",
+    "headers": {
+      "cache-control": "no-cache"
+    },
+    "body": "",
+    "token": null,
+    "seconds": 1792198923,
+    "authorization": "AWS4-HMAC-SHA256 Credential=TESTACCESS/20261017/us-east-1/s3/aws4_request, SignedHeaders=cache-control;host;x-amz-content-sha256;x-amz-date, Signature=bb1e5606686568c1b7d8fbc04a0b6329cdf3bfe4dbe05b37b0c3b03f19186636",
+    "date": "20261017T010203Z",
+    "payloadHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "method": "PUT",
+    "url": "https://examplebucket.s3.amazonaws.com/audit/00000000-0000-0000-0000-000000000001.json",
+    "headers": {
+      "if-none-match": "*",
+      "content-type": "application/json"
+    },
+    "body": "{\"archive\":true}",
+    "token": "test-session-token",
+    "seconds": 1792198923,
+    "authorization": "AWS4-HMAC-SHA256 Credential=TESTACCESS/20261017/us-east-1/s3/aws4_request, SignedHeaders=content-type;host;if-none-match;x-amz-content-sha256;x-amz-date;x-amz-security-token, Signature=f544453f51cfe6af3ae6bc54d142029cce3a190cd66bb3859d4913ce1182978e",
+    "date": "20261017T010203Z",
+    "payloadHash": "aeb8eecbdcd3d2949d92eeb3b412d300ff3ab3e7ba8a35a94d569f67dc4236f3"
+  },
+  {
+    "method": "DELETE",
+    "url": "https://examplebucket.s3.amazonaws.com/audit/00000000-0000-0000-0000-000000000001.json",
+    "headers": {
+      "if-match": "\"v1\""
+    },
+    "body": "",
+    "token": "test-session-token",
+    "seconds": 1792198923,
+    "authorization": "AWS4-HMAC-SHA256 Credential=TESTACCESS/20261017/us-east-1/s3/aws4_request, SignedHeaders=host;if-match;x-amz-content-sha256;x-amz-date;x-amz-security-token, Signature=d268046e237abdc14416d9b19a7a331bc517354dfff43e382e2a63df1ba52883",
+    "date": "20261017T010203Z",
+    "payloadHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "service": "s3",
+    "method": "GET",
+    "url": "https://examplebucket.s3.amazonaws.com/audit/00000000-0000-0000-0000-000000000001.json?versionId=v%2B%2F%3D",
+    "headers": {},
+    "body": "",
+    "token": "test-session-token",
+    "seconds": 1792198923,
+    "authorization": "AWS4-HMAC-SHA256 Credential=TESTACCESS/20261017/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date;x-amz-security-token, Signature=485d281dd0d770c4a1cf1436ba76d86222acc24ef54613fa4b70a82149dba549",
+    "date": "20261017T010203Z",
+    "payloadHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "service": "kms",
+    "method": "POST",
+    "url": "https://kms.us-east-1.amazonaws.com/",
+    "headers": {
+      "content-type": "application/x-amz-json-1.1",
+      "x-amz-target": "TrentService.GetPublicKey",
+      "x-amz-content-sha256": "6c80453c89f4adc3c2d2211553fdd3fdb691aef7487a7e62a53eedea9fb53d5f"
+    },
+    "body": "{\"KeyId\":\"example-key-arn\"}",
+    "token": "test-session-token",
+    "seconds": 1792198923,
+    "authorization": "AWS4-HMAC-SHA256 Credential=TESTACCESS/20261017/us-east-1/kms/aws4_request, SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date;x-amz-security-token;x-amz-target, Signature=b0325d27121edd3635bdd3c2942ea61d0a75542d8dc129ea9ba3dbe5cb283707",
+    "date": "20261017T010203Z",
+    "payloadHash": "6c80453c89f4adc3c2d2211553fdd3fdb691aef7487a7e62a53eedea9fb53d5f"
+  },
+  {
+    "service": "kms",
+    "method": "POST",
+    "url": "https://kms.us-east-1.amazonaws.com/",
+    "headers": {
+      "content-type": "application/x-amz-json-1.1",
+      "x-amz-target": "TrentService.Sign",
+      "x-amz-content-sha256": "c37e7e4eab888f885650938a81ae3592b0ae9b1cf45d66e2b8e7515fde0e8eb5"
+    },
+    "body": "{\"KeyId\":\"example-key-arn\",\"Message\":\"YWJj\",\"MessageType\":\"RAW\",\"SigningAlgorithm\":\"ED25519_SHA_512\"}",
+    "token": "test-session-token",
+    "seconds": 1792198923,
+    "authorization": "AWS4-HMAC-SHA256 Credential=TESTACCESS/20261017/us-east-1/kms/aws4_request, SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date;x-amz-security-token;x-amz-target, Signature=27a9146185eaba38593674a0207d6a4e92aa7ddc7fdfe18a24560d8fe58cb0bd",
+    "date": "20261017T010203Z",
+    "payloadHash": "c37e7e4eab888f885650938a81ae3592b0ae9b1cf45d66e2b8e7515fde0e8eb5"
+  }
+]

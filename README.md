@@ -290,3 +290,7 @@ PrintIntent事前確認・原稿一括受付・RIP待機・ICC処理・承認・
 
 
 - [Distributed snapshot budget](docs/DISTRIBUTED-BUDGET.md): optional central HTTP admission and conservative recovery / 分散snapshot予算と復旧 / 分布式快照预算及恢复。
+
+- [S3 audit vault](docs/S3-AUDIT-VAULT.md): SigV4 provider configuration / S3監査保管先の設定 / S3审计归档库配置。
+
+- [Provider recovery and KMS](docs/PROVIDER-RECOVERY-KMS.md): S3版指定復旧とKMS監査署名 / S3 version recovery and KMS audit signing / S3版本恢复及KMS审计签名。

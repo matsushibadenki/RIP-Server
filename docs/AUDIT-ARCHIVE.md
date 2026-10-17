@@ -18,7 +18,7 @@ The CLI prints the archive ID and digest before writing the export. Output uses 
 
 Offline verify caps input at 16 MiB, rejects duplicate JSON keys, validates profile, sequence order, completion statuses and the canonical digest, and requires a separately supplied pinned digest. Unsigned archives are not authenticated: an attacker can replace both data and an untrusted digest. Keep the pinned digest through an independently trusted channel. Exported audit identities and operations are administrative data; protect the destination appropriately. Keys, bearer tokens and original request bodies are not added by this feature.
 
-Automatic scheduling, object/WORM storage, source-audit deletion, external-storage retention and KMS integration remain planned. Creation and export do not delete records.
+Automatic scheduling, WORM guarantees and source-audit deletion remain planned. KMS audit signing is described in [PROVIDER-RECOVERY-KMS.md](PROVIDER-RECOVERY-KMS.md). Conditional object storage and explicit retention are described below; S3 authentication is documented in [S3-AUDIT-VAULT.md](S3-AUDIT-VAULT.md). Creation and export do not delete records.
 
 ## 日本語
 
@@ -30,7 +30,7 @@ Automatic scheduling, object/WORM storage, source-audit deletion, external-stora
 
 `verify` は16 MiB以内の入力を厳密に解析し、重複キー、profile、sequence、完了status、digestを検証します。信頼できる別経路で保持したdigestを指定してください。未署名archiveでは、内容とdigestが同時に置換された場合の真正性は保証しません。出力には監査主体・操作情報が含まれるので管理者用データとして保管してください。
 
-object storage、自動実行、元記録の削除、archive保持期限、KMS連携は未実装です。
+object storageとarchive保持期限は後述、自動実行と元記録の削除は後続項目です。KMS監査署名は [追加仕様](PROVIDER-RECOVERY-KMS.md) を参照してください。
 
 ## 简体中文
 
@@ -42,7 +42,7 @@ object storage、自動実行、元記録の削除、archive保持期限、KMS�
 
 离线验证输入不超过16 MiB，拒绝重复键，检查profile、sequence、完成status及摘要，并要求通过独立可信渠道保存的摘要。未签名归档的内容和不可信摘要同时被替换时不能证明真实性。导出包含管理员审计主体及操作信息，应保护文件。
 
-对象存储、自动调度、原记录删除、归档保留期限、KMS集成仍未实现。
+对象存储及归档保留期限见下文；自动调度及原记录删除仍为后续项目。KMS审计签名见 [追加规格](PROVIDER-RECOVERY-KMS.md)。
 
 ## Signed archives / 署名付きarchive / 签名归档
 
@@ -54,15 +54,15 @@ cargo run -p rip-storage --bin jrip-audit -- verify-current data/jobs.sqlite3 si
 
 English: `create-signed` requires the configured PKCS#8 Ed25519 key; missing, invalid or revoked keys fail without publishing an archive. Ordinary `create` remains unsigned even if the environment contains a key. The archive signature uses the separate domain `org.jrip.audit-archive-ed25519-v1` and `signature.digestProfile:org.jrip.jcs-safe-v1`. Its message is UTF-8 domain name, zero byte, and the complete canonical archive after removing only signature.value. The payload digest retains its original meaning. Signed and unsigned archives share the archive-v1 payload contract. Signature metadata and proof are persisted atomically with the snapshot and creation audit, within the same size limit. Export never signs or modifies stored evidence.
 
-`verify-signature` validates both the archive contract and Ed25519 signature using a separately trusted raw 32-byte public key. It does not check revocation. `verify-current` additionally requires a registered, currently non-revoked key in the specified existing repository. As with Receipt keys, revocation conservatively rejects all historical signatures from that key for current-trust verification. It preserves the historical bytes and offline cryptographic validity. The embedded publicKey is informational, not a trust anchor. The existing public-key registry and admin revocation API apply to this signing key; KMS and object/WORM storage are not implemented.
+`verify-signature` validates both the archive contract and Ed25519 signature using a separately trusted raw 32-byte public key. It does not check revocation. `verify-current` additionally requires a registered, currently non-revoked key in the specified existing repository. As with Receipt keys, revocation conservatively rejects all historical signatures from that key for current-trust verification. It preserves the historical bytes and offline cryptographic validity. The embedded publicKey is informational, not a trust anchor. The existing public-key registry and admin revocation API apply to this signing key; KMS audit signing is described in [PROVIDER-RECOVERY-KMS.md](PROVIDER-RECOVERY-KMS.md); WORM guarantees are not implemented; conditional object adapters are described below.
 
 日本語：`create-signed` は設定済みPKCS#8 Ed25519鍵を必須とし、未設定・不正・失効済みならarchiveを保存しません。通常の `create` は環境変数に鍵があっても未署名です。専用domain `org.jrip.audit-archive-ed25519-v1`、ゼロbyte、signature.valueだけを除いたarchive全体のJCSを署名します。元のpayload digestは維持し、署名と作成監査を同じDBトランザクションで保存します。export時に再署名しません。
 
-`verify-signature` は別経路で信頼した32-byte公開鍵で署名を検証し、失効は確認しません。`verify-current` は指定DBで登録済みかつ現在失効していないことも確認します。失効後は過去の署名も現在の信頼判定では拒否しますが、保存内容は変更しません。埋め込み公開鍵だけを信頼しないでください。既存の鍵一覧・管理者失効APIを共用し、KMSとobject storageは未実装です。
+`verify-signature` は別経路で信頼した32-byte公開鍵で署名を検証し、失効は確認しません。`verify-current` は指定DBで登録済みかつ現在失効していないことも確認します。失効後は過去の署名も現在の信頼判定では拒否しますが、保存内容は変更しません。埋め込み公開鍵だけを信頼しないでください。既存の鍵一覧・管理者失効APIを共用し、KMS監査署名は [追加仕様](PROVIDER-RECOVERY-KMS.md)、object storageは後述を参照してください。
 
 简体中文：`create-signed` 必须配置PKCS#8 Ed25519密钥；缺失、无效或已撤销时不发布归档。普通 `create` 始终不签名。独立domain为 `org.jrip.audit-archive-ed25519-v1`，签名消息包含domain、零字节及仅移除signature.value后的完整JCS归档。payload摘要保持原含义；签名、快照和创建审计原子保存，导出时不重新签名。
 
-`verify-signature` 使用独立可信的32-byte公钥验证，不检查撤销。`verify-current` 还检查指定DB中的密钥已注册且当前未撤销。撤销后保守拒绝该密钥的全部历史签名用于当前信任判断，但保持历史字节及离线密码学有效性。嵌入公钥不构成信任锚；复用现有公钥列表和管理员撤销API，KMS及对象存储仍未实现。
+`verify-signature` 使用独立可信的32-byte公钥验证，不检查撤销。`verify-current` 还检查指定DB中的密钥已注册且当前未撤销。撤销后保守拒绝该密钥的全部历史签名用于当前信任判断，但保持历史字节及离线密码学有效性。嵌入公钥不构成信任锚；复用现有公钥列表和管理员撤销API，KMS审计签名见 [追加规格](PROVIDER-RECOVERY-KMS.md)，对象存储见下文。
 
 ## Filesystem vault / ファイルシステム保管先 / 文件系统归档库
 
@@ -75,7 +75,7 @@ English: `store` copies the exact compact JSON representation of the stored arch
 
 `vault-status` rechecks current contents rather than assuming the stored acknowledgement means the file still exists. acknowledged:true with contentMatches:false indicates missing or changed evidence. It does not delete, repair or resign files. `store` can restore a missing file; it never overwrites a conflicting file. The directory must be controlled by administrators; this is not a sandbox for a hostile shared writable directory. No Agent-supplied paths or remote tools are added.
 
-storageMeaning is filesystem-sync and worm is false. Local filesystem publication/replay is tested; actual NFS durability, disconnected-volume recovery and Windows directory-sync behavior remain Pending. A successful filesystem sync does not certify remote replication or provider retention. Object storage, WORM guarantees, automated retention/pruning and KMS remain unimplemented. Source audit records are retained. Local database snapshots can be pruned explicitly as described below.
+storageMeaning is filesystem-sync and worm is false. Local filesystem publication/replay is tested; actual NFS durability, disconnected-volume recovery and Windows directory-sync behavior remain Pending. A successful filesystem sync does not certify remote replication or provider retention. WORM guarantees, automated scheduling remain unimplemented; KMS audit signing is described in [PROVIDER-RECOVERY-KMS.md](PROVIDER-RECOVERY-KMS.md); explicit object storage and retention are described below. Source audit records are retained. Local database snapshots can be pruned explicitly as described below.
 
 日本語：`store` は既存の管理者専用ディレクトリへ `{UUID}.json` を出力します。別volumeも指定できます。同期した一時ファイルを上書きしないhard linkで公開し、DB内容との一致とファイル・ディレクトリの同期後に保管確認と監査を原子的に記録します。ファイル全体のSHA-256はpayload digestとは別です。再送は内容を確認し、元の確認時刻を保持します。公開後・DB記録前の中断は再送で復旧します。不一致ファイルや出力先symlinkは拒否します。強制終了後に残った一時ファイルの清掃は管理者が行います。
 
@@ -127,7 +127,7 @@ English: `prune` requires an explicit archive ID, selected vault, retention days
 
 Source audit records, public-key records, historical export acknowledgements and vault files remain. The prune record preserves archive ID, payload/full-file digests, byte count, record range/count, signature profile/key ID, target, cutoff and time. `vault-status` continues to check the external file against the recorded full-file hash after pruning. Replay reports a historical deletion, not current vault integrity. DB export/store for a pruned ID returns not found; recover the original JSON from the retained `{UUID}.json` vault file and use verify/verify-signature/verify-current as appropriate. No automatic import or resigning occurs. list reports only remaining local snapshots; prune-record retrieves evidence by the known ID.
 
-The vault must stay administrator-controlled during and after pruning. Filesystem verification/sync is not a WORM or remote replication guarantee and cannot prevent an administrator changing/deleting the sole retained copy afterward. Apply your legal holds, key trust requirements and backup policy before explicitly invoking --apply. No production pruning was performed during development; tests use temporary databases and directories. SQLite freed pages are reusable; this does not run VACUUM or guarantee a smaller database file. Provider-specific S3 deletion, original-audit pruning and KMS remain planned.
+The vault must stay administrator-controlled during and after pruning. Filesystem verification/sync is not a WORM or remote replication guarantee and cannot prevent an administrator changing/deleting the sole retained copy afterward. Apply your legal holds, key trust requirements and backup policy before explicitly invoking --apply. No production pruning was performed during development; tests use temporary databases and directories. SQLite freed pages are reusable; this does not run VACUUM or guarantee a smaller database file. Original-audit pruning remains planned. S3 recovery and KMS audit signing are described in [PROVIDER-RECOVERY-KMS.md](PROVIDER-RECOVERY-KMS.md).
 
 日本語：`prune` はID、保管先、保持日数1〜3650、確認したpayload digest、`--apply` を必須とします。SQLite writerトランザクション内で期限・digest・保管ACKを検査し、保管ファイルの再読込と同期後に、削除証跡・DB snapshot削除・監査を原子的に保存します。検証や監査保存の失敗時は削除も取り消します。再送は元の証跡を返し、異なるdigest・保管先は拒否します。
 
@@ -150,25 +150,25 @@ cargo run -p rip-storage --bin jrip-audit -- remote-store data/jobs.sqlite3 ARCH
 cargo run -p rip-storage --bin jrip-audit -- remote-status data/jobs.sqlite3 ARCHIVE_UUID
 ```
 
-English: This adapter defines a conditional HTTP object-vault contract, not an S3 client. The endpoint must accept authenticated PUT/GET at `{base}/{UUID}.json`, atomically honor PUT `If-None-Match: *` and return 412 when already present. Creation may return 200/201/204. GET must return 200 with the exact uncompressed bytes or 404; it must support read-after-write consistency. The conditional request follows [RFC 9110](https://www.rfc-editor.org/rfc/rfc9110.html#name-if-none-match). Configure a compatible gateway/server; SigV4, presigned URLs, multipart upload and provider Object Lock are not implemented.
+English: The default Bearer adapter defines a conditional HTTP object-vault contract. The optional S3 provider is documented in [S3-AUDIT-VAULT.md](S3-AUDIT-VAULT.md). The endpoint must accept authenticated PUT/GET at `{base}/{UUID}.json`, atomically honor PUT `If-None-Match: *` and return 412 when already present. Creation may return 200/201/204. GET must return 200 with the exact uncompressed bytes or 404; it must support read-after-write consistency. The conditional request follows [RFC 9110](https://www.rfc-editor.org/rfc/rfc9110.html#name-if-none-match). Configure a compatible gateway/server for the default Bearer provider. The separate S3 provider supports SigV4; presigned URLs, multipart upload and provider Object Lock are not implemented.
 
 Production configuration accepts only HTTPS and rejects URL user information, query, fragment, missing trailing slash and invalid/empty bearer credentials. TLS uses platform/native trust roots; no certificate-verification bypass exists. Redirects and environment proxy discovery are disabled. Connect timeout is 5 seconds, request/body timeout 30 seconds; readback is bounded to 8 MiB even without Content-Length. Transport errors are reported without request URLs/tokens. Credentials are absent from acknowledgement/audit records; keep URL paths free of secrets as well.
 
 After a conditional write (including 412 replay), remote-store reads the object back and requires exact equality to the stored DB archive before atomically saving a separate remote acknowledgement and audit event. A remote publication followed by readback/DB failure leaves no acknowledgement; retry reconciles it. Replays preserve the original acknowledgement time. remote-status rereads and compares the complete-file hash; after local snapshot pruning it can use retained prune evidence. DB snapshots and remote objects are never deleted by these commands. Filesystem prune still requires a filesystem vault; a remote acknowledgement alone does not authorize it. Catalogue acknowledgedVaultCount counts filesystem copies only.
 
-storageMeaning is http-readback and worm:false. Tests use a private plaintext loopback fake server only; production configuration cannot enable HTTP. Actual HTTPS service/certificate-chain deployment, provider durability, S3 compatibility, replication, WORM and remote retention remain Pending or planned. A successful readback does not guarantee that a service will retain the object later. No live external service was contacted during tests.
+storageMeaning is http-readback and worm:false. Tests use a private plaintext loopback fake server only; production configuration cannot enable HTTP. Actual HTTPS service/certificate-chain deployment, provider durability, live S3 compatibility, replication and WORM remain Pending. Explicit retention and conditional deletion are described below. A successful readback does not guarantee that a service will retain the object later. No live external service was contacted during tests.
 
-日本語：環境変数のHTTPS URLとBearer tokenで保管先を設定します。専用gatewayはUUID.jsonへのPUT/GET、原子的な `If-None-Match: *`、既存時412、読み戻しの完全一致とread-after-writeを提供する必要があります。S3 clientではなく、SigV4・presigned URL・Object Lockには未対応です。
+日本語：環境変数のHTTPS URLとBearer tokenで保管先を設定します。専用gatewayはUUID.jsonへのPUT/GET、原子的な `If-None-Match: *`、既存時412、読み戻しの完全一致とread-after-writeを提供する必要があります。この既定adapterはBearer方式です。別途追加した[S3 SigV4方式](S3-AUDIT-VAULT.md)を選択できます。presigned URL・Object Lockは未対応です。
 
 HTTPSのみ許可し、認証付きURL・query・fragment・redirect・環境proxyを拒否します。tokenは管理者のsecret環境で設定し、監査・ACKへ保存しません。接続5秒、リクエスト30秒、読み戻し8 MiB制限です。保存後の完全一致を確認してからremote ACKと監査を原子的に保存し、再送で復旧します。remote-statusは現在の内容を確認し、ローカルsnapshot削除後も削除証跡のhashを使えます。remote ACKだけで既存filesystem pruneは実行できません。
 
-検証はテスト専用loopback HTTPサーバーで行いました。本番constructorにHTTP許可やTLS検証回避はありません。実HTTPSサービス・証明書、事業者の永続性、S3互換性、WORM、remote保持期限は未検証／未実装です。読み戻し成功は将来の保持を保証しません。
+検証はテスト専用loopback HTTPサーバーで行いました。本番constructorにHTTP許可やTLS検証回避はありません。実HTTPSサービス・証明書、事業者の永続性、実S3互換性、WORMの受入試験はPendingです。保持期限・条件付き削除の実装は下記を参照してください。読み戻し成功は将来の保持を保証しません。
 
-简体中文：管理员通过HTTPS目录URL及Bearer token环境变量配置归档库。兼容gateway须提供UUID.json PUT/GET、原子 `If-None-Match: *`、已存在时412及read-after-write一致性。这不是S3 client，尚不支持SigV4、presigned URL或Object Lock。
+简体中文：管理员通过HTTPS目录URL及Bearer token环境变量配置归档库。兼容gateway须提供UUID.json PUT/GET、原子 `If-None-Match: *`、已存在时412及read-after-write一致性。默认adapter使用Bearer认证；可另选[S3 SigV4方式](S3-AUDIT-VAULT.md)，仍不支持presigned URL或Object Lock。
 
 仅允许HTTPS，拒绝URL用户凭证、query、fragment、redirect及环境proxy。token通过secret环境配置，不记录到审计或ACK。连接超时5秒、请求30秒、读取上限8 MiB。写入后完整读回匹配，才原子保存remote ACK与审计；重放可恢复中断。remote-status检查当前内容，本地快照删除后可使用删除证据摘要。remote ACK不能单独触发filesystem prune。
 
-测试使用仅测试可用的loopback HTTP模拟服务，生产constructor不允许HTTP或绕过TLS校验。实际HTTPS服务/证书、provider持久性、S3兼容、WORM和远程保留期限仍未验证或实现。成功读回不保证后续保留。
+测试使用仅测试可用的loopback HTTP模拟服务，生产constructor不允许HTTP或绕过TLS校验。实际HTTPS服务/证书、provider持久性、实际S3兼容及WORM验收仍为Pending；保留期限与条件删除实现见下文。成功读回不保证后续保留。
 
 ## Remote retention assessment / 外部copyの保持期限確認 / 远程copy保留期限评估
 

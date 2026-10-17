@@ -1,0 +1,39 @@
+{
+  "digestProfile": "org.jrip.jcs-safe-v1",
+  "digest": "sha256:ce273c81706ab67ec5215d9ab2d200d2feba2a3725a59a8fb1e93121812ec1cf",
+  "payload": {
+    "profile": "org.jrip.audit-archive-v1",
+    "id": "00000000-0000-0000-0000-000000000001",
+    "createdAt": 1792198923,
+    "after": 0,
+    "through": 1,
+    "before": 1792198924,
+    "records": [
+      {
+        "sequence": 1,
+        "correlationId": "00000000-0000-0000-0000-000000000002",
+        "identity": "test-operator",
+        "operation": "test-only",
+        "target": null,
+        "startedAt": 1792198922,
+        "finishedAt": 1792198923,
+        "status": 200
+      }
+    ]
+  },
+  "proof": {
+    "signed": true,
+    "type": "ed25519-kms-record"
+  },
+  "signature": {
+    "profile": "org.jrip.audit-archive-kms-ed25519-v1",
+    "algorithm": "Ed25519",
+    "keyId": "sha256:56475aa75463474c0285df5dbf2bcab73da651358839e9b77481b2eab107708c",
+    "publicKey": "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8",
+    "encoding": "hex",
+    "digestProfile": "org.jrip.jcs-safe-v1",
+    "messageEncoding": "domain-sha256-jcs",
+    "kmsKeyId": "arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000001",
+    "value": "3ba641d14f79185f66e3709877f5ae9afcfc19b9c3cec7e1b8495b96eb5cd44a956b28503caf063b374b9337842ca1735e6355cd46988982b819677c44e4bf0c"
+  }
+}

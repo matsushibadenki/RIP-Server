@@ -4,6 +4,8 @@ use ring::signature::{self, Ed25519KeyPair, KeyPair};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+pub const KMS_AUDIT_PROFILE: &str = "org.jrip.audit-archive-kms-ed25519-v1";
+
 pub const AUDIT_PROFILE: &str = "org.jrip.audit-archive-ed25519-v1";
 
 pub const LEGACY_PROFILE: &str = "org.jrip.receipt-ed25519-v1";
@@ -47,7 +49,7 @@ impl ReceiptSigner {
         Ok(())
     }
 }
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 fn unhex(s: &str) -> Option<Vec<u8>> {
@@ -63,7 +65,7 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
         .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
         .collect()
 }
-fn message(receipt: &Value) -> Result<Vec<u8>, StorageError> {
+pub(crate) fn message(receipt: &Value) -> Result<Vec<u8>, StorageError> {
     let mut body = receipt.clone();
     body["signature"]
         .as_object_mut()
@@ -77,6 +79,10 @@ fn message(receipt: &Value) -> Result<Vec<u8>, StorageError> {
     match profile {
         PROFILE | AUDIT_PROFILE => {
             bytes.extend(rip_digest::canonical(&body).map_err(|_| StorageError::Conflict)?)
+        }
+        KMS_AUDIT_PROFILE => {
+            let body = rip_digest::canonical(&body).map_err(|_| StorageError::Conflict)?;
+            bytes.extend(Sha256::digest(&body));
         }
         LEGACY_PROFILE => bytes.extend(serde_json::to_vec(&body)?),
         _ => return Err(StorageError::Conflict),
@@ -100,7 +106,7 @@ pub(crate) fn verify_signed_record(receipt: &Value, trusted_key: &[u8]) -> bool 
     if trusted_key.len() != 32
         || !matches!(
             sig["profile"].as_str(),
-            Some(PROFILE | LEGACY_PROFILE | AUDIT_PROFILE)
+            Some(PROFILE | LEGACY_PROFILE | AUDIT_PROFILE | KMS_AUDIT_PROFILE)
         )
         || sig["algorithm"] != "Ed25519"
         || sig["encoding"] != "hex"
@@ -113,6 +119,15 @@ pub(crate) fn verify_signed_record(receipt: &Value, trusted_key: &[u8]) -> bool 
         || receipt["proof"]["signed"] != true
         || sig["publicKey"] != hex(trusted_key)
         || sig["keyId"] != format!("sha256:{:x}", Sha256::digest(trusted_key))
+    {
+        return false;
+    }
+    if sig["profile"] == KMS_AUDIT_PROFILE
+        && (sig["messageEncoding"] != "domain-sha256-jcs"
+            || !sig["kmsKeyId"]
+                .as_str()
+                .is_some_and(crate::kms::valid_key_arn)
+            || receipt["proof"]["type"] != "ed25519-kms-record")
     {
         return false;
     }

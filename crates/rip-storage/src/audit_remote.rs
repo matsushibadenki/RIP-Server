@@ -1,4 +1,4 @@
-//! Conditional HTTP object vault adapter; does not claim S3 or WORM compatibility.
+//! Conditional HTTP and S3 SigV4 object vaults; no WORM claim.
 use super::*;
 use reqwest::{
     Client, Url,
@@ -27,9 +27,10 @@ pub enum RemoteError {
 }
 
 pub struct RemoteVault {
-    base: Url,
-    client: Client,
+    pub(crate) base: Url,
+    pub(crate) client: Client,
     authorization: HeaderValue,
+    pub(crate) s3: Option<crate::s3::Credentials>,
 }
 impl RemoteVault {
     pub fn new(endpoint: &str, token: &str) -> Result<Self, RemoteError> {
@@ -62,24 +63,98 @@ impl RemoteVault {
             base,
             client,
             authorization,
+            s3: None,
         })
     }
-    async fn read(&self, id: Uuid) -> Result<Option<Vec<u8>>, RemoteError> {
-        Ok(self.read_version(id).await?.map(|(bytes, _)| bytes))
+    pub fn s3(
+        endpoint: &str,
+        region: &str,
+        access: &str,
+        secret: &str,
+        token: Option<&str>,
+    ) -> Result<Self, RemoteError> {
+        // Keep paths unambiguous: UUID filenames below an unreserved ASCII prefix.
+        if endpoint.contains('%')
+            || endpoint.contains("/./")
+            || endpoint.contains("/../")
+            || endpoint.contains('\\')
+        {
+            return Err(RemoteError::Configuration);
+        }
+        let mut vault = Self::new(endpoint, "unused-s3-placeholder")?;
+        if !vault
+            .base
+            .path()
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"/-_.~".contains(&b))
+        {
+            return Err(RemoteError::Configuration);
+        }
+        vault.s3 = Some(crate::s3::Credentials::new(region, access, secret, token)?);
+        Ok(vault)
     }
-    async fn read_version(
+    fn provider(&self) -> &'static str {
+        if self.s3.is_some() {
+            "s3-sigv4"
+        } else {
+            "conditional-http"
+        }
+    }
+    pub fn from_env() -> Result<Self, RemoteError> {
+        let env = |key| std::env::var(key).map_err(|_| RemoteError::Configuration);
+        let endpoint = env("JRIP_AUDIT_VAULT_URL")?;
+        match std::env::var("JRIP_AUDIT_VAULT_PROVIDER").as_deref() {
+            Err(std::env::VarError::NotPresent) | Ok("http") => {
+                Self::new(&endpoint, &env("JRIP_AUDIT_VAULT_TOKEN")?)
+            }
+            Ok("s3") => {
+                let token = match std::env::var("AWS_SESSION_TOKEN") {
+                    Ok(value) => Some(value),
+                    Err(std::env::VarError::NotPresent) => None,
+                    Err(_) => return Err(RemoteError::Configuration),
+                };
+                Self::s3(
+                    &endpoint,
+                    &env("AWS_REGION")?,
+                    &env("AWS_ACCESS_KEY_ID")?,
+                    &env("AWS_SECRET_ACCESS_KEY")?,
+                    token.as_deref(),
+                )
+            }
+            _ => Err(RemoteError::Configuration),
+        }
+    }
+    fn request(
         &self,
+        method: reqwest::Method,
         id: Uuid,
-    ) -> Result<Option<(Vec<u8>, Option<String>)>, RemoteError> {
+        headers: reqwest::header::HeaderMap,
+        body: Vec<u8>,
+    ) -> Result<reqwest::RequestBuilder, RemoteError> {
         let url = self
             .base
             .join(&format!("{id}.json"))
             .map_err(|_| RemoteError::Configuration)?;
+        let headers = if let Some(credentials) = &self.s3 {
+            credentials.sign(method.as_str(), &url, headers, &body, now())?
+        } else {
+            let mut headers = headers;
+            headers.insert(AUTHORIZATION, self.authorization.clone());
+            headers
+        };
+        Ok(self.client.request(method, url).headers(headers).body(body))
+    }
+    async fn read(&self, id: Uuid) -> Result<Option<Vec<u8>>, RemoteError> {
+        Ok(self.read_version(id).await?.map(|(bytes, _, _)| bytes))
+    }
+    async fn read_version(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<(Vec<u8>, Option<String>, Option<String>)>, RemoteError> {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("cache-control", HeaderValue::from_static("no-cache"));
         let mut response = self
-            .client
-            .get(url)
-            .header("cache-control", "no-cache")
-            .header(AUTHORIZATION, self.authorization.clone())
+            .request(reqwest::Method::GET, id, headers, Vec::new())?
             .send()
             .await
             .map_err(|_| RemoteError::Transport)?;
@@ -109,20 +184,24 @@ impl RemoteVault {
             }
             bytes.extend_from_slice(&chunk);
         }
-        Ok(Some((bytes, etag)))
+        let version = if self.s3.is_some() {
+            response
+                .headers()
+                .get("x-amz-version-id")
+                .and_then(|v| v.to_str().ok())
+                .filter(|v| crate::s3::valid_version(v))
+                .map(str::to_owned)
+        } else {
+            None
+        };
+        Ok(Some((bytes, etag, version)))
     }
     async fn write(&self, id: Uuid, bytes: Vec<u8>) -> Result<(), RemoteError> {
-        let url = self
-            .base
-            .join(&format!("{id}.json"))
-            .map_err(|_| RemoteError::Configuration)?;
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(IF_NONE_MATCH, HeaderValue::from_static("*"));
+        headers.insert("content-type", HeaderValue::from_static("application/json"));
         let status = self
-            .client
-            .put(url)
-            .header(AUTHORIZATION, self.authorization.clone())
-            .header(IF_NONE_MATCH, "*")
-            .header("content-type", "application/json")
-            .body(bytes)
+            .request(reqwest::Method::PUT, id, headers, bytes)?
             .send()
             .await
             .map_err(|_| RemoteError::Transport)?
@@ -212,7 +291,7 @@ impl Repository {
         tx.commit().await?;
         Ok(
             json!({"archiveId":id,"target":target,"fileDigest":digest,"bytes":bytes.len(),"verifiedAt":verified_at,
-            "replayed":!inserted,"storageMeaning":"http-readback","worm":false}),
+            "replayed":!inserted,"storageMeaning":"http-readback","provider":vault.provider(),"worm":false}),
         )
     }
     pub async fn remote_prune_record(
@@ -235,6 +314,7 @@ impl Repository {
         id: Uuid,
         vault: &RemoteVault,
         state: &str,
+        evidence: Option<Value>,
     ) -> Result<Value, RemoteError> {
         let mut tx = self.pool.begin().await?;
         sqlx::query("UPDATE audit_remote_prunes SET state=state WHERE archive_id=? AND target=?")
@@ -250,9 +330,16 @@ impl Repository {
         .fetch_one(&mut *tx)
         .await?;
         let mut record: Value = serde_json::from_str(&payload)?;
-        if record["state"] == "CONFIRMED_ABSENT" || record["state"] == "REJECTED" {
+        if matches!(
+            record["state"].as_str(),
+            Some("CONFIRMED_ABSENT" | "CONFIRMED_RETAINED" | "REJECTED")
+        ) {
             tx.commit().await?;
             return Ok(record);
+        }
+        if let Some(evidence) = evidence {
+            record["confirmationMeaning"] = evidence["confirmationMeaning"].clone();
+            record["providerResolution"] = evidence;
         }
         record["state"] = json!(state);
         record["localSnapshotProtected"] = json!(state == "UNKNOWN" || state == "PREPARED");
@@ -280,14 +367,27 @@ impl Repository {
     ) -> Result<Value, RemoteError> {
         let _lock = self.remote_operation_lock(id)?;
         let record = self.remote_prune_record(id, vault).await?;
-        if record["state"] == "CONFIRMED_ABSENT" || record["state"] == "REJECTED" {
+        if matches!(
+            record["state"].as_str(),
+            Some("CONFIRMED_ABSENT" | "CONFIRMED_RETAINED" | "REJECTED")
+        ) {
             return Ok(record);
+        }
+        if vault.s3.is_some() {
+            let evidence = self.s3_prune_evidence(id, vault).await?;
+            let state = evidence["resolution"]
+                .as_str()
+                .ok_or(RemoteError::Response)?
+                .to_owned();
+            return self
+                .finish_remote_prune(id, vault, &state, Some(evidence))
+                .await;
         }
         let state = match vault.read(id).await {
             Ok(None) => "CONFIRMED_ABSENT",
             _ => "UNKNOWN",
         };
-        self.finish_remote_prune(id, vault, state).await
+        self.finish_remote_prune(id, vault, state, None).await
     }
 
     pub async fn prune_audit_remote(
@@ -311,7 +411,8 @@ impl Repository {
             Err(RemoteError::Storage(StorageError::NotFound)) => {}
             Err(error) => return Err(error),
         }
-        let (remote, etag) = vault.read_version(id).await?.ok_or(RemoteError::Content)?;
+        let (remote, etag, source_version) =
+            vault.read_version(id).await?.ok_or(RemoteError::Content)?;
         let etag = etag
             .filter(|e| strong_etag(e))
             .ok_or(RemoteError::Response)?;
@@ -340,8 +441,8 @@ impl Repository {
         if eligible == 0 {
             return Err(RemoteError::Conflict);
         }
-        let record = json!({"profile":"org.jrip.audit-remote-prune-v1","archiveId":id,"target":vault.base.as_str(),
-            "state":"PREPARED","fileDigest":digest,"bytes":bytes.len(),"etag":etag,"before":before,"preparedAt":now(),
+        let record = json!({"profile":if vault.s3.is_some() {"org.jrip.audit-remote-prune-v2"} else {"org.jrip.audit-remote-prune-v1"},"provider":vault.provider(),"archiveId":id,"target":vault.base.as_str(),
+            "state":"PREPARED","sourceVersionId":source_version,"fileDigest":digest,"bytes":bytes.len(),"etag":etag,"before":before,"preparedAt":now(),
             "confirmationMeaning":"observed-absent","sourceAuditRecordsRetained":true,"localSnapshotProtected":true});
         sqlx::query("INSERT INTO audit_remote_prunes(archive_id,target,state,payload) VALUES(?,?,'PREPARED',?)")
             .bind(id.to_string()).bind(vault.base.as_str()).bind(serde_json::to_string(&record)?).execute(&mut *tx).await?;
@@ -349,17 +450,29 @@ impl Repository {
             .bind(Uuid::new_v4().to_string()).bind("local-audit-remote").bind("audit-remote-prune-prepare")
             .bind(id.to_string()).bind(now()).bind(now()).execute(&mut *tx).await?;
         tx.commit().await?;
-        let url = vault
-            .base
-            .join(&format!("{id}.json"))
-            .map_err(|_| RemoteError::Configuration)?;
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            "if-match",
+            HeaderValue::from_str(&etag).map_err(|_| RemoteError::Response)?,
+        );
         let response = vault
-            .client
-            .delete(url)
-            .header(AUTHORIZATION, vault.authorization.clone())
-            .header("if-match", &etag)
+            .request(reqwest::Method::DELETE, id, headers, Vec::new())?
             .send()
             .await;
+        if vault.s3.is_some()
+            && response
+                .as_ref()
+                .is_ok_and(|r| matches!(r.status().as_u16(), 200 | 204))
+        {
+            let evidence = self.s3_prune_evidence(id, vault).await?;
+            let state = evidence["resolution"]
+                .as_str()
+                .ok_or(RemoteError::Response)?
+                .to_owned();
+            return self
+                .finish_remote_prune(id, vault, &state, Some(evidence))
+                .await;
+        }
         let state = match response {
             Ok(response) if response.status().as_u16() == 412 => "REJECTED",
             Ok(response) if matches!(response.status().as_u16(), 200 | 204) => {
@@ -370,7 +483,7 @@ impl Repository {
             }
             _ => "UNKNOWN",
         };
-        self.finish_remote_prune(id, vault, state).await
+        self.finish_remote_prune(id, vault, state, None).await
     }
 
     /// Assess remote-copy retention without deleting objects or local evidence.
@@ -440,7 +553,7 @@ impl Repository {
         Ok(
             json!({"dryRun":true,"remoteDeletionImplemented":true,"target":vault.base.as_str(),"before":before,
             "retentionAgeBasis":"first-remote-acknowledgement","candidates":candidates,"nextAfter":cursor,"hasMore":more,
-            "storageMeaning":"http-readback","worm":false}),
+            "storageMeaning":"http-readback","provider":vault.provider(),"worm":false}),
         )
     }
 
@@ -484,7 +597,7 @@ impl Repository {
         });
         Ok(
             json!({"archiveId":id,"target":vault.base.as_str(),"acknowledged":recorded.is_some(),"verifiedAt":recorded,
-            "contentMatches":matches,"storageMeaning":"http-readback","worm":false}),
+            "contentMatches":matches,"storageMeaning":"http-readback","provider":vault.provider(),"worm":false}),
         )
     }
 }
@@ -495,30 +608,121 @@ mod tests {
     use axum::{
         Router,
         body::Bytes,
-        extract::State,
+        extract::{OriginalUri, State},
         http::{HeaderMap, StatusCode},
         response::IntoResponse,
         routing::get,
     };
     use std::sync::{
         Arc, Mutex,
-        atomic::{AtomicU8, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
     };
     #[derive(Default)]
     struct Fake {
+        s3: AtomicBool,
         object: Mutex<Option<Vec<u8>>>,
         mode: AtomicU8,
         leaks: AtomicUsize,
         deletes: AtomicUsize,
     }
+    fn authorized(
+        fake: &Fake,
+        method: &str,
+        uri: &axum::http::Uri,
+        headers: &HeaderMap,
+        body: &[u8],
+    ) -> bool {
+        if !fake.s3.load(Ordering::SeqCst) {
+            return headers
+                .get("authorization")
+                .is_some_and(|v| v == "Bearer test-secret");
+        }
+        let verify = || -> Option<bool> {
+            let auth = headers.get("authorization")?.to_str().ok()?;
+            let signed = auth.split("SignedHeaders=").nth(1)?.split(',').next()?;
+            let names = signed.split(';').collect::<Vec<_>>();
+            for name in [
+                "host",
+                "x-amz-date",
+                "x-amz-content-sha256",
+                "x-amz-security-token",
+            ] {
+                if !names.contains(&name) {
+                    return Some(false);
+                }
+            }
+            let condition = match method {
+                "PUT" => "if-none-match",
+                "DELETE" => "if-match",
+                _ => "cache-control",
+            };
+            if !names.contains(&condition) {
+                return Some(false);
+            }
+            if headers.get("x-amz-content-sha256")?.to_str().ok()?
+                != format!("{:x}", Sha256::digest(body))
+            {
+                return Some(false);
+            }
+            if headers.get("x-amz-security-token")?.to_str().ok()? != "test-session-token" {
+                return Some(false);
+            }
+            let stamp = headers.get("x-amz-date")?.to_str().ok()?;
+            if stamp.len() != 16 || !stamp.is_ascii() || &stamp[8..9] != "T" || &stamp[15..] != "Z"
+            {
+                return Some(false);
+            }
+            let date = time::Date::from_calendar_date(
+                stamp[..4].parse().ok()?,
+                time::Month::try_from(stamp[4..6].parse::<u8>().ok()?).ok()?,
+                stamp[6..8].parse().ok()?,
+            )
+            .ok()?;
+            let timestamp = date
+                .with_hms(
+                    stamp[9..11].parse().ok()?,
+                    stamp[11..13].parse().ok()?,
+                    stamp[13..15].parse().ok()?,
+                )
+                .ok()?
+                .assume_utc()
+                .unix_timestamp();
+            let mut selected = HeaderMap::new();
+            for name in names {
+                selected.insert(
+                    reqwest::header::HeaderName::from_bytes(name.as_bytes()).ok()?,
+                    headers.get(name)?.clone(),
+                );
+            }
+            let url = Url::parse(&format!(
+                "http://{}{uri}",
+                headers.get("host")?.to_str().ok()?
+            ))
+            .ok()?;
+            let credentials = crate::s3::Credentials::new(
+                "us-east-1",
+                "TESTACCESS",
+                "test-secret-not-a-real-credential",
+                Some("test-session-token"),
+            )
+            .ok()?;
+            Some(
+                credentials
+                    .sign(method, &url, selected, body, timestamp)
+                    .ok()?
+                    .get("authorization")?
+                    == auth,
+            )
+        };
+        verify() == Some(true)
+    }
     async fn put(
         State(fake): State<Arc<Fake>>,
+        OriginalUri(uri): OriginalUri,
         headers: HeaderMap,
         body: Bytes,
     ) -> axum::response::Response {
-        if headers
-            .get("authorization")
-            .is_none_or(|h| h != "Bearer test-secret")
+        if !authorized(&fake, "PUT", &uri, &headers, &body)
             || headers.get("if-none-match").is_none_or(|h| h != "*")
         {
             return StatusCode::UNAUTHORIZED.into_response();
@@ -533,10 +737,12 @@ mod tests {
         *object = Some(body.to_vec());
         StatusCode::CREATED.into_response()
     }
-    async fn delete(State(fake): State<Arc<Fake>>, headers: HeaderMap) -> StatusCode {
-        if headers
-            .get("authorization")
-            .is_none_or(|h| h != "Bearer test-secret")
+    async fn delete(
+        State(fake): State<Arc<Fake>>,
+        OriginalUri(uri): OriginalUri,
+        headers: HeaderMap,
+    ) -> StatusCode {
+        if !authorized(&fake, "DELETE", &uri, &headers, b"")
             || headers.get("if-match").is_none_or(|h| h != "\"v1\"")
         {
             return StatusCode::PRECONDITION_FAILED;
@@ -552,11 +758,12 @@ mod tests {
             StatusCode::NO_CONTENT
         }
     }
-    async fn read(State(fake): State<Arc<Fake>>, headers: HeaderMap) -> axum::response::Response {
-        if headers
-            .get("authorization")
-            .is_none_or(|h| h != "Bearer test-secret")
-        {
+    async fn read(
+        State(fake): State<Arc<Fake>>,
+        OriginalUri(uri): OriginalUri,
+        headers: HeaderMap,
+    ) -> axum::response::Response {
+        if !authorized(&fake, "GET", &uri, &headers, b"") {
             return StatusCode::UNAUTHORIZED.into_response();
         }
         match fake.mode.load(Ordering::SeqCst) {
@@ -583,12 +790,40 @@ mod tests {
         ] {
             assert!(RemoteVault::new(endpoint, "token").is_err());
         }
+        for endpoint in [
+            "http://example.test/bucket/",
+            "https://example.test/bucket/a%20b/",
+            "https://example.test/bucket/a/../",
+            "https://example.test/bucket/?query=secret",
+        ] {
+            assert!(
+                RemoteVault::s3(endpoint, "us-east-1", "TESTACCESS", "test-secret", None).is_err()
+            );
+        }
+        assert!(
+            RemoteVault::s3(
+                "https://example.test/bucket/prefix/",
+                "us-east-1",
+                "TESTACCESS",
+                "test-secret",
+                None
+            )
+            .is_ok()
+        );
         assert!(RemoteVault::new("https://example.test/vault/", "").is_err());
         assert!(RemoteVault::new("https://example.test/vault/", "bad\nvalue").is_err());
     }
     #[tokio::test]
     async fn conditional_object_store_readback_replay_and_failures_are_audited_conservatively() {
+        exercise_object_store(false).await;
+    }
+    #[tokio::test]
+    async fn s3_signed_store_readback_prune_and_unknown_recovery_preserve_existing_guards() {
+        exercise_object_store(true).await;
+    }
+    async fn exercise_object_store(s3: bool) {
         let fake = Arc::new(Fake::default());
+        fake.s3.store(s3, Ordering::SeqCst);
         let leak = fake.clone();
         let router = Router::new()
             .route("/vault/{id}", get(read).put(put).delete(delete))
@@ -617,6 +852,15 @@ mod tests {
                 .build()
                 .unwrap(),
             authorization: HeaderValue::from_static("Bearer test-secret"),
+            s3: s3.then(|| {
+                crate::s3::Credentials::new(
+                    "us-east-1",
+                    "TESTACCESS",
+                    "test-secret-not-a-real-credential",
+                    Some("test-session-token"),
+                )
+                .unwrap()
+            }),
         };
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("db");
@@ -654,6 +898,17 @@ mod tests {
             .unwrap();
         let first = repo.store_audit_remote(id, &vault).await.unwrap();
         assert_eq!(first["replayed"], false);
+        assert_eq!(
+            first["provider"],
+            if s3 { "s3-sigv4" } else { "conditional-http" }
+        );
+        for secret in [
+            "test-secret-not-a-real-credential",
+            "test-session-token",
+            "Bearer test-secret",
+        ] {
+            assert!(!first.to_string().contains(secret));
+        }
         let reopened = Repository::open_with_receipt_signer(&db, None)
             .await
             .unwrap();
