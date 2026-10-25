@@ -2,6 +2,7 @@
 use super::*;
 use rip_color::{Policy, registry::Registry};
 use serde_json::{Value, json};
+pub(crate) mod policies;
 pub mod sandbox;
 pub(crate) async fn capabilities(
     State(app): State<App>,
@@ -9,7 +10,7 @@ pub(crate) async fn capabilities(
 ) -> Result<Json<Value>, ApiError> {
     use sha2::{Digest, Sha256};
     authorize(&app, &headers, "jobs:read")?;
-    let model = json!({"schemaVersion":1,"id":"org.jrip.color.icc-transform","inputMime":["image/tiff"],"outputMime":["image/tiff"],"bitDepths":[8],"colorSpaces":["rgb","cmyk","gray"],"intents":["perceptual","relative_colorimetric","absolute_colorimetric","saturation"],"blackPointCompensation":true,"blackPreservation":["none","k_only","k_plane"],"constraints":{"blackPreservation":"CMYK to CMYK; perceptual, relative_colorimetric or saturation","deviceLink":"explicit input hash, no output hash, header intent must match, no additional BPC or black preservation","tac":"CMYK output only; 100-400 percent"},"limits":{"profileBytes":4194304,"pageSampleBytes":67108864,"pages":100,"artifactBytes":1073741824,"dpiMin":72,"dpiMax":2400},"physicalCompletion":false,"workerAvailability":"not-probed","labels":{"en":"Explicit ICC color processing","ja":"明示的ICC色処理","zh-CN":"显式ICC颜色处理"}});
+    let model = json!({"schemaVersion":1,"id":"org.jrip.color.icc-transform","inputMime":["image/tiff"],"outputMime":["image/tiff"],"bitDepths":[8],"colorSpaces":["rgb","cmyk","gray"],"intents":["perceptual","relative_colorimetric","absolute_colorimetric","saturation"],"blackPointCompensation":true,"blackPreservation":["none","k_only","k_plane"],"constraints":{"blackPreservation":"CMYK to CMYK; perceptual, relative_colorimetric or saturation","deviceLink":"explicit input hash, no output hash, header intent must match, no additional BPC or black preservation","tac":"CMYK output only; 100-400 percent"},"limits":{"profileBytes":4194304,"pageSampleBytes":67108864,"pages":100,"artifactBytes":1073741824,"dpiMin":72,"dpiMax":2400},"policyRegistry":{"profile":"org.jrip.color-policy-v1","digestProfile":"org.jrip.jcs-safe-v1","endpoint":"/api/v1/color/policies","submitTemplate":"/api/v1/jobs/{id}/color-attempts/from-policy","immutable":true},"physicalCompletion":false,"workerAvailability":"not-probed","labels":{"en":"Explicit ICC color processing","ja":"明示的ICC色処理","zh-CN":"显式ICC颜色处理"}});
     let digest = format!(
         "{:x}",
         Sha256::digest(serde_json::to_vec(&model).map_err(internal)?)
@@ -252,7 +253,10 @@ async fn process(app: &App, id: Uuid, attempt: &mut Value) -> Result<Value, Proc
     for (report, artifact) in reports.iter_mut().zip(&output_artifacts) {
         report["outputArtifact"] = serde_json::to_value(artifact)?;
     }
-    let result = json!({"schemaVersion":1,"kind":"ColorManagedArtifact","sourceJob":source,"attemptId":id,"policySha256":policy_digest,"inputProfileSha256":input_digest,"outputProfileSha256":ticket["outputProfileSha256"],"dpi":dpi,"colorSpace":policy.output_color,"pageCount":output_artifacts.len(),"artifacts":output_artifacts,"reports":reports});
+    let mut result = json!({"schemaVersion":1,"kind":"ColorManagedArtifact","sourceJob":source,"attemptId":id,"policySha256":policy_digest,"inputProfileSha256":input_digest,"outputProfileSha256":ticket["outputProfileSha256"],"dpi":dpi,"colorSpace":policy.output_color,"pageCount":output_artifacts.len(),"artifacts":output_artifacts,"reports":reports});
+    if let Some(reference) = ticket.get("policyReference") {
+        result["policyReference"] = reference.clone();
+    }
     std::fs::write(
         staging.path().join("color-report.json"),
         serde_json::to_vec_pretty(&result)?,
@@ -310,6 +314,39 @@ pub(crate) async fn describe(
         .map_err(|_| ApiError(StatusCode::NOT_FOUND, "not_found"))?;
     Ok(Json(serde_json::to_value(record).map_err(internal)?))
 }
+pub(crate) fn validate_settings(
+    app: &App,
+    policy: &Policy,
+    input_digest: &str,
+    output_digest: Option<&str>,
+) -> Result<(), ApiError> {
+    rip_color::validate_policy(policy).map_err(|_| bad("unsupported_color_policy"))?;
+    let input = registry(app)?
+        .describe(input_digest)
+        .map_err(|_| bad("invalid_icc_profile"))?;
+    let expected = match policy.input_color {
+        rip_color::Color::Rgb => "RGB",
+        rip_color::Color::Cmyk => "CMYK",
+        rip_color::Color::Gray => "GRAY",
+    };
+    if input.color_space != expected || input.device_link != output_digest.is_none() {
+        return Err(bad("unsupported_color_policy"));
+    }
+    if let Some(digest) = output_digest {
+        let output = registry(app)?
+            .describe(digest)
+            .map_err(|_| bad("invalid_icc_profile"))?;
+        let expected = match policy.output_color {
+            rip_color::Color::Rgb => "RGB",
+            rip_color::Color::Cmyk => "CMYK",
+            rip_color::Color::Gray => "GRAY",
+        };
+        if output.device_link || output.color_space != expected {
+            return Err(bad("unsupported_color_policy"));
+        }
+    }
+    Ok(())
+}
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Request {
@@ -325,33 +362,23 @@ pub(crate) async fn create(
     Path(id): Path<Uuid>,
     Json(req): Json<Request>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
+    create_inner(app, headers, id, req, None).await
+}
+pub(crate) async fn create_inner(
+    app: App,
+    headers: HeaderMap,
+    id: Uuid,
+    req: Request,
+    policy_reference: Option<String>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
     authorize(&app, &headers, "jobs:submit")?;
     authorize(&app, &headers, "artifacts:read")?;
-    rip_color::validate_policy(&req.policy).map_err(|_| bad("unsupported_color_policy"))?;
-    let input = registry(&app)?
-        .describe(&req.input_profile_sha256)
-        .map_err(|_| bad("invalid_icc_profile"))?;
-    let expected = match req.policy.input_color {
-        rip_color::Color::Rgb => "RGB",
-        rip_color::Color::Cmyk => "CMYK",
-        rip_color::Color::Gray => "GRAY",
-    };
-    if input.color_space != expected || input.device_link != req.output_profile_sha256.is_none() {
-        return Err(bad("unsupported_color_policy"));
-    }
-    if let Some(digest) = &req.output_profile_sha256 {
-        let output = registry(&app)?
-            .describe(digest)
-            .map_err(|_| bad("invalid_icc_profile"))?;
-        let expected = match req.policy.output_color {
-            rip_color::Color::Rgb => "RGB",
-            rip_color::Color::Cmyk => "CMYK",
-            rip_color::Color::Gray => "GRAY",
-        };
-        if output.device_link || output.color_space != expected {
-            return Err(bad("unsupported_color_policy"));
-        }
-    }
+    validate_settings(
+        &app,
+        &req.policy,
+        &req.input_profile_sha256,
+        req.output_profile_sha256.as_deref(),
+    )?;
     let job = app.repo.get(id).await?;
     if job.state != JobState::Completed || job.revision != req.expected_revision {
         return Err(ApiError(StatusCode::CONFLICT, "revision_conflict"));
@@ -376,7 +403,10 @@ pub(crate) async fn create(
     {
         return Err(bad("invalid_artifacts"));
     }
-    let ticket = json!({"sourceJob":id,"sourceRevision":req.expected_revision,"inputProfileSha256":req.input_profile_sha256,"outputProfileSha256":req.output_profile_sha256,"policy":req.policy,"dpi":job.manifest.dpi,"sourceArtifacts":pages});
+    let mut ticket = json!({"sourceJob":id,"sourceRevision":req.expected_revision,"inputProfileSha256":req.input_profile_sha256,"outputProfileSha256":req.output_profile_sha256,"policy":req.policy,"dpi":job.manifest.dpi,"sourceArtifacts":pages});
+    if let Some(reference) = policy_reference {
+        ticket["policyReference"] = json!(reference);
+    }
     Ok((
         StatusCode::ACCEPTED,
         Json(

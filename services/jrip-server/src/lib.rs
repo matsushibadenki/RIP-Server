@@ -106,6 +106,17 @@ pub fn router(app: App) -> Router {
         )
         .route("/api/v1/color/capabilities", get(color::capabilities))
         .route(
+            "/api/v1/color/policies",
+            get(color::policies::list)
+                .post(color::policies::create)
+                .layer(DefaultBodyLimit::max(16384)),
+        )
+        .route("/api/v1/color/policies/{digest}", get(color::policies::get))
+        .route(
+            "/api/v1/jobs/{id}/color-attempts/from-policy",
+            post(color::policies::submit).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
             "/api/v1/color/profiles",
             post(color::register).layer(DefaultBodyLimit::max(4 * 1024 * 1024)),
         )
@@ -252,6 +263,16 @@ impl IntoResponse for ApiError {
 }
 fn messages(code: &str) -> serde_json::Value {
     let (en, ja, zh) = match code {
+        "invalid_color_policy_definition" => (
+            "Provide version 1, three nonempty labels and a reason",
+            "version 1・3言語の名称・変更理由を指定してください",
+            "请提供version 1、三种语言名称及变更原因",
+        ),
+        "invalid_color_policy_page" => (
+            "Use a policy digest cursor and a limit from 1 to 100",
+            "policy digestのcursorと1〜100件の上限を指定してください",
+            "请使用policy digest游标及1至100的数量限制",
+        ),
         "invalid_icc_profile" => (
             "Invalid or unavailable ICC profile",
             "ICCが不正または利用できません",

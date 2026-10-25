@@ -249,3 +249,148 @@ async fn isolated_worker_publishes_two_pages_reports_and_preserves_original() {
     );
     assert!(!output.parent().unwrap().join(failed.to_string()).exists());
 }
+
+#[tokio::test]
+async fn immutable_color_policies_are_scoped_durable_and_used_by_attempts() {
+    let (dir, mut app, job, icc) = seed().await;
+    let definition = json!({"schemaVersion":1,"labels":{"en":"Proof","ja":"校正","zh-CN":"校样"},"inputProfileSha256":icc,"outputProfileSha256":icc,"policy":ticket(&job,Uuid::new_v4(),&icc)["policy"]});
+    let save = json!({"definition":definition,"reason":"approved proof settings"});
+    let (status, stored) = call(&app, "/api/v1/color/policies", save.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "{stored}");
+    let digest = stored["digest"].as_str().unwrap();
+    assert_eq!(
+        format!("sha256:{digest}"),
+        rip_digest::digest(&definition).unwrap()
+    );
+    let (_, replayed) = call(
+        &app,
+        "/api/v1/color/policies",
+        json!({"definition":definition,"reason":"retry"}),
+    )
+    .await;
+    assert_eq!(stored, replayed);
+    let mut revised = definition.clone();
+    revised["policy"]["blackPointCompensation"] = json!(true);
+    let (_, new_version) = call(
+        &app,
+        "/api/v1/color/policies",
+        json!({"definition":revised,"reason":"new proof variant"}),
+    )
+    .await;
+    assert_ne!(new_version["digest"], stored["digest"]);
+    let audits = app.repo.audit_records(0, 100).await.unwrap();
+    assert_eq!(
+        audits["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r["operation"] == "color-policy-create")
+            .count(),
+        2
+    );
+    let mut bad = definition.clone();
+    bad["inputProfileSha256"] = json!("f".repeat(64));
+    assert_eq!(
+        call(
+            &app,
+            "/api/v1/color/policies",
+            json!({"definition":bad,"reason":"invalid"})
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    let mut bad = save.clone();
+    bad["reason"] = json!("");
+    assert_eq!(
+        call(&app, "/api/v1/color/policies", bad).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    app.credentials = vec![
+        jrip_server::Credential {
+            token: "reader".into(),
+            identity: "reader".into(),
+            scopes: vec!["jobs:read".into()],
+        },
+        jrip_server::Credential {
+            token: "admin-token".into(),
+            identity: "operator".into(),
+            scopes: vec!["jobs:submit".into(), "artifacts:read".into()],
+        },
+    ];
+    assert_eq!(
+        call(&app, "/api/v1/color/policies", save).await.0,
+        StatusCode::FORBIDDEN
+    );
+    let get = |path: &str| {
+        Request::get(path)
+            .header("authorization", "Bearer reader")
+            .body(Body::empty())
+            .unwrap()
+    };
+    let response = jrip_server::router(app.clone())
+        .oneshot(get("/api/v1/color/policies?limit=1"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let page: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(page["policies"].as_array().unwrap().len(), 1);
+    let cursor = page["nextAfter"].as_str().unwrap();
+    let response = jrip_server::router(app.clone())
+        .oneshot(get(&format!(
+            "/api/v1/color/policies?limit=1&after={cursor}"
+        )))
+        .await
+        .unwrap();
+    let page2: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(page2["policies"].as_array().unwrap().len(), 1);
+    assert!(page2["nextAfter"].is_null());
+    assert_ne!(
+        page["policies"][0]["digest"],
+        page2["policies"][0]["digest"]
+    );
+    assert_eq!(
+        jrip_server::router(app.clone())
+            .oneshot(get("/api/v1/color/policies?limit=101"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let mut reopened = jrip_server::open(dir.path().into(), "admin-token".into())
+        .await
+        .unwrap();
+    reopened.credentials = app.credentials.clone();
+    assert_eq!(reopened.repo.color_policy(digest).await.unwrap(), stored);
+    let request_id = Uuid::new_v4();
+    let req = json!({"requestId":request_id,"expectedRevision":job.revision,"policyDigest":digest});
+    let path = format!("/api/v1/jobs/{}/color-attempts/from-policy", job.id);
+    let (status, attempt) = call(&reopened, &path, req.clone()).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{attempt}");
+    assert_eq!(attempt["ticket"]["policyReference"], digest);
+    assert_eq!(attempt["ticket"]["policy"], definition["policy"]);
+    assert_eq!(call(&reopened, &path, req).await.1, attempt);
+    let changed = json!({"requestId":request_id,"expectedRevision":job.revision,"policyDigest":new_version["digest"]});
+    assert_eq!(
+        call(&reopened, &path, changed).await.0,
+        StatusCode::CONFLICT
+    );
+    // A policy cannot be combined with inline overrides.
+    let mixed = json!({"requestId":Uuid::new_v4(),"expectedRevision":job.revision,"policyDigest":digest,"policy":definition["policy"]});
+    assert_eq!(
+        jrip_server::router(reopened)
+            .oneshot(
+                Request::post(&path)
+                    .header("authorization", "Bearer admin-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(mixed.to_string()))
+                    .unwrap()
+            )
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+}

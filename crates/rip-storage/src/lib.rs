@@ -6,6 +6,7 @@ pub mod audit_vault;
 pub mod budget;
 pub mod budget_client;
 pub mod color;
+pub mod color_policy;
 pub mod delivery;
 pub mod delivery_receipt;
 pub mod inspection;
@@ -78,6 +79,7 @@ impl Repository {
         sqlx::query("CREATE INDEX IF NOT EXISTS snapshot_held ON snapshot_reservations(state,id)")
             .execute(&pool)
             .await?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS color_policies(digest TEXT PRIMARY KEY,payload TEXT NOT NULL)").execute(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS source_validations(job_id TEXT PRIMARY KEY,payload TEXT NOT NULL)").execute(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, payload TEXT NOT NULL, priority INTEGER NOT NULL, created_at INTEGER NOT NULL, revision INTEGER NOT NULL)").execute(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS job_events (sequence INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL, state TEXT NOT NULL, created_at INTEGER NOT NULL)").execute(&pool).await?;

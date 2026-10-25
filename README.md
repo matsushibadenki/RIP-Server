@@ -294,3 +294,7 @@ PrintIntent事前確認・原稿一括受付・RIP待機・ICC処理・承認・
 - [S3 audit vault](docs/S3-AUDIT-VAULT.md): SigV4 provider configuration / S3監査保管先の設定 / S3审计归档库配置。
 
 - [Provider recovery and KMS](docs/PROVIDER-RECOVERY-KMS.md): S3版指定復旧とKMS監査署名 / S3 version recovery and KMS audit signing / S3版本恢复及KMS审计签名。
+
+- [ACX lifecycle](docs/ACX-LIFECYCLE.md): discovery and durable acceptance / 発見可能な経路と永続受付 / 可发现流程及持久接收。
+
+- [Persistent Color Policy](docs/COLOR-POLICIES.md): versioned ICC settings / ICC設定の永続版管理 / ICC设置持久版本管理。

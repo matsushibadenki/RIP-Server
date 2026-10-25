@@ -122,7 +122,9 @@
 - 🟢 [Done] 主体別の認可証跡とJRIP/ACX実験的print profileの共有JCS digestに対応。設定preflightの作成だけでは実行を許可しない。 [AGENT-CONTROL.md](AGENT-CONTROL.md)。 / Owner evidence and shared experimental JCS profile / 身份证据及共享实验性JCS profile。
 
 - 🟢 [Done] `POST /api/v1/print/resolve` でACX PrintIntentをTIFF出力用JobTicketへ能力照合する。必須条件の競合、推奨値の調整、実機出力・ICC・用紙・両面・期限など未対応設定を明示する。原稿取得・検証、認可、コミット、ジョブ投入は後続工程。
-- 🟠 [Next] ACX lifecycle全体の適合を検証する。resolverは設定照合のみで、原稿構造検証や主体別認可を含むACX lifecycleの完了とは扱わない。
+- 🟢 [Done] ACX namespaced lifecycle discoveryと、公開経路を使うpreflight→主体／digest／原稿照合→同時commit重複排除→再起動後Receiptの統合検証。[ACX-LIFECYCLE.md](ACX-LIFECYCLE.md)。 / Discoverable settings lifecycle and durable acceptance integration / 可发现的设置生命周期及持久接收集成。
+- 🟢 [Done] 固定ACX Manifest／Receipt schemaとPython jsonschema・Node独立検証器で、受付／成功／失敗／取消Receiptの関連・digest・公開鍵署名を検証。再署名した契約不一致も拒否しCIへ組み込み。成功artifactは模擬metadataで、実描画・実機認証とは区別。[検証範囲](../tests/acx/README.md)。 / Independent schema and signed lifecycle evidence checks / 独立schema及已签名生命周期证据验证。
+- ⭕️ [Pending] Docker実interpreterを通す統合lifecycle受入試験（現在Docker停止）。 / Real interpreter lifecycle acceptance / 实际interpreter生命周期验收。
 
 ```text
 Agent
@@ -185,7 +187,9 @@ Printer
 - 🟢 [Done] `rip-color` 独立ライブラリ／単ページTIFF CLI：明示ICC・4 intents・BPC・K-only／K-plane設定・DeviceLink・TAC・hash付きColorReport。sRGB一致、ICC／寸法保持、DeviceLink TACと純K保持を検証。詳細は[COLOR-MANAGEMENT.md](COLOR-MANAGEMENT.md)。
 - 🟢 [Done] SHA-256で固定するICC profile registryと登録・照会CLI。重複登録は同じhashを返し、破損・シンボリックリンクを拒否する。 / Immutable ICC registry and CLI / 不可变ICC注册库及CLI。
 - 🟢 [Done] ICC登録API（settings:write）、永続Color attempt、隔離Docker Worker、ページ進捗、hash付きカラー成果物・レポート、profileを照合するDelivery接続、MCP色処理tool。 / Isolated color pipeline and scoped control / 隔离颜色流程及权限控制。
-- 🟠 [Next] 永続Color Policy/preset、入力profile判定、gamut警告、共通artifact保持期限・ACX digestへの統合。
+- 🟢 [Done] 永続Color Policy/presetのJCS内容digest版管理、ICC hash固定、3言語名称、登録scope・理由・原子監査、cursor一覧・再起動復旧、保存版からの変換投入とticket／結果への参照。[COLOR-POLICIES.md](COLOR-POLICIES.md)。 / Persistent immutable color policies and reference-based submission / 持久不可变颜色策略及引用投入。
+- ⭕️ [Pending] 保存Color Policy参照を使うDocker実変換試験（現在Docker停止）。 / Saved-policy Docker conversion / 保存策略的Docker实际转换。
+- 🟠 [Next] 入力profile判定、gamut警告、共通artifact保持期限への統合。 / Input profile inference, gamut and retention / 输入profile推断、色域及保留期限。
 - ⭕️ [Pending] 実機ICCによるK-only／K-planeと色再現品質の受入確認。
 - 🔴 [Later] オーバープリント、分版プレビュー、gamut解析。
 - 🔴 [Later] CMYK16、タイルRIP、メモリ予算、ハーフトーン、DeviceN、特色、Trapping。
