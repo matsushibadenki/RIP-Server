@@ -8,8 +8,17 @@ import subprocess
 import sys
 import tempfile
 from jsonschema import Draft202012Validator, FormatChecker
+from rfc3339_validator import validate_rfc3339
 
 ROOT = Path(__file__).resolve().parents[1]
+FORMAT_CHECKER = FormatChecker()
+
+# jsonschema silently ignores optional formats when their dependencies are absent.
+# Import and register our required date-time validator explicitly instead.
+@FORMAT_CHECKER.checks("date-time")
+def required_date_time(value):
+    return not isinstance(value, str) or validate_rfc3339(value.upper())
+
 
 def check(bundle, public):
     manifest, pf, accepted, result = (bundle[k] for k in ("manifest", "preflight", "accepted", "result"))
@@ -17,7 +26,7 @@ def check(bundle, public):
         schema = json.loads((ROOT / "tests/acx" / f"acx-{name}.schema.json").read_text())
         Draft202012Validator.check_schema(schema)
         for record in records:
-            Draft202012Validator(schema, format_checker=FormatChecker()).validate(record)
+            Draft202012Validator(schema, format_checker=FORMAT_CHECKER).validate(record)
     # All canonicalization and Ed25519 verification are performed by Node, independent of Rust.
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "bundle.json"

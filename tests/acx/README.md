@@ -38,3 +38,21 @@ Pythonでschemaと日時、Nodeでprofile間の関連・digest・信頼済み公
 Python检查schema及日期，Node检查记录关联、digest及可信公钥签名。
 负例用测试密钥重新签名，验证有效签名不能掩盖契约不匹配。
 成功artifact为模拟元数据，不证明ACX认证、渲染质量或实体打印。
+
+Date-time validation requires the explicitly pinned `rfc3339-validator` dependency.
+`jsonschema` alone may silently omit its optional `date-time` checker. The lifecycle
+checker imports and registers the required validator explicitly, so missing support
+fails instead of accepting malformed `issuedAt`. CI runs this regression suite before
+the signed lifecycle fixtures:
+
+```sh
+python3 -m unittest discover -s tests/acx -p 'test_*.py' -v
+```
+
+日本語：`jsonschema`単体では任意依存の日時検証が省略される場合があります。
+`rfc3339-validator`を必須依存として固定し、明示的に登録します。欠落時には失敗し、
+不正な`issuedAt`を通しません。正常日時、不正日時、依存欠落をCIで回帰検証します。
+
+简体中文：仅安装`jsonschema`时可能静默省略可选的日期验证。
+固定必需依赖`rfc3339-validator`并显式注册；缺失时直接失败，不接受错误的`issuedAt`。
+CI回归测试覆盖有效日期、无效日期及依赖缺失。

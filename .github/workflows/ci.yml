@@ -24,6 +24,7 @@ jobs:
           python3 -m venv /tmp/jrip-acx-validator
           /tmp/jrip-acx-validator/bin/pip install -r tests/acx/requirements.txt
           echo "/tmp/jrip-acx-validator/bin" >> "$GITHUB_PATH"
+          /tmp/jrip-acx-validator/bin/python -m unittest discover -s tests/acx -p 'test_*.py' -v
           node --version
       - name: Test source ICC declaration analyzer
         run: |
