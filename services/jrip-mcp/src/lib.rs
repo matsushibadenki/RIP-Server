@@ -3,6 +3,7 @@ use axum::{
     body::{Body, to_bytes},
     http::Request,
 };
+use base64::Engine as _;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
@@ -10,6 +11,7 @@ use tower::ServiceExt;
 use uuid::Uuid;
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 pub mod http;
+pub mod rate_limit;
 const MAX_SUBSCRIPTIONS: usize = 32;
 pub struct Session {
     router: Router,
@@ -139,8 +141,11 @@ impl Session {
                 "/api/v1/print/receipt-keys/{}/revoke",
                 args["keyId"].as_str().unwrap()
             );
-            let request = self
-                .builder("POST", &path)
+            let mut builder = self.builder("POST", &path);
+            if let Some(id) = args["approvalId"].as_str() {
+                builder = builder.header("x-jrip-approval-id", id);
+            }
+            let request = builder
                 .header("content-type", "application/json")
                 .body(Body::from(json!({"reason":args["reason"]}).to_string()))
                 .map_err(|_| json!({"code":"invalid_request"}))?;
@@ -237,11 +242,14 @@ impl Session {
             return self.api(request).await;
         }
         if name == "rip_delete_job" {
-            let request = self
-                .builder(
-                    "DELETE",
-                    &format!("/api/v1/jobs/{}", args["jobId"].as_str().unwrap()),
-                )
+            let mut builder = self.builder(
+                "DELETE",
+                &format!("/api/v1/jobs/{}", args["jobId"].as_str().unwrap()),
+            );
+            if let Some(id) = args["approvalId"].as_str() {
+                builder = builder.header("x-jrip-approval-id", id);
+            }
+            let request = builder
                 .header(
                     "x-jrip-expected-revision",
                     args["expectedRevision"].as_i64().unwrap().to_string(),
@@ -521,7 +529,16 @@ impl Session {
                     }
                 }
             }
-            "resources/list" => json!({"resources":[]}),
+            "resources/list" => {
+                let resources = if self.allowed("jobs:read") || self.allowed("settings:write") {
+                    vec![
+                        json!({"uri":"jrip://approval-policy","name":"Approval policy / 承認ポリシー / 审批策略","mimeType":"application/json"}),
+                    ]
+                } else {
+                    vec![]
+                };
+                json!({"resources":resources})
+            }
             "resources/templates/list" => {
                 let mut templates = vec![];
                 for (suffix, scope, label) in [
@@ -539,6 +556,9 @@ impl Session {
                         templates.push(json!({"uriTemplate":format!("jrip://jobs/{{jobId}}{suffix}"),"name":label,"mimeType":"application/json"}));
                     }
                 }
+                if self.allowed("artifacts:read") {
+                    templates.push(json!({"uriTemplate":"jrip://jobs/{jobId}/artifacts/{name}/chunks/{offset}/{length}","name":"Artifact chunk (1–32768 bytes) / 成果物の範囲取得 / 产物分块读取","mimeType":"application/octet-stream"}));
+                }
                 if self.allowed("jobs:read") {
                     templates.push(json!({"uriTemplate":"jrip://printers/{printerId}","name":"Printer / プリンター / 打印机","mimeType":"application/json"}));
                     templates.push(json!({"uriTemplate":"jrip://pipelines/{pipelineId}/timeline","name":"Unified timeline / 全工程履歴 / 统一阶段历史","mimeType":"application/json"}));
@@ -552,6 +572,65 @@ impl Session {
                 let Some(uri) = params["uri"].as_str() else {
                     return Some(error(id, -32602, "URI required"));
                 };
+                if uri == "jrip://approval-policy" {
+                    if !self.allowed("jobs:read") && !self.allowed("settings:write") {
+                        return Some(error(id, -32001, "Insufficient permission"));
+                    }
+                    let value = match self.get("/api/v1/approval-policy").await {
+                        Ok(value) => value,
+                        Err(_) => return Some(error(id, -32002, "Approval policy unavailable")),
+                    };
+                    return Some(
+                        json!({"jsonrpc":"2.0","id":id,"result":{"contents":[{"uri":uri,"mimeType":"application/json","text":value.to_string()}]}}),
+                    );
+                }
+                if uri.contains("/artifacts/") {
+                    let Some((job, name, offset, length)) = artifact_chunk(uri) else {
+                        return Some(error(
+                            id,
+                            -32602,
+                            "Invalid artifact chunk URI / 成果物範囲URIが不正です / 产物分块URI无效",
+                        ));
+                    };
+                    if !self.allowed("artifacts:read") {
+                        return Some(error(id, -32001, "Insufficient permission"));
+                    }
+                    let request = match self
+                        .builder("GET", &format!("/api/v1/jobs/{job}/artifacts/{name}"))
+                        .header("range", format!("bytes={offset}-{}", offset + length - 1))
+                        .body(Body::empty())
+                    {
+                        Ok(request) => request,
+                        Err(_) => return Some(error(id, -32002, "Artifact unavailable")),
+                    };
+                    let response = self.router.clone().oneshot(request).await.unwrap();
+                    if response.status() != axum::http::StatusCode::PARTIAL_CONTENT {
+                        return Some(error(
+                            id,
+                            -32002,
+                            "Artifact unavailable, forbidden or range unsatisfiable / 成果物・権限・範囲を確認してください / 请检查产物、权限及范围",
+                        ));
+                    }
+                    let etag = response
+                        .headers()
+                        .get("etag")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("")
+                        .to_owned();
+                    let range = response
+                        .headers()
+                        .get("content-range")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("")
+                        .to_owned();
+                    let bytes = match to_bytes(response.into_body(), length as usize).await {
+                        Ok(bytes) => bytes,
+                        Err(_) => return Some(error(id, -32002, "Artifact response too large")),
+                    };
+                    return Some(
+                        json!({"jsonrpc":"2.0","id":id,"result":{"contents":[{"uri":uri,"mimeType":"application/octet-stream","blob":base64::engine::general_purpose::STANDARD.encode(&bytes),"_meta":{"org.jrip.artifact-chunk-v1":{"etag":etag,"contentRange":range,"bytes":bytes.len()}}}]}}),
+                    );
+                }
                 if timeline_resource(uri).is_some() || inspection_resource(uri).is_some() {
                     if !self.allowed(event_scope(uri)) {
                         return Some(error(id, -32001, "Insufficient permission"));
@@ -825,6 +904,7 @@ fn tools() -> Vec<Value> {
         }
         if matches!(name,"print_get_pipeline_ticket"|"print_get_pipeline_timeline"|"print_get_pipeline_events"|"print_get_pipeline"|"print_resume_pipeline"|"print_cancel_pipeline") {properties["pipelineId"]=json!({"type":"string","format":"uuid"});required.push("pipelineId");}
         if matches!(name,"print_create_pipeline"|"print_resume_pipeline"|"print_cancel_pipeline") {properties["expectedRevision"]=json!({"type":"integer","minimum":0});required.push("expectedRevision");}
+        if matches!(name,"rip_delete_job"|"print_revoke_receipt_key") {properties["approvalId"]=json!({"type":"string","format":"uuid","description":"One-use approval issued by a separate administrator / 別の管理者が発行した1回限りの承認 / 另一管理员签发的一次性审批"});}
         if name=="print_resume_pipeline" {properties["approvalId"]=json!({"type":"string","format":"uuid"});}
         if name=="print_validate_ticket" {properties["ticket"]=json!({"type":"object","description":"Versioned JobTicket; deeply validated by Print API / Print APIで検証 / 由Print API验证"});required.push("ticket");}
         if control || name=="print_preview_delivery" {properties["expectedRevision"]=json!({"type":"integer","minimum":0});required.push("expectedRevision");}
@@ -1089,4 +1169,31 @@ pub async fn serve<R: tokio::io::AsyncBufRead + Unpin, W: tokio::io::AsyncWrite 
             write_message(&mut writer, reply).await?;
         }
     }
+}
+
+/// Canonical decimal ranges and fixed TIFF names prevent path/query injection.
+fn artifact_chunk(uri: &str) -> Option<(Uuid, &str, u64, u64)> {
+    let parts: Vec<_> = uri.strip_prefix("jrip://jobs/")?.split('/').collect();
+    if parts.len() != 6 || parts[1] != "artifacts" || parts[3] != "chunks" {
+        return None;
+    }
+    let job = Uuid::parse_str(parts[0]).ok()?;
+    let name = parts[2];
+    let page = name.strip_prefix("page-")?.strip_suffix(".tiff")?;
+    if page.len() != 6
+        || !page.bytes().all(|b| b.is_ascii_digit())
+        || page.parse::<u32>().ok()? == 0
+    {
+        return None;
+    }
+    let offset = parts[4].parse::<u64>().ok()?;
+    let length = parts[5].parse::<u64>().ok()?;
+    if parts[4] != offset.to_string()
+        || parts[5] != length.to_string()
+        || !(1..=32768).contains(&length)
+        || offset.checked_add(length).is_none()
+    {
+        return None;
+    }
+    Some((job, name, offset, length))
 }

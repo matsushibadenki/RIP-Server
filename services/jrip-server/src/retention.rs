@@ -22,15 +22,7 @@ pub(crate) async fn extend(
     Json(req): Json<Extension>,
 ) -> Result<Json<Value>, ApiError> {
     authorize(&app, &headers, "settings:write")?;
-    let now = rip_storage::now();
-    if req.expected_revision < 0
-        || req.retain_until <= now
-        || req.retain_until > now + 3650 * 86400
-        || req.reason.trim().is_empty()
-        || req.reason.len() > 1024
-    {
-        return Err(bad("invalid_artifact_retention"));
-    }
+    validate_extension(&req)?;
     let actor = pipeline::actor(&app, &headers)?;
     Ok(Json(
         app.repo
@@ -43,4 +35,17 @@ pub(crate) async fn extend(
             )
             .await?,
     ))
+}
+
+pub(crate) fn validate_extension(req: &Extension) -> Result<(), ApiError> {
+    let now = rip_storage::now();
+    if req.expected_revision < 0
+        || req.retain_until <= now
+        || req.retain_until > now + 3650 * 86400
+        || req.reason.trim().is_empty()
+        || req.reason.len() > 1024
+    {
+        return Err(bad("invalid_artifact_retention"));
+    }
+    Ok(())
 }

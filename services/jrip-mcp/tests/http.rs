@@ -27,6 +27,11 @@ fn initialize() -> Value {
     json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","clientInfo":{"name":"test","version":"1"},"capabilities":{}}})
 }
 async fn setup() -> (tempfile::TempDir, jrip_server::App, Router, String) {
+    setup_with_limits(jrip_mcp::rate_limit::RequestLimits::default()).await
+}
+async fn setup_with_limits(
+    limits: jrip_mcp::rate_limit::RequestLimits,
+) -> (tempfile::TempDir, jrip_server::App, Router, String) {
     let dir = tempfile::tempdir().unwrap();
     let mut app = jrip_server::open(dir.path().into(), TOKEN.into())
         .await
@@ -43,7 +48,11 @@ async fn setup() -> (tempfile::TempDir, jrip_server::App, Router, String) {
             scopes: vec!["jobs:submit".into()],
         },
     ];
-    let router = jrip_mcp::http::router(app.clone(), vec!["https://print.example".into()]);
+    let router = jrip_mcp::http::router_with_limits(
+        app.clone(),
+        vec!["https://print.example".into()],
+        limits,
+    );
     let response = post(&router, TOKEN, None, initialize()).await;
     assert_eq!(response.status(), StatusCode::OK);
     let session = response.headers()["mcp-session-id"]
@@ -274,7 +283,8 @@ async fn unknown_sessions_after_restart_require_reinitialization() {
 
 #[tokio::test]
 async fn session_expiry_capacity_and_origin_rejection_apply_to_get_and_delete() {
-    let (_dir, _app, router, session) = setup().await;
+    let (_dir, _app, router, session) =
+        setup_with_limits(jrip_mcp::rate_limit::RequestLimits::new(1000, 1000).unwrap()).await;
     for method in [axum::http::Method::GET, axum::http::Method::DELETE] {
         let response = router
             .clone()
@@ -362,4 +372,151 @@ async fn real_http_connection_receives_unsolicited_updates() {
     assert!(String::from_utf8_lossy(&bytes).contains("notifications/resources/updated"));
     drop(socket);
     server.abort();
+}
+
+#[tokio::test]
+async fn rate_limits_share_identity_across_tokens_sessions_and_methods_before_body_reads() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let (_dir, mut app, _, _) = setup().await;
+    app.credentials.push(jrip_server::Credential {
+        token: "owner-alias-token".into(),
+        identity: "owner".into(),
+        scopes: vec!["jobs:submit".into()],
+    });
+    let router = jrip_mcp::http::router_with_limits(
+        app,
+        vec![],
+        jrip_mcp::rate_limit::RequestLimits::new(1, 2).unwrap(),
+    );
+    // Invalid credentials and Origin are rejected without consuming the valid identity budget.
+    assert_eq!(
+        post(&router, "unknown", None, initialize()).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let invalid_origin = router
+        .clone()
+        .oneshot(
+            Request::post("/mcp")
+                .header("authorization", format!("Bearer {TOKEN}"))
+                .header("origin", "https://evil.example")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(invalid_origin.status(), StatusCode::FORBIDDEN);
+    let first = post(&router, TOKEN, None, initialize()).await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let session = first.headers()["mcp-session-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        post(&router, "owner-alias-token", None, initialize())
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let polls = Arc::new(AtomicUsize::new(0));
+    let observed = polls.clone();
+    let body = Body::from_stream(futures_util::stream::poll_fn(move |_| {
+        observed.fetch_add(1, Ordering::SeqCst);
+        std::task::Poll::Ready(Some(Err::<axum::body::Bytes, _>(std::io::Error::other(
+            "must not read exhausted request",
+        ))))
+    }));
+    let response = router
+        .clone()
+        .oneshot(
+            Request::post("/mcp")
+                .header("authorization", format!("Bearer {TOKEN}"))
+                .body(body)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(polls.load(Ordering::SeqCst), 0);
+    let wait = response.headers()["retry-after"]
+        .to_str()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    assert!((1..=60).contains(&wait));
+    let error: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+    assert_eq!(error["error"]["code"], "rate_limited");
+    assert_eq!(error["error"]["retryable"], true);
+    assert_eq!(error["error"]["requestsPerMinute"], 1);
+    assert_eq!(error["error"]["burst"], 2);
+    assert_eq!(error["error"]["retryAfterSeconds"], wait);
+    for locale in ["en", "ja", "zh-CN"] {
+        assert!(error["error"]["messages"][locale].is_string());
+    }
+    for method in ["GET", "DELETE"] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri("/mcp")
+                    .header("authorization", format!("Bearer {TOKEN}"))
+                    .header("mcp-session-id", &session)
+                    .header("accept", "text/event-stream")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+    assert_eq!(
+        post(&router, "other-token", None, initialize())
+            .await
+            .status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn rate_limit_recovery_keeps_the_same_session_and_does_not_dispatch_denied_calls() {
+    let (_dir, app, _, _) = setup().await;
+    let router = jrip_mcp::http::router_with_limits(
+        app,
+        vec![],
+        jrip_mcp::rate_limit::RequestLimits::new(120, 2).unwrap(),
+    );
+    let first = post(&router, TOKEN, None, initialize()).await;
+    let session = first.headers()["mcp-session-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        post(
+            &router,
+            TOKEN,
+            Some(&session),
+            json!({"jsonrpc":"2.0","method":"notifications/initialized"})
+        )
+        .await
+        .status(),
+        StatusCode::ACCEPTED
+    );
+    let message = json!({"jsonrpc":"2.0","id":2,"method":"tools/list"});
+    assert_eq!(
+        post(&router, TOKEN, Some(&session), message.clone())
+            .await
+            .status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    // Real time integration complements deterministic fractional refill unit tests.
+    tokio::time::sleep(std::time::Duration::from_millis(550)).await;
+    let response = post(&router, TOKEN, Some(&session), message).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let result: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+    assert!(result["result"]["tools"].is_array());
 }

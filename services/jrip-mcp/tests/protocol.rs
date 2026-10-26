@@ -1701,3 +1701,298 @@ async fn mcp_submission_runs_the_mandatory_worker_validation_gate() {
         }
     }
 }
+
+#[tokio::test]
+async fn binary_resources_are_bounded_verified_and_scoped() {
+    use base64::Engine as _;
+    use sha2::{Digest, Sha256};
+    let dir = tempfile::tempdir().unwrap();
+    let app = jrip_server::open(dir.path().into(), TOKEN.into())
+        .await
+        .unwrap();
+    let job = rip_core::Job {
+        id: uuid::Uuid::new_v4(),
+        manifest: serde_json::from_value(
+            json!({"name":"source.pdf","format":"application/pdf","dpi":300,"color_mode":"rgb"}),
+        )
+        .unwrap(),
+        state: rip_core::JobState::Spooling,
+        source_sha256: "a".repeat(64),
+        created_at: 0,
+        updated_at: 0,
+        revision: 0,
+        error_code: None,
+        selected_engine: None,
+        worker_run_id: None,
+    };
+    app.repo.insert(&job).await.unwrap();
+    let data: Vec<u8> = (0..70000).map(|i| (i % 251) as u8).collect();
+    let path = app
+        .root
+        .join("jobs")
+        .join(job.id.to_string())
+        .join("raster");
+    std::fs::create_dir_all(&path).unwrap();
+    let file = path.join("page-000001.tiff");
+    std::fs::write(&file, &data).unwrap();
+    app.repo
+        .complete_with_artifacts(
+            job.clone(),
+            &[rip_core::Artifact {
+                page: 1,
+                name: "page-000001.tiff".into(),
+                media_type: "image/tiff".into(),
+                bytes: data.len() as u64,
+                sha256: format!("{:x}", Sha256::digest(&data)),
+            }],
+        )
+        .await
+        .unwrap();
+    let mut s = Session::new(jrip_server::router(app), TOKEN.into());
+    initialize(&mut s).await;
+    let listing = s
+        .handle(req(8, "resources/templates/list", json!({})))
+        .await
+        .unwrap();
+    assert!(listing.to_string().contains("/chunks/{offset}/{length}"));
+    let prefix = format!("jrip://jobs/{}/artifacts/page-000001.tiff/chunks", job.id);
+    let mut joined = Vec::new();
+    let mut etag = None;
+    for offset in [0, 32768, 65536] {
+        let result = s
+            .handle(req(
+                2,
+                "resources/read",
+                json!({"uri":format!("{prefix}/{offset}/32768")}),
+            ))
+            .await
+            .unwrap();
+        let chunk = &result["result"]["contents"][0];
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(chunk["blob"].as_str().unwrap())
+            .unwrap();
+        assert!(bytes.len() <= 32768);
+        let metadata = &chunk["_meta"]["org.jrip.artifact-chunk-v1"];
+        if let Some(ref etag) = etag {
+            assert_eq!(etag, &metadata["etag"]);
+        }
+        etag = Some(metadata["etag"].clone());
+        assert!(
+            metadata["contentRange"]
+                .as_str()
+                .unwrap()
+                .ends_with("/70000")
+        );
+        joined.extend(bytes);
+    }
+    assert_eq!(joined, data);
+    for suffix in [
+        "0/0",
+        "0/32769",
+        "01/1",
+        "-1/2",
+        "18446744073709551615/1",
+        "0/1?x=y",
+    ] {
+        let reply = s
+            .handle(req(
+                3,
+                "resources/read",
+                json!({"uri":format!("{prefix}/{suffix}")}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(reply["error"]["code"], -32602);
+    }
+    let reply = s
+        .handle(req(
+            4,
+            "resources/read",
+            json!({"uri":format!("{prefix}/70000/1")}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(reply["error"]["code"], -32002);
+    std::fs::write(&file, vec![0; data.len()]).unwrap();
+    let reply = s
+        .handle(req(
+            5,
+            "resources/read",
+            json!({"uri":format!("{prefix}/0/1")}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(reply["error"]["code"], -32002);
+    let mut reader = s.with_access("reader".into(), vec!["jobs:read".into()], None);
+    let reply = reader
+        .handle(req(
+            6,
+            "resources/read",
+            json!({"uri":format!("{prefix}/0/1")}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(reply["error"]["code"], -32001);
+    let listing = reader
+        .handle(req(7, "resources/templates/list", json!({})))
+        .await
+        .unwrap();
+    assert!(!listing.to_string().contains("/chunks/"));
+}
+
+#[tokio::test]
+async fn deletion_approval_is_reviewable_and_mcp_forwards_exact_grant() {
+    use axum::{
+        body::{Body, to_bytes},
+        http::Request,
+    };
+    use tower::ServiceExt;
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = jrip_server::open(dir.path().into(), String::new())
+        .await
+        .unwrap();
+    app.require_delete_approval = true;
+    app.require_settings_approval = true;
+    let human = "human-admin-token-at-least-24-characters";
+    app.credentials = vec![
+        jrip_server::Credential {
+            token: TOKEN.into(),
+            identity: "agent".into(),
+            scopes: vec!["admin".into()],
+        },
+        jrip_server::Credential {
+            token: human.into(),
+            identity: "human".into(),
+            scopes: vec!["admin".into()],
+        },
+    ];
+    let job = rip_core::Job {
+        id: uuid::Uuid::new_v4(),
+        manifest: serde_json::from_value(json!({"name":"test.pdf","format":"application/pdf"}))
+            .unwrap(),
+        state: rip_core::JobState::Completed,
+        source_sha256: "a".repeat(64),
+        created_at: 0,
+        updated_at: 0,
+        revision: 0,
+        error_code: None,
+        selected_engine: None,
+        worker_run_id: None,
+    };
+    app.repo.insert(&job).await.unwrap();
+    let key_doc =
+        ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
+    let signer = rip_storage::receipts::ReceiptSigner::from_pkcs8(key_doc.as_ref()).unwrap();
+    let key_repo = rip_storage::Repository::open_with_receipt_signer(
+        &app.root.join("jobs.sqlite3"),
+        Some(signer),
+    )
+    .await
+    .unwrap();
+    let keys = key_repo.receipt_keys("", 100).await.unwrap();
+    let key = keys["keys"][0]["keyId"].as_str().unwrap();
+    let router = jrip_server::router(app.clone());
+    let mut session = Session::new(router.clone(), TOKEN.into());
+    initialize(&mut session).await;
+    let resources = session
+        .handle(req(2, "resources/list", json!({})))
+        .await
+        .unwrap();
+    assert_eq!(
+        resources["result"]["resources"][0]["uri"],
+        "jrip://approval-policy"
+    );
+    let policy = session
+        .handle(req(
+            3,
+            "resources/read",
+            json!({"uri":"jrip://approval-policy"}),
+        ))
+        .await
+        .unwrap();
+    let policy: Value =
+        serde_json::from_str(policy["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(policy["deleteApprovalRequired"], true);
+    let args = json!({"jobId":job.id,"expectedRevision":0});
+    let challenge = session
+        .handle(req(
+            4,
+            "tools/call",
+            json!({"name":"rip_delete_job","arguments":args}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(challenge["result"]["isError"], true);
+    let challenge: Value =
+        serde_json::from_str(challenge["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(challenge["error"]["code"], "approval_required");
+    let body = json!({"binding":challenge["error"]["approvalRequest"]["binding"],"reason":"human reviewed deletion"});
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/operation-approvals")
+                .header("authorization", format!("Bearer {human}"))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 201);
+    let approval: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 32768).await.unwrap()).unwrap();
+    let mut args = args;
+    args["approvalId"] = approval["id"].clone();
+    let result = session
+        .handle(req(
+            5,
+            "tools/call",
+            json!({"name":"rip_delete_job","arguments":args}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(result["result"]["isError"], false, "{result}");
+    assert!(app.repo.get(job.id).await.is_err());
+    let mut args = json!({"keyId":key,"reason":"retired"});
+    let challenge = session
+        .handle(req(
+            6,
+            "tools/call",
+            json!({"name":"print_revoke_receipt_key","arguments":args}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(challenge["result"]["isError"], true);
+    let challenge: Value =
+        serde_json::from_str(challenge["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(challenge["error"]["code"], "approval_required");
+    let body = json!({"binding":challenge["error"]["approvalRequest"]["binding"],"reason":"human reviewed key revocation"});
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/operation-approvals")
+                .header("authorization", format!("Bearer {human}"))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 201);
+    let approval: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 32768).await.unwrap()).unwrap();
+    args["approvalId"] = approval["id"].clone();
+    let result = session
+        .handle(req(
+            7,
+            "tools/call",
+            json!({"name":"print_revoke_receipt_key","arguments":args}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(result["result"]["isError"], false, "{result}");
+    assert!(key_repo.receipt_key_approval_state(key).await.unwrap()["revokedAt"].is_i64());
+}

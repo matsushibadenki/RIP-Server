@@ -45,3 +45,32 @@ POST一次一个JSON-RPC消息，使用JSON内容类型，Accept同时列出appl
 重新GET会再次提示已有历史更新；通知可能重复，不保证严格一次配送。不提供通知event ID或Last-Event-ID重放（该头返回400）。客户端保存持久历史cursor，在通知或重连后通过tool增量读取。远程会话没有服务器文件inbox，也不使用JRIP_INPUT_ROOT；通过认证Print API提交原稿后引用job ID。尚未实现OAuth发现/登录、动态客户端注册、自动CORS及旧HTTP+SSE传输；客户端需支持配置的Bearer token。
 
 Reference / 参照 / 参考: [MCP 2025-11-25 Streamable HTTP transport](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports).
+
+## Identity request rate / identity別要求頻度 / 按身份限制请求频率
+
+🟢 [Done] `org.jrip.mcp-identity-rate-limit-v1`
+
+| Setting / 設定 / 配置 | Default / 既定 / 默认 | Range / 範囲 / 范围 |
+| --- | --- | --- |
+| `JRIP_MCP_REQUESTS_PER_MINUTE` | 120 | 1–60000 |
+| `JRIP_MCP_REQUEST_BURST` | 30 | 1–10000 |
+
+日本語：`jrip-mcp-http` は、認証・Origin・基本ヘッダー検査の後、本文読取とMCP処理の前にidentity単位のtoken bucketを検査します。POST（初期化・通知・tool呼出しを含む）、GET、DELETEが同じbucketを使い、同一identityの別tokenや別sessionでも共有します。他のidentityは独立しています。既定では最初に30要求、以後は毎秒2要求相当を連続補充し、未使用枠は30まで蓄積します。固定の分単位windowではありません。認証済みの不正なMCP要求も枠を消費しますが、認証・Origin・基本ヘッダーで拒否した要求は消費しません。超過要求は追加消費せず、本文やtoolを処理しません。
+
+超過時はHTTP 429、秒単位で切り上げた `Retry-After` とJSON `error` を返します。`code=rate_limited`、`retryable=true`、`retryAfterSeconds`、`requestsPerMinute`、`burst`、上記profileと3言語の `messages` を含みます。指定秒数だけ待ち、同じsessionで再試行してください。他の要求によって空き枠が使われる場合もあるため、待機後の受付保証ではありません。429はJSON-RPC処理前のHTTPエラーであり、tool失敗として再投入する必要はありません。
+
+制限は同一routerを共有するプロセス内で有効で、再起動すると初期枠へ戻ります。状態は設定済み認証identityだけに割り当てます。トークン文字列・session ID・転送元IPによる別枠は作りません。IP偽装ヘッダーは使用しません。分散プロセス間の共有quota、未認証要求のIP制限、Print REST API／IPP／stdioのレート制限は対象外です。既存SSE接続上の通知は要求数に数えず、再接続GETは数えます。長時間SSEの接続枠制限は従来通り有効です。
+
+CLIは環境変数を起動時に読み、非整数・0・範囲外を拒否します。埋め込みAPIの `http::router` は常に既定値を使い、`http::router_with_limits` は検証済みの `rate_limit::RequestLimits` を受け取ります。環境変数の読込は明示的な `RequestLimits::from_env` です。設定の無効化値はありません。TLS配備と短期Bearer tokenは別の未完了項目です。
+
+English: The HTTP MCP gate applies a continuously refilled, process-local token bucket per authenticated identity after authentication/Origin/basic-header validation and before reading request bodies or dispatching MCP. POST (including initialization and notifications), GET and DELETE share the quota across all tokens and sessions for that identity. Different identities are independent. Defaults allow a burst of 30 requests and refill at 120/minute, capped at the burst size. Authenticated malformed MCP requests count; requests rejected by authentication/Origin/basic-header validation do not. Denied requests do not consume further tokens or dispatch tools.
+
+HTTP 429 returns a rounded-up `Retry-After` plus localized JSON `error` with `code=rate_limited`, `retryable=true`, `retryAfterSeconds`, `requestsPerMinute`, `burst`, and the profile above. Wait and retry using the same session. Another concurrent caller may use the replenished capacity first. This is an HTTP admission error before JSON-RPC dispatch, not a failed print submission. Existing SSE notifications do not consume requests; reconnecting GET does. State is allocated only for configured identities and resets on process restart. There is no IP/forwarded-header bypass or per-token/session quota. Limits are not distributed across processes and do not apply to unauthenticated IP traffic, REST, IPP or stdio. Existing connection caps remain independent.
+
+The executable loads the two environment settings at startup and rejects non-integers, zero and out-of-range values. Embedded `http::router` uses defaults; `router_with_limits` accepts validated `RequestLimits`, with explicit `RequestLimits::from_env` for environment loading. There is no disabling value. Short-lived Bearer authentication and TLS deployment remain separate unfinished work.
+
+简体中文：HTTP MCP在认证、Origin及基本头验证后、读取正文或派发MCP前，按认证identity使用持续补充的进程内token bucket。POST（包括初始化及通知）、GET、DELETE共享配额；同一identity的不同token或session不能另建配额，不同identity互相独立。默认突发30次，以每分钟120次连续补充，上限30次。已认证的不合法MCP请求仍消耗配额，认证、Origin及基本头验证拒绝的请求不消耗配额。超限请求不会继续消耗token、读取正文或执行tool。
+
+超限返回HTTP 429，携带向上取整的秒数 `Retry-After` 及三语JSON `error`，包含 `code=rate_limited`、`retryable=true`、`retryAfterSeconds`、`requestsPerMinute`、`burst` 和上述profile。等待后使用同一session重试；并发调用者可能先消耗补充容量，因此等待后不保证立即受理。此错误发生于JSON-RPC派发前，不代表打印投入失败。现有SSE流上的通知不计数，重连GET计数。
+
+状态只分配给配置好的identity，重启后重置；不按token、session或转发IP头建立额外配额。该配额不跨进程共享，也不覆盖未认证流量的IP限制、REST、IPP及stdio。连接数限制继续独立生效。可执行程序启动时读取上表环境变量，拒绝非整数、0及越界值。嵌入式 `http::router` 使用默认值，`router_with_limits` 接受经过验证的 `RequestLimits`，通过 `RequestLimits::from_env` 显式加载环境配置。没有禁用值。短期Bearer认证及TLS部署仍是独立的未完成工作。

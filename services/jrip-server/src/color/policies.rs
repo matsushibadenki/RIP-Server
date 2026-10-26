@@ -29,6 +29,20 @@ pub(crate) async fn create(
     Json(req): Json<Save>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     authorize(&app, &headers, "settings:write")?;
+    validate_save(&app, &req)?;
+    let def = &req.definition;
+    let actor = crate::pipeline::actor(&app, &headers)?;
+    let payload = app
+        .repo
+        .save_color_policy(
+            serde_json::to_value(def).map_err(internal)?,
+            &actor,
+            &req.reason,
+        )
+        .await?;
+    Ok((StatusCode::CREATED, Json(payload)))
+}
+pub(crate) fn validate_save(app: &App, req: &Save) -> Result<(), ApiError> {
     let def = &req.definition;
     if def.schema_version != 1
         || [&def.labels.en, &def.labels.ja, &def.labels.zh]
@@ -40,21 +54,12 @@ pub(crate) async fn create(
         return Err(bad("invalid_color_policy_definition"));
     }
     validate_settings(
-        &app,
+        app,
         &def.policy,
         &def.input_profile_sha256,
         def.output_profile_sha256.as_deref(),
     )?;
-    let actor = crate::pipeline::actor(&app, &headers)?;
-    let payload = app
-        .repo
-        .save_color_policy(
-            serde_json::to_value(def).map_err(internal)?,
-            &actor,
-            &req.reason,
-        )
-        .await?;
-    Ok((StatusCode::CREATED, Json(payload)))
+    Ok(())
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

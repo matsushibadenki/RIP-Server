@@ -24,6 +24,7 @@ pub mod dispatch;
 mod event_stream;
 pub mod inspection;
 pub mod maintenance;
+mod operation_approvals;
 pub mod pipeline;
 mod pipeline_preflight;
 mod preflight;
@@ -43,6 +44,8 @@ pub struct App {
     pub credentials: Vec<Credential>,
     pub printers: Vec<delivery::Printer>,
     pub require_print_approval: bool,
+    pub require_delete_approval: bool,
+    pub require_settings_approval: bool,
     pub printer_security: Vec<delivery::PrinterSecurity>,
     pub delivery_preparation: Arc<tokio::sync::Semaphore>,
     pub snapshot_coordinator: Option<rip_storage::budget_client::SnapshotCoordinator>,
@@ -68,6 +71,8 @@ pub async fn open(root: PathBuf, token: String) -> Result<App, Box<dyn std::erro
             Ok("0") | Err(_) => false,
             _ => return Err("JRIP_REQUIRE_PRINT_APPROVAL must be 0 or 1".into()),
         },
+        require_delete_approval: approval_flag("JRIP_REQUIRE_DELETE_APPROVAL")?,
+        require_settings_approval: approval_flag("JRIP_REQUIRE_SETTINGS_APPROVAL")?,
         printer_security: delivery::load_security()?,
         delivery_preparation: Arc::new(tokio::sync::Semaphore::new(1)),
         root,
@@ -76,6 +81,13 @@ pub async fn open(root: PathBuf, token: String) -> Result<App, Box<dyn std::erro
         artifact_budget: Arc::new(tokio::sync::Semaphore::new(1024)),
         event_streams: Arc::new(tokio::sync::Semaphore::new(64)),
     })
+}
+fn approval_flag(name: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    match std::env::var(name).as_deref() {
+        Ok("1") => Ok(true),
+        Ok("0") | Err(std::env::VarError::NotPresent) => Ok(false),
+        _ => Err(format!("{name} must be 0 or 1").into()),
+    }
 }
 pub fn router(app: App) -> Router {
     Router::new()
@@ -88,6 +100,15 @@ pub fn router(app: App) -> Router {
         .route(
             "/.well-known/acx.json",
             get(|| async { Json(rip_acx::manifest()) }),
+        )
+        .route("/api/v1/approval-policy", get(operation_approvals::policy))
+        .route(
+            "/api/v1/operation-approvals",
+            post(operation_approvals::issue).layer(DefaultBodyLimit::max(32768)),
+        )
+        .route(
+            "/api/v1/operation-approvals/{id}/revoke",
+            post(operation_approvals::revoke),
         )
         .route("/api/v1/approvals", post(approvals::create))
         .route("/api/v1/approvals/{id}/revoke", post(approvals::revoke))
@@ -247,6 +268,10 @@ pub fn router(app: App) -> Router {
         )
         .route("/api/v1/jobs/{id}/{action}", post(action))
         .layer(DefaultBodyLimit::max(MAX_DOCUMENT_BYTES + 64 * 1024))
+        .layer(axum::middleware::from_fn_with_state(
+            app.clone(),
+            operation_approvals::enforce,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             app.clone(),
             audit::record,

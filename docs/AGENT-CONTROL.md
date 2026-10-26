@@ -38,11 +38,11 @@ Interpreter error codes are preserved as reason codes. A retry hint never trigge
 - `print_cancel_delivery`: persist cancellation (`printers:print`, `deliveryId`, `expectedRevision`).
 - `rip_delete_job`: delete terminal job metadata (`admin`, `jobId`, `expectedRevision`). Artifacts, history and receipts are not physically deleted by this operation.
 
-JSON resources: `jrip://jobs/{jobId}`, `/manifest`, `/events` require `jobs:read`; `/artifacts` requires `artifacts:read`. Only `/events` supports subscriptions. Large TIFF data stays outside MCP messages and uses the authenticated artifact API. Individual binary artifact resources, approval policy and remote MCP transport remain unfinished.
+JSON resources: `jrip://jobs/{jobId}`, `/manifest`, `/events` require `jobs:read`; `/artifacts` requires `artifacts:read`. Only `/events` supports subscriptions. TIFF binary resources now support bounded chunks through the authenticated artifact API; see [MCP-ARTIFACT-CHUNKS.md](MCP-ARTIFACT-CHUNKS.md). Remote transport and physical-delivery approval are implemented; deletion/settings approval is implemented through [exact-operation grants](OPERATION-APPROVALS.md).
 
-日本語：実機toolは既存のDelivery API・権限・revision・冪等性を共有します。Agentから任意のプリンターURLは指定できません。resourcesでジョブ、manifest、履歴、成果物一覧を取得し、バイナリは認証付き成果物APIを利用します。人の承認ポリシー、個別バイナリresource、リモートMCPは未完了です。
+日本語：実機toolは既存のDelivery API・権限・revision・冪等性を共有します。Agentから任意のプリンターURLは指定できません。resourcesでジョブ、manifest、履歴、成果物一覧を取得し、バイナリは認証付きAPI経由の[範囲取得resource](MCP-ARTIFACT-CHUNKS.md)を利用できます。実機承認とリモートMCPは実装済みで、削除／設定変更の[個別操作承認](OPERATION-APPROVALS.md)も実装済みです。
 
-简体中文：实体投递工具复用Delivery API、权限、revision与幂等规则，Agent不能指定任意打印机URL。resources提供任务、manifest、历史及产物列表，二进制通过认证产物API取得。人工审批策略、单独二进制resource和远程MCP尚未完成。
+简体中文：实体投递工具复用Delivery API、权限、revision与幂等规则，Agent不能指定任意打印机URL。resources提供任务、manifest、历史及产物列表，二进制通过认证API的[分块resource](MCP-ARTIFACT-CHUNKS.md)取得。实体投递审批及远程MCP已实现，删除及设置的[单独操作审批](OPERATION-APPROVALS.md)也已实现。
 
 ## Physical delivery approval / 実機出力承認 / 实体投递审批
 

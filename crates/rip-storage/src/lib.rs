@@ -12,6 +12,7 @@ pub mod delivery_receipt;
 pub mod inspection;
 pub mod kms;
 pub mod maintenance;
+pub mod operation_approvals;
 pub mod pipeline;
 pub mod progress;
 pub mod receipts;
@@ -111,6 +112,7 @@ impl Repository {
         .execute(&pool)
         .await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS audit_records (sequence INTEGER PRIMARY KEY AUTOINCREMENT,correlation_id TEXT NOT NULL,identity TEXT NOT NULL,operation TEXT NOT NULL,target TEXT,started_at INTEGER NOT NULL,finished_at INTEGER,status INTEGER)").execute(&pool).await?;
+        operation_approvals::install(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS execution_approvals(id TEXT PRIMARY KEY,payload TEXT NOT NULL,expires_at INTEGER NOT NULL,revoked INTEGER NOT NULL)").execute(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS retention_tombstones(job_id TEXT PRIMARY KEY,created_at INTEGER NOT NULL,finished_at INTEGER)").execute(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS color_attempts(id TEXT PRIMARY KEY,source_job TEXT NOT NULL,ticket TEXT NOT NULL,payload TEXT NOT NULL,state TEXT NOT NULL,revision INTEGER NOT NULL,lease_until INTEGER,created_at INTEGER NOT NULL)").execute(&pool).await?;

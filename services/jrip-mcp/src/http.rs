@@ -1,5 +1,8 @@
 //! Stateful Streamable HTTP with token-bound sessions and one notification stream per session.
-use crate::{MAX_MESSAGE_BYTES, Session};
+use crate::{
+    MAX_MESSAGE_BYTES, Session,
+    rate_limit::{RateLimiter, RequestLimits},
+};
 use axum::{
     Json, Router,
     body::Bytes,
@@ -12,7 +15,7 @@ use axum::{
     routing::post,
 };
 use futures_util::stream;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, VecDeque},
     convert::Infallible,
@@ -38,14 +41,23 @@ struct Http {
     app: jrip_server::App,
     sessions: Arc<Mutex<BTreeMap<Uuid, Arc<Entry>>>>,
     origins: Arc<Vec<String>>,
+    rate_limiter: Arc<RateLimiter>,
 }
 /// An empty Origin allowlist rejects every request carrying an Origin header.
 /// Remote sessions deliberately do not receive a filesystem inbox.
 pub fn router(app: jrip_server::App, allowed_origins: Vec<String>) -> Router {
+    router_with_limits(app, allowed_origins, RequestLimits::default())
+}
+pub fn router_with_limits(
+    app: jrip_server::App,
+    allowed_origins: Vec<String>,
+    limits: RequestLimits,
+) -> Router {
     let state = Http {
         app,
         sessions: Arc::new(Mutex::new(BTreeMap::new())),
         origins: Arc::new(allowed_origins),
+        rate_limiter: Arc::new(RateLimiter::new(limits)),
     };
     Router::new()
         .route("/mcp", post(receive).get(listen).delete(terminate))
@@ -61,7 +73,16 @@ async fn gate(
 ) -> Response {
     // Validate Origin and authentication before reading any POST body.
     match auth(&state, request.headers()) {
-        Ok(_) => next.run(request).await,
+        Ok((_, identity, _)) => {
+            if let Err(seconds) = state.rate_limiter.admit(&identity).await {
+                let mut response = (StatusCode::TOO_MANY_REQUESTS, Json(json!({"error":{"code":"rate_limited","retryable":true,"retryAfterSeconds":seconds,"profile":"org.jrip.mcp-identity-rate-limit-v1","requestsPerMinute":state.rate_limiter.limits().requests_per_minute(),"burst":state.rate_limiter.limits().burst(),"messages":{"en":"Request rate exceeded; wait before retrying","ja":"要求頻度の上限に達しました。待機後に再試行してください","zh-CN":"请求频率超限，请等待后重试"}}}))).into_response();
+                response
+                    .headers_mut()
+                    .insert("retry-after", seconds.to_string().parse().unwrap());
+                return response;
+            }
+            next.run(request).await
+        }
         Err(error) => error.into_response(),
     }
 }

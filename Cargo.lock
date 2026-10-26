@@ -903,6 +903,7 @@ name = "jrip-mcp"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64",
  "futures-util",
  "http-body-util",
  "jrip-server",

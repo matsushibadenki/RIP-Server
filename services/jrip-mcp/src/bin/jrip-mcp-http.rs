@@ -15,17 +15,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let address: std::net::SocketAddr = std::env::var("JRIP_MCP_LISTEN")
         .unwrap_or_else(|_| "127.0.0.1:8091".into())
         .parse()?;
+    let limits = jrip_mcp::rate_limit::RequestLimits::from_env()?;
     let listener = tokio::net::TcpListener::bind(address).await?;
     eprintln!(
         "MCP Streamable HTTP listening on {}",
         listener.local_addr()?
     );
     let (shutdown, signal) = tokio::sync::oneshot::channel();
-    let server = axum::serve(listener, jrip_mcp::http::router(app, origins))
-        .with_graceful_shutdown(async {
-            let _ = signal.await;
-        })
-        .into_future();
+    let server = axum::serve(
+        listener,
+        jrip_mcp::http::router_with_limits(app, origins, limits),
+    )
+    .with_graceful_shutdown(async {
+        let _ = signal.await;
+    })
+    .into_future();
     tokio::pin!(server);
     tokio::select! {
         result = &mut server => result?,
