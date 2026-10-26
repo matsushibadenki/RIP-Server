@@ -302,3 +302,5 @@ PrintIntent事前確認・原稿一括受付・RIP待機・ICC処理・承認・
 - [Color input profile evidence](docs/COLOR-INPUT-PROFILE.md): TIFF ICC inspection / TIFF入力ICC証跡 / TIFF输入ICC证据。
 
 - [Source ICC analysis](docs/SOURCE-COLOR-PROFILES.md): PDF/PS/EPS declarations / 原稿内部ICC証跡 / 原稿内部ICC证据。
+
+- [Gamut warnings](docs/GAMUT-WARNINGS.md): full-pixel ICC diagnostics / 全画素ICC色域警告 / 全像素ICC色域警告。

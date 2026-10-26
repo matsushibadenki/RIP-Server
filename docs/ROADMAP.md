@@ -191,7 +191,8 @@ Printer
 - ⭕️ [Pending] 保存Color Policy参照を使うDocker実変換試験（受入未実施）。 / Saved-policy Docker conversion / 保存策略的Docker实际转换。
 - 🟢 [Done] Color工程入力TIFFのICC証跡API。有界hash検証snapshot、未埋込／不正／色空間不一致／DeviceLink分類、登録照合・ページ間混在・manifest一致、JCS証跡digest。自動推定・投入は行わない。[COLOR-INPUT-PROFILE.md](COLOR-INPUT-PROFILE.md)。 / Bounded raster input-profile evidence / 有界光栅输入profile证据。
 - 🟢 [Done] 原稿PDFのICCBased／OutputIntentとPS/EPSの静的ICC DSC宣言を隔離workerで有界解析。原稿hash・run・lease拘束、JCS証跡、結果Receipt伝播、Python fixtureと実Docker通常worker試験。[SOURCE-COLOR-PROFILES.md](SOURCE-COLOR-PROFILES.md)。 / Bounded passive source ICC declarations and durable evidence / 有界被动原稿ICC声明及持久证据。
-- 🟠 [Next] gamut警告、共通artifact保持期限への統合。 / Gamut warnings and common artifact retention / 色域警告及共同artifact保留期限集成。
+- 🟢 [Done] 出力ICCへの全画素gamut診断、3言語警告、DeviceLink／proof失敗の未判定、ページ別証跡・集計・worker検証、CLI・実Docker・再起動／再送試験。[GAMUT-WARNINGS.md](GAMUT-WARNINGS.md)。 / Full-pixel ICC gamut warnings and persisted worker evidence / 全像素ICC色域警告及持久worker证据。
+- 🟠 [Next] 共通artifact保持期限への統合。 / Common artifact retention integration / 共同artifact保留期限集成。
 - ⭕️ [Pending] 実機ICCによるK-only／K-planeと色再現品質の受入確認。
 - 🔴 [Later] オーバープリント、分版プレビュー、gamut解析。
 - 🔴 [Later] CMYK16、タイルRIP、メモリ予算、ハーフトーン、DeviceN、特色、Trapping。

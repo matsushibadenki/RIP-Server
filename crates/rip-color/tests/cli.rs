@@ -46,7 +46,12 @@ fn cli_registers_profiles_and_refuses_output_overwrite() {
             .output()
             .unwrap()
     };
-    assert!(run().status.success());
+    let converted = run();
+    assert!(converted.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&converted.stdout).unwrap();
+    assert_eq!(report["gamut"]["profile"], "org.jrip.gamut-warning-v1");
+    assert_eq!(report["gamut"]["status"], "ASSESSED");
+    assert_eq!(report["gamut"]["outOfGamutPixels"], 0);
     let output = std::fs::read(&destination).unwrap();
     assert!(!run().status.success());
     assert_eq!(std::fs::read(destination).unwrap(), output);

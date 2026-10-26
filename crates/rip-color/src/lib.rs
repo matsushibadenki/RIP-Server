@@ -1,4 +1,5 @@
 //! Explicit, bounded ICC transforms independent of the RIP interpreter.
+pub mod gamut;
 pub mod raster;
 pub mod registry;
 use lcms2::{ColorSpaceSignature, Flags, PixelFormat, Profile, ThreadContext, Transform};
@@ -91,6 +92,7 @@ pub struct Report {
     pub device_link: bool,
     pub maximum_output_ink_percent: Option<f64>,
     pub policy: Policy,
+    pub gamut: gamut::GamutReport,
 }
 fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
@@ -302,6 +304,13 @@ fn convert_validated(
         device_link,
         maximum_output_ink_percent,
         policy: policy.clone(),
+        gamut: gamut::assess(
+            samples,
+            input_icc,
+            output_icc,
+            policy.input_color,
+            device_link,
+        ),
     };
     Ok((converted, report))
 }
@@ -363,6 +372,8 @@ mod tests {
         let (pixels, report) =
             convert(&[255, 255, 255, 255, 0, 0, 0, 200], &profile, None, &policy).unwrap();
         assert!(report.device_link);
+        assert_eq!(report.gamut.status, "NOT_ASSESSED");
+        assert_eq!(report.gamut.out_of_gamut_pixels, None);
         assert!(report.maximum_output_ink_percent.unwrap() <= 240.0);
         assert_eq!(&pixels[4..], &[0, 0, 0, 200]);
         assert!(pixels[0..4].iter().map(|v| u32::from(*v)).sum::<u32>() <= 612);

@@ -11,7 +11,7 @@ pub(crate) async fn capabilities(
 ) -> Result<Json<Value>, ApiError> {
     use sha2::{Digest, Sha256};
     authorize(&app, &headers, "jobs:read")?;
-    let model = json!({"schemaVersion":1,"id":"org.jrip.color.icc-transform","inputMime":["image/tiff"],"outputMime":["image/tiff"],"bitDepths":[8],"colorSpaces":["rgb","cmyk","gray"],"intents":["perceptual","relative_colorimetric","absolute_colorimetric","saturation"],"blackPointCompensation":true,"blackPreservation":["none","k_only","k_plane"],"constraints":{"blackPreservation":"CMYK to CMYK; perceptual, relative_colorimetric or saturation","deviceLink":"explicit input hash, no output hash, header intent must match, no additional BPC or black preservation","tac":"CMYK output only; 100-400 percent"},"limits":{"profileBytes":4194304,"pageSampleBytes":67108864,"pages":100,"artifactBytes":1073741824,"dpiMin":72,"dpiMax":2400},"inputProfileEvidence":{"endpointTemplate":"/api/v1/jobs/{id}/color-input-profile","automaticSelection":false,"maxPages":32,"maxPageBytes":67108864,"maxTotalBytes":268435456},"policyRegistry":{"profile":"org.jrip.color-policy-v1","digestProfile":"org.jrip.jcs-safe-v1","endpoint":"/api/v1/color/policies","submitTemplate":"/api/v1/jobs/{id}/color-attempts/from-policy","immutable":true},"physicalCompletion":false,"workerAvailability":"not-probed","labels":{"en":"Explicit ICC color processing","ja":"明示的ICC色処理","zh-CN":"显式ICC颜色处理"}});
+    let model = json!({"schemaVersion":1,"id":"org.jrip.color.icc-transform","inputMime":["image/tiff"],"outputMime":["image/tiff"],"bitDepths":[8],"colorSpaces":["rgb","cmyk","gray"],"intents":["perceptual","relative_colorimetric","absolute_colorimetric","saturation"],"blackPointCompensation":true,"blackPreservation":["none","k_only","k_plane"],"constraints":{"blackPreservation":"CMYK to CMYK; perceptual, relative_colorimetric or saturation","deviceLink":"explicit input hash, no output hash, header intent must match, no additional BPC or black preservation","tac":"CMYK output only; 100-400 percent"},"limits":{"profileBytes":4194304,"pageSampleBytes":67108864,"pages":100,"artifactBytes":1073741824,"dpiMin":72,"dpiMax":2400},"gamutWarnings":{"profile":"org.jrip.gamut-warning-v1","method":"lcms2-relative-colorimetric-null-proof-v1","sampling":"all-pixels","modifiesPixels":false,"deviceLink":"not-assessed"},"inputProfileEvidence":{"endpointTemplate":"/api/v1/jobs/{id}/color-input-profile","automaticSelection":false,"maxPages":32,"maxPageBytes":67108864,"maxTotalBytes":268435456},"policyRegistry":{"profile":"org.jrip.color-policy-v1","digestProfile":"org.jrip.jcs-safe-v1","endpoint":"/api/v1/color/policies","submitTemplate":"/api/v1/jobs/{id}/color-attempts/from-policy","immutable":true},"physicalCompletion":false,"workerAvailability":"not-probed","labels":{"en":"Explicit ICC color processing","ja":"明示的ICC色処理","zh-CN":"显式ICC颜色处理"}});
     let digest = format!(
         "{:x}",
         Sha256::digest(serde_json::to_vec(&model).map_err(internal)?)
@@ -213,6 +213,15 @@ async fn process(app: &App, id: Uuid, attempt: &mut Value) -> Result<Value, Proc
         {
             return Err(ProcessError::Worker("color_report_mismatch".into()));
         }
+        if !rip_color::gamut::valid_report(
+            &converted.report["gamut"],
+            converted.report["pixels"]
+                .as_u64()
+                .ok_or_else(|| ProcessError::Worker("color_report_mismatch".into()))?,
+            ticket["outputProfileSha256"].is_null(),
+        ) {
+            return Err(ProcessError::Worker("color_gamut_report_mismatch".into()));
+        }
         let page = staging.path().join(&artifact.name);
         std::fs::rename(&converted.raster, &page)?;
         total = total
@@ -226,13 +235,20 @@ async fn process(app: &App, id: Uuid, attempt: &mut Value) -> Result<Value, Proc
         } else {
             "explicit-unembedded"
         };
-        let warnings = if source_metadata.profile_sha256.is_none() {
+        let mut warnings = if source_metadata.profile_sha256.is_none() {
             vec![
                 json!({"code":"SOURCE_PROFILE_UNEMBEDDED","messages":{"en":"Source raster has no embedded ICC; the explicit input profile is an operator assumption","ja":"原本ラスターにICCがなく、指定入力profileは操作者の判断です","zh-CN":"原始光栅没有内嵌ICC，指定输入profile属于操作者判断"}}),
             ]
         } else {
             vec![]
         };
+        warnings.extend(
+            converted.report["gamut"]["warnings"]
+                .as_array()
+                .ok_or_else(|| ProcessError::Worker("color_gamut_report_mismatch".into()))?
+                .iter()
+                .cloned(),
+        );
         reports.push(json!({"page":artifact.page,"sourceArtifactSha256":artifact.sha256,"sourceProfileEvidence":source_profile_evidence,"warnings":warnings,"metadata":output_metadata,"colorReport":converted.report}));
         *attempt = app
             .repo
@@ -254,7 +270,24 @@ async fn process(app: &App, id: Uuid, attempt: &mut Value) -> Result<Value, Proc
     for (report, artifact) in reports.iter_mut().zip(&output_artifacts) {
         report["outputArtifact"] = serde_json::to_value(artifact)?;
     }
-    let mut result = json!({"schemaVersion":1,"kind":"ColorManagedArtifact","sourceJob":source,"attemptId":id,"policySha256":policy_digest,"inputProfileSha256":input_digest,"outputProfileSha256":ticket["outputProfileSha256"],"dpi":dpi,"colorSpace":policy.output_color,"pageCount":output_artifacts.len(),"artifacts":output_artifacts,"reports":reports});
+    let checked: u64 = reports
+        .iter()
+        .map(|r| {
+            r["colorReport"]["gamut"]["checkedPixels"]
+                .as_u64()
+                .unwrap_or(0)
+        })
+        .sum();
+    let outside: u64 = reports
+        .iter()
+        .filter_map(|r| r["colorReport"]["gamut"]["outOfGamutPixels"].as_u64())
+        .sum();
+    let unassessed = reports
+        .iter()
+        .filter(|r| r["colorReport"]["gamut"]["status"] == "NOT_ASSESSED")
+        .count();
+    let gamut_summary = json!({"profile":"org.jrip.gamut-summary-v1","coverageComplete":unassessed==0,"assessedPages":reports.len()-unassessed,"unassessedPages":unassessed,"checkedPixels":checked,"outOfGamutPixels":if checked>0 {Some(outside)}else{None},"outOfGamutPercentOfChecked":if checked>0 {Some(outside as f64*100.0/checked as f64)}else{None}});
+    let mut result = json!({"schemaVersion":1,"kind":"ColorManagedArtifact","sourceJob":source,"attemptId":id,"policySha256":policy_digest,"inputProfileSha256":input_digest,"outputProfileSha256":ticket["outputProfileSha256"],"dpi":dpi,"colorSpace":policy.output_color,"pageCount":output_artifacts.len(),"artifacts":output_artifacts,"gamutSummary":gamut_summary,"reports":reports});
     if let Some(reference) = ticket.get("policyReference") {
         result["policyReference"] = reference.clone();
     }

@@ -1456,6 +1456,7 @@ name = "rip-color"
 version = "0.1.0"
 dependencies = [
  "lcms2",
+ "lcms2-sys",
  "serde",
  "serde_json",
  "sha2",

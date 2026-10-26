@@ -182,6 +182,8 @@ async fn isolated_worker_publishes_two_pages_reports_and_preserves_original() {
     assert_eq!(attempt["state"], "COMPLETED", "{attempt}");
     assert_eq!(attempt["completedPages"], 2);
     assert_eq!(attempt["result"]["pageCount"], 2);
+    assert_eq!(attempt["result"]["gamutSummary"]["coverageComplete"], true);
+    assert_eq!(attempt["result"]["gamutSummary"]["outOfGamutPixels"], 0);
     assert_eq!(
         attempt["result"]["reports"][0]["sourceProfileEvidence"],
         "embedded-match"
@@ -513,5 +515,173 @@ async fn input_profile_evidence_is_hash_verified_scoped_and_never_selects_implic
             .unwrap()
             .status(),
         StatusCode::OK
+    );
+}
+
+fn narrow_rgb_profile() -> Vec<u8> {
+    let white = lcms2::CIExyY {
+        x: 0.3127,
+        y: 0.329,
+        Y: 1.0,
+    };
+    let primaries = lcms2::CIExyYTRIPLE {
+        Red: lcms2::CIExyY {
+            x: 0.5,
+            y: 0.33,
+            Y: 1.0,
+        },
+        Green: lcms2::CIExyY {
+            x: 0.3,
+            y: 0.5,
+            Y: 1.0,
+        },
+        Blue: lcms2::CIExyY {
+            x: 0.2,
+            y: 0.17,
+            Y: 1.0,
+        },
+    };
+    let gamma = lcms2::ToneCurve::new(2.2);
+    lcms2::Profile::new_rgb(&white, &primaries, &[&gamma, &gamma, &gamma])
+        .unwrap()
+        .icc()
+        .unwrap()
+}
+#[tokio::test]
+#[ignore = "requires Docker and rebuilt jrip-color:local with gamut diagnostics"]
+async fn isolated_worker_preserves_gamut_warnings_counts_and_immutable_result() {
+    let (_dir, app, job, input) = seed().await;
+    let registry = rip_color::registry::Registry::open(app.root.join("color-profiles")).unwrap();
+    let output = registry.register(&narrow_rgb_profile()).unwrap();
+    let id = Uuid::new_v4();
+    let mut req = ticket(&job, id, &input);
+    req["outputProfileSha256"] = json!(output.sha256);
+    assert_eq!(
+        call(
+            &app,
+            &format!("/api/v1/jobs/{}/color-attempts", job.id),
+            req.clone()
+        )
+        .await
+        .0,
+        StatusCode::ACCEPTED
+    );
+    let originals = app.repo.artifacts(job.id).await.unwrap();
+    assert!(jrip_server::color::tick(&app).await.unwrap());
+    let attempt = app.repo.color_attempt(id).await.unwrap();
+    assert_eq!(attempt["state"], "COMPLETED", "{attempt}");
+    let result = &attempt["result"];
+    assert_eq!(result["gamutSummary"]["coverageComplete"], true);
+    assert_eq!(result["gamutSummary"]["checkedPixels"], 4);
+    assert_eq!(result["gamutSummary"]["outOfGamutPixels"], 4);
+    assert_eq!(result["gamutSummary"]["outOfGamutPercentOfChecked"], 100.0);
+    for page in result["reports"].as_array().unwrap() {
+        assert_eq!(page["colorReport"]["gamut"]["outOfGamutPixels"], 2);
+        assert!(
+            page["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|w| w["code"] == "OUT_OF_GAMUT")
+        );
+        assert_eq!(page["colorReport"]["gamut"]["modifiesPixels"], false);
+        for lang in ["en", "ja", "zh-CN"] {
+            assert!(page["warnings"][0]["messages"][lang].is_string());
+        }
+    }
+    assert_eq!(app.repo.artifacts(job.id).await.unwrap(), originals);
+    let reopened = jrip_server::open(app.root.clone(), "admin-token".into())
+        .await
+        .unwrap();
+    assert_eq!(reopened.repo.color_attempt(id).await.unwrap(), attempt);
+    assert_eq!(
+        call(
+            &reopened,
+            &format!("/api/v1/jobs/{}/color-attempts", job.id),
+            req
+        )
+        .await
+        .1,
+        attempt
+    );
+    let response = jrip_server::router(reopened)
+        .oneshot(
+            Request::get(format!("/api/v1/color/attempts/{id}"))
+                .header("authorization", "Bearer admin-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(payload["result"], *result);
+}
+#[tokio::test]
+#[ignore = "requires Docker and rebuilt jrip-color:local with gamut diagnostics"]
+async fn device_link_worker_reports_unassessed_gamut_instead_of_zero() {
+    let (_dir, app, mut job, _) = seed().await;
+    job.id = Uuid::new_v4();
+    job.state = JobState::Spooling;
+    job.revision = 0;
+    job.manifest.color_mode = rip_core::ColorMode::Cmyk;
+    app.repo.insert(&job).await.unwrap();
+    let root = app
+        .root
+        .join("jobs")
+        .join(job.id.to_string())
+        .join("raster");
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("page-000001.tiff");
+    let mut encoder =
+        tiff::encoder::TiffEncoder::new(std::fs::File::create(&path).unwrap()).unwrap();
+    encoder
+        .write_image::<tiff::encoder::colortype::CMYK8>(1, 1, &[0, 0, 0, 200])
+        .unwrap();
+    drop(encoder);
+    app.repo
+        .complete_with_artifacts(
+            job.clone(),
+            &jrip_server::artifacts::hash_pages(&[path]).await.unwrap(),
+        )
+        .await
+        .unwrap();
+    let job = app.repo.get(job.id).await.unwrap();
+    let link = lcms2::Profile::ink_limiting(lcms2::ColorSpaceSignature::CmykData, 300.0)
+        .unwrap()
+        .icc()
+        .unwrap();
+    let profile = rip_color::registry::Registry::open(app.root.join("color-profiles"))
+        .unwrap()
+        .register(&link)
+        .unwrap();
+    let id = Uuid::new_v4();
+    let req = json!({"requestId":id,"expectedRevision":job.revision,"inputProfileSha256":profile.sha256,"outputProfileSha256":null,"policy":{"schemaVersion":1,"inputColor":"cmyk","outputColor":"cmyk","intent":"perceptual","blackPointCompensation":false,"blackPreservation":"none","tacPercent":240}});
+    assert_eq!(
+        call(
+            &app,
+            &format!("/api/v1/jobs/{}/color-attempts", job.id),
+            req
+        )
+        .await
+        .0,
+        StatusCode::ACCEPTED
+    );
+    assert!(jrip_server::color::tick(&app).await.unwrap());
+    let attempt = app.repo.color_attempt(id).await.unwrap();
+    assert_eq!(attempt["state"], "COMPLETED", "{attempt}");
+    let summary = &attempt["result"]["gamutSummary"];
+    assert_eq!(summary["coverageComplete"], false);
+    assert_eq!(summary["unassessedPages"], 1);
+    assert_eq!(summary["checkedPixels"], 0);
+    assert!(summary["outOfGamutPixels"].is_null());
+    assert!(summary["outOfGamutPercentOfChecked"].is_null());
+    assert!(
+        attempt["result"]["reports"][0]["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w["code"] == "GAMUT_NOT_ASSESSED")
     );
 }

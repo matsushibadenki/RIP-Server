@@ -49,7 +49,7 @@ without Docker using synthetic TIFF fixtures. They do not certify actual printer
 profiles or the RIP engine's source-profile handling.
 
 🟢 [Done] Original-document declarations: see [SOURCE-COLOR-PROFILES.md](SOURCE-COLOR-PROFILES.md).
-🟠 [Next] Gamut warnings and artifact-retention integration. ⭕️ [Pending] Acceptance of actual RIP output and real device profiles.
+🟢 [Done] [Gamut warnings](GAMUT-WARNINGS.md). 🟠 [Next] Artifact-retention integration. ⭕️ [Pending] Acceptance of actual RIP output and real device profiles.
 
 ## 日本語
 
@@ -67,7 +67,7 @@ profiles or the RIP engine's source-profile handling.
 RustでTIFF／ICCの有界な構造を確認し、LCMSのnative parserや画素の色域測定は呼び出しません。
 模擬TIFFで状態分類・登録欠落・ページ間混在・権限・artifact改変を検証します。
 🟢 [Done] 原稿内部の宣言解析は [追加仕様](SOURCE-COLOR-PROFILES.md) を参照してください。
-🟠 [Next] gamut警告、artifact保持期限への統合。
+🟢 [Done] [gamut警告](GAMUT-WARNINGS.md)。🟠 [Next] artifact保持期限への統合。
 ⭕️ [Pending] 実RIP出力と実機ICCの受入試験。
 
 ## 简体中文
@@ -85,5 +85,5 @@ RustでTIFF／ICCの有界な構造を確認し、LCMSのnative parserや画素�
 只用Rust执行有界结构检查，不调用LCMS native parser或进行像素色域测量。
 用模拟TIFF验证状态分类、注册缺失、混合profile、权限及artifact篡改。
 🟢 [Done] 原稿内部声明分析见 [追加规格](SOURCE-COLOR-PROFILES.md)。
-🟠 [Next] gamut警告及artifact保留期限集成。
+🟢 [Done] [gamut警告](GAMUT-WARNINGS.md)。🟠 [Next] artifact保留期限集成。
 ⭕️ [Pending] 实际RIP输出及设备ICC验收。
