@@ -65,7 +65,7 @@ reference-based submission, replay conflicts and override rejection. Docker is n
 needed for these API/storage checks.
 
 ⭕️ [Pending] Actual Docker conversion with a saved policy reference has not yet been completed. 🔴 [Later] Mutable named aliases, retirement/approval workflows,
-input-profile inference, gamut analysis and artifact-retention integration.
+automatic input-profile inference, interactive gamut visualization and artifact-retention integration.
 
 ## 日本語
 
@@ -83,7 +83,7 @@ input-profile inference, gamut analysis and artifact-retention integration.
 
 登録・権限・版分離・cursor・再起動・再送競合をテストします。
 ⭕️ [Pending] 保存版を使う実変換の受入試験は未完了です。
-🔴 [Later] 名前alias、廃止／承認workflow、入力profile推定、色域解析、artifact保持期限との統合。
+🔴 [Later] 名前alias、廃止／承認workflow、入力profileの自動推定、色域の可視化、artifact保持期限との統合。
 
 ## 简体中文
 
@@ -99,4 +99,4 @@ input-profile inference, gamut analysis and artifact-retention integration.
 
 验证注册、权限、版本、cursor、重启及重放冲突。
 ⭕️ [Pending] 保存版策略的实际转换验收尚未完成。
-🔴 [Later] 名称alias、停用／审批workflow、输入profile推断、色域分析及artifact保留期限集成。
+🔴 [Later] 名称alias、停用／审批workflow、输入profile自动推断、色域可视化及artifact保留期限集成。

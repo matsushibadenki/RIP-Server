@@ -1,10 +1,12 @@
 # Explicit color processing / 明示的色処理 / 显式颜色处理
 
-`rip-color` is a separate Rust library and CLI backed by statically built LittleCMS 2. It accepts explicit ICC bytes, 8-bit RGB/CMYK/Gray samples and a versioned policy. Four ICC rendering intents, black point compensation, CMYK K-only/K-plane preservation, direct DeviceLink and CMYK TAC are represented explicitly. Absolute colorimetric with black preservation is rejected; DeviceLink already defines its own mapping and rejects an additional black-preservation or black-point-compensation request. TAC is limited to 100–400%, uses a LittleCMS ink-limiting link and caps 8-bit quantization while retaining K and CMY proportions. This does not implement overprint, trapping, separation previews, gamut reports, DeviceN or 16-bit processing.
+`rip-color` is a separate Rust library and CLI backed by statically built LittleCMS 2. It accepts explicit ICC bytes, 8-bit RGB/CMYK/Gray samples and a versioned policy. Four ICC rendering intents, black point compensation, CMYK K-only/K-plane preservation, direct DeviceLink and CMYK TAC are represented explicitly. Absolute colorimetric with black preservation is rejected; DeviceLink already defines its own mapping and rejects an additional black-preservation or black-point-compensation request. TAC is limited to 100–400%, uses a LittleCMS ink-limiting link and caps 8-bit quantization while retaining K and CMY proportions. This does not implement overprint, trapping, separation previews, DeviceN or 16-bit processing.
 
-日本語：`rip-color` は独立したRustライブラリ／CLIです。ICCを明示指定し、8-bit RGB／CMYK／Gray、4種類のレンダリングインテント、黒点補正、CMYKのK-only／K-plane保持、DeviceLink、TACを扱います。絶対測色＋黒版保持や、DeviceLinkへの追加の黒点補正／黒版保持は黙って変更せず拒否します。TACは100–400%で、LittleCMSのインキ制限と8-bit量子化上限を適用します。オーバープリント、Trapping、分版プレビュー、gamut解析、DeviceN、16-bitは未実装です。
+日本語：`rip-color` は独立したRustライブラリ／CLIです。ICCを明示指定し、8-bit RGB／CMYK／Gray、4種類のレンダリングインテント、黒点補正、CMYKのK-only／K-plane保持、DeviceLink、TACを扱います。絶対測色＋黒版保持や、DeviceLinkへの追加の黒点補正／黒版保持は黙って変更せず拒否します。TACは100–400%で、LittleCMSのインキ制限と8-bit量子化上限を適用します。オーバープリント、Trapping、分版プレビュー、DeviceN、16-bitは未実装です。
 
-简体中文：`rip-color` 是独立Rust库／CLI，显式指定ICC，支持8-bit RGB／CMYK／Gray、四种渲染意图、黑点补偿、CMYK的K-only／K-plane保持、DeviceLink和TAC。拒绝绝对色度＋黑版保持及对DeviceLink追加黑点补偿／黑版保持，不会静默替换。TAC为100–400%，应用LittleCMS墨量限制及8-bit量化上限。尚未实现叠印、Trapping、分色预览、gamut分析、DeviceN及16-bit。
+简体中文：`rip-color` 是独立Rust库／CLI，显式指定ICC，支持8-bit RGB／CMYK／Gray、四种渲染意图、黑点补偿、CMYK的K-only／K-plane保持、DeviceLink和TAC。拒绝绝对色度＋黑版保持及对DeviceLink追加黑点补偿／黑版保持，不会静默替换。TAC为100–400%，应用LittleCMS墨量限制及8-bit量化上限。尚未实现叠印、Trapping、分色预览、DeviceN及16-bit。
+
+Gamut diagnostics / 色域警告 / 色域警告: new reports include full-pixel ICC diagnostics and explicit unassessed states. 新規レポートに全画素ICC診断と未判定状態を記録します。新报告包含全像素ICC诊断及未评估状态。See [GAMUT-WARNINGS.md](GAMUT-WARNINGS.md).
 
 Example policy / 設定例 / 示例配置:
 

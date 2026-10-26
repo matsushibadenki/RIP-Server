@@ -297,7 +297,9 @@ mod tests {
         let invalid = assess(&[0, 0, 0], &input, Some(b"invalid"), Color::Rgb, false);
         assert_eq!(invalid.status, "NOT_ASSESSED");
         let (_, report) = convert(&[0, 0, 0], &input, Some(&input), &policy()).unwrap();
+        assert_eq!(report.gamut.status, "ASSESSED");
         let value = serde_json::to_value(report.gamut).unwrap();
+        assert!(valid_report(&value, 1, false));
         for (key, replacement) in [
             ("profile", json!("other")),
             ("checkedPixels", json!(0)),
