@@ -64,8 +64,7 @@ missing profiles, scope checks, bounded cursor paging, restart persistence,
 reference-based submission, replay conflicts and override rejection. Docker is not
 needed for these API/storage checks.
 
-⭕️ [Pending] Actual Docker conversion with a saved policy reference while Docker
-is unavailable. 🔴 [Later] Mutable named aliases, retirement/approval workflows,
+⭕️ [Pending] Actual Docker conversion with a saved policy reference has not yet been completed. 🔴 [Later] Mutable named aliases, retirement/approval workflows,
 input-profile inference, gamut analysis and artifact-retention integration.
 
 ## 日本語
@@ -83,7 +82,7 @@ input-profile inference, gamut analysis and artifact-retention integration.
 従来のinline指定は維持し、従来の `policySha256` と新しいregistry digestは区別します。
 
 登録・権限・版分離・cursor・再起動・再送競合をテストします。
-⭕️ [Pending] Docker停止中のため保存版を使う実変換試験。
+⭕️ [Pending] 保存版を使う実変換の受入試験は未完了です。
 🔴 [Later] 名前alias、廃止／承認workflow、入力profile推定、色域解析、artifact保持期限との統合。
 
 ## 简体中文
@@ -99,5 +98,5 @@ input-profile inference, gamut analysis and artifact-retention integration.
 原inline接口和历史 `policySha256` 编码保持不变，与新registry digest区分。
 
 验证注册、权限、版本、cursor、重启及重放冲突。
-⭕️ [Pending] Docker未运行，保存版策略的实际转换验收暂缓。
+⭕️ [Pending] 保存版策略的实际转换验收尚未完成。
 🔴 [Later] 名称alias、停用／审批workflow、输入profile推断、色域分析及artifact保留期限集成。

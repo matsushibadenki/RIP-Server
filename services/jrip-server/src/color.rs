@@ -2,6 +2,7 @@
 use super::*;
 use rip_color::{Policy, registry::Registry};
 use serde_json::{Value, json};
+pub(crate) mod input_profile;
 pub(crate) mod policies;
 pub mod sandbox;
 pub(crate) async fn capabilities(
@@ -10,7 +11,7 @@ pub(crate) async fn capabilities(
 ) -> Result<Json<Value>, ApiError> {
     use sha2::{Digest, Sha256};
     authorize(&app, &headers, "jobs:read")?;
-    let model = json!({"schemaVersion":1,"id":"org.jrip.color.icc-transform","inputMime":["image/tiff"],"outputMime":["image/tiff"],"bitDepths":[8],"colorSpaces":["rgb","cmyk","gray"],"intents":["perceptual","relative_colorimetric","absolute_colorimetric","saturation"],"blackPointCompensation":true,"blackPreservation":["none","k_only","k_plane"],"constraints":{"blackPreservation":"CMYK to CMYK; perceptual, relative_colorimetric or saturation","deviceLink":"explicit input hash, no output hash, header intent must match, no additional BPC or black preservation","tac":"CMYK output only; 100-400 percent"},"limits":{"profileBytes":4194304,"pageSampleBytes":67108864,"pages":100,"artifactBytes":1073741824,"dpiMin":72,"dpiMax":2400},"policyRegistry":{"profile":"org.jrip.color-policy-v1","digestProfile":"org.jrip.jcs-safe-v1","endpoint":"/api/v1/color/policies","submitTemplate":"/api/v1/jobs/{id}/color-attempts/from-policy","immutable":true},"physicalCompletion":false,"workerAvailability":"not-probed","labels":{"en":"Explicit ICC color processing","ja":"明示的ICC色処理","zh-CN":"显式ICC颜色处理"}});
+    let model = json!({"schemaVersion":1,"id":"org.jrip.color.icc-transform","inputMime":["image/tiff"],"outputMime":["image/tiff"],"bitDepths":[8],"colorSpaces":["rgb","cmyk","gray"],"intents":["perceptual","relative_colorimetric","absolute_colorimetric","saturation"],"blackPointCompensation":true,"blackPreservation":["none","k_only","k_plane"],"constraints":{"blackPreservation":"CMYK to CMYK; perceptual, relative_colorimetric or saturation","deviceLink":"explicit input hash, no output hash, header intent must match, no additional BPC or black preservation","tac":"CMYK output only; 100-400 percent"},"limits":{"profileBytes":4194304,"pageSampleBytes":67108864,"pages":100,"artifactBytes":1073741824,"dpiMin":72,"dpiMax":2400},"inputProfileEvidence":{"endpointTemplate":"/api/v1/jobs/{id}/color-input-profile","automaticSelection":false,"maxPages":32,"maxPageBytes":67108864,"maxTotalBytes":268435456},"policyRegistry":{"profile":"org.jrip.color-policy-v1","digestProfile":"org.jrip.jcs-safe-v1","endpoint":"/api/v1/color/policies","submitTemplate":"/api/v1/jobs/{id}/color-attempts/from-policy","immutable":true},"physicalCompletion":false,"workerAvailability":"not-probed","labels":{"en":"Explicit ICC color processing","ja":"明示的ICC色処理","zh-CN":"显式ICC颜色处理"}});
     let digest = format!(
         "{:x}",
         Sha256::digest(serde_json::to_vec(&model).map_err(internal)?)

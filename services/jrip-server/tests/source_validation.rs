@@ -15,7 +15,17 @@ async fn default_worker_validates_all_supported_formats_and_rejects_late_errors(
         .await
         .unwrap();
     let pdf = include_bytes!("../../../tests/corpus/colors.pdf").as_slice();
-    let ps = b"%!PS-Adobe-3.0\nshowpage\n".as_slice();
+    let icc = lcms2::Profile::new_srgb().icc().unwrap();
+    let digits = b"0123456789abcdef";
+    let hex: String = icc
+        .iter()
+        .flat_map(|byte| [digits[(byte >> 4) as usize], digits[(byte & 15) as usize]])
+        .map(char::from)
+        .collect();
+    let ps_with_icc = format!(
+        "%!PS-Adobe-3.0\n%%BeginICCProfile: (proof) 1 Hex Lines\n% {hex}\n%%EndICCProfile\nshowpage\n"
+    );
+    let ps = ps_with_icc.as_bytes();
     let eps = b"%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 72 72\nshowpage\n".as_slice();
     let bad_ps = b"%!PS-Adobe-3.0\nshowpage\nTHIS_OPERATOR_DOES_NOT_EXIST\n".as_slice();
     let repaired = &pdf[..pdf.len() - 30];
@@ -124,6 +134,33 @@ async fn default_worker_validates_all_supported_formats_and_rejects_late_errors(
             let report: serde_json::Value =
                 serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
                     .unwrap();
+            let profiles = &report["colorProfileAnalysis"];
+            assert_eq!(profiles["analysis"]["sourceSha256"], current.source_sha256);
+            assert_eq!(
+                profiles["analysis"]["profile"],
+                "org.jrip.source-color-profiles-v1"
+            );
+            assert_eq!(profiles["analysis"]["automaticSelection"], false);
+            assert_eq!(
+                profiles["analysisDigest"],
+                rip_digest::digest(&profiles["analysis"]).unwrap()
+            );
+            if committed {
+                assert_eq!(
+                    profiles["analysis"]["profiles"].as_array().unwrap().len(),
+                    1
+                );
+                assert_eq!(profiles["analysis"]["profiles"][0]["kind"], "PS_DSC_ICC");
+                assert_eq!(
+                    profiles["analysis"]["profiles"][0]["state"],
+                    "VALIDATED_ENVELOPE"
+                );
+                let receipt = app.repo.get_result_receipt(job.id).await.unwrap();
+                assert_eq!(
+                    receipt["proof"]["result"]["sourceValidation"]["colorProfileAnalysis"],
+                    *profiles
+                );
+            }
             let history = app.repo.events(job.id, 0, 100).await.unwrap();
             let pages: Vec<_> = history["events"]
                 .as_array()

@@ -89,6 +89,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .await
                 .map_err(std::io::Error::other)?;
+                repo.record_source_profile_analysis(id, run_id, validated.profile_analysis)
+                    .await
+                    .map_err(std::io::Error::other)?;
                 // Publish only complete, validated output sets.
                 tokio::fs::rename(&staging, directory.join("raster")).await?;
                 Ok::<_, std::io::Error>(artifacts)

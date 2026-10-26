@@ -15,6 +15,7 @@ pub struct Metadata {
     pub height: u32,
     pub color_space: Color,
     pub profile_sha256: Option<String>,
+    pub profile_state: &'static str,
 }
 /// Bounded Rust-only metadata inspection, without entering the native ICC parser.
 pub fn describe_tiff<R: Read + Seek>(source: R) -> Result<Metadata, Error> {
@@ -55,7 +56,24 @@ pub fn describe_tiff<R: Read + Seek>(source: R) -> Result<Metadata, Error> {
     {
         return Err(Error::Profile);
     }
+    let profile_state = match embedded.as_deref() {
+        None => "MISSING",
+        Some(bytes) if validate_profile(bytes).is_err() => "INVALID",
+        Some(bytes) if &bytes[12..16] == b"link" => "DEVICE_LINK",
+        Some(bytes)
+            if &bytes[16..20]
+                != match color {
+                    Color::Rgb => b"RGB ",
+                    Color::Cmyk => b"CMYK",
+                    Color::Gray => b"GRAY",
+                } =>
+        {
+            "COLOR_SPACE_MISMATCH"
+        }
+        Some(_) => "VALIDATED_ENVELOPE",
+    };
     Ok(Metadata {
+        profile_state,
         width,
         height,
         color_space: color,
@@ -220,5 +238,43 @@ mod tests {
             panic!("unexpected output layout")
         };
         assert_eq!(samples, vec![255, 0, 0, 0, 0, 255]);
+    }
+}
+
+#[cfg(test)]
+mod profile_evidence_tests {
+    use super::*;
+    #[test]
+    fn embedded_profiles_are_classified_without_guessing_or_native_parsing() {
+        let rgb = Profile::new_srgb().icc().unwrap();
+        let mut mismatch = rgb.clone();
+        mismatch[16..20].copy_from_slice(b"GRAY");
+        let mut link = rgb.clone();
+        link[12..16].copy_from_slice(b"link");
+        link[20..24].copy_from_slice(b"RGB ");
+        for (profile, state) in [
+            (None, "MISSING"),
+            (Some(rgb), "VALIDATED_ENVELOPE"),
+            (Some(vec![0; 16]), "INVALID"),
+            (Some(mismatch), "COLOR_SPACE_MISMATCH"),
+            (Some(link), "DEVICE_LINK"),
+        ] {
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            {
+                let mut encoder = TiffEncoder::new(&mut bytes).unwrap();
+                let mut image = encoder.new_image::<colortype::RGB8>(1, 1).unwrap();
+                if let Some(profile) = &profile {
+                    image
+                        .encoder()
+                        .write_tag(Tag::Unknown(34675), profile.as_slice())
+                        .unwrap();
+                }
+                image.write_data(&[0, 0, 0]).unwrap();
+            }
+            bytes.set_position(0);
+            let metadata = describe_tiff(bytes).unwrap();
+            assert_eq!(metadata.profile_state, state);
+            assert_eq!(metadata.profile_sha256, profile.map(|bytes| hash(&bytes)));
+        }
     }
 }

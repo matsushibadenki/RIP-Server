@@ -66,6 +66,7 @@ pub struct ValidatedRender {
     pub rendered: RenderedDocument,
     pub source_bytes: u64,
     pub strict_pdf: bool,
+    pub profile_analysis: serde_json::Value,
 }
 pub async fn render(
     root: &Path,
@@ -95,6 +96,19 @@ pub async fn render(
         } else {
             None
         };
+        let profile_analysis = rip_interpreter::inspect_source_profiles(
+            &source,
+            uuid::Uuid::new_v4(),
+            &engine.mupdf.sandbox.image,
+        )
+        .await?;
+        if profile_analysis["sourceSha256"] != job.source_sha256
+            || profile_analysis["sourceBytes"] != snapshot.bytes
+        {
+            return Err(InterpreterError::Rejected(
+                "source_profile_integrity_mismatch",
+            ));
+        }
         let run = job
             .worker_run_id
             .ok_or(InterpreterError::Rejected("missing_worker_run"))?;
@@ -112,6 +126,7 @@ pub async fn render(
             rendered,
             source_bytes: snapshot.bytes,
             strict_pdf,
+            profile_analysis,
         })
     }
     .await;

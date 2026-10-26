@@ -25,4 +25,8 @@ jobs:
           /tmp/jrip-acx-validator/bin/pip install -r tests/acx/requirements.txt
           echo "/tmp/jrip-acx-validator/bin" >> "$GITHUB_PATH"
           node --version
+      - name: Test source ICC declaration analyzer
+        run: |
+          /tmp/jrip-acx-validator/bin/pip install -r adapters/source_profiles/requirements.txt
+          python3 -m unittest discover -s adapters/source_profiles -p 'test_*.py' -v
       - run: cargo test --workspace --locked -- --ignored

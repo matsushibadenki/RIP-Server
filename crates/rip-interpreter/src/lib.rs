@@ -412,6 +412,23 @@ pub async fn inspect_pdf_attempt_with_image(
     id: uuid::Uuid,
     image: &str,
 ) -> Result<serde_json::Value, InterpreterError> {
+    inspect_script(source, id, image, "inspect.py", true).await
+}
+/// Passive PDF/PS declarations only; uses the same isolated read-only source mount.
+pub async fn inspect_source_profiles(
+    source: &Path,
+    id: uuid::Uuid,
+    image: &str,
+) -> Result<serde_json::Value, InterpreterError> {
+    inspect_script(source, id, image, "source_profiles.py", false).await
+}
+async fn inspect_script(
+    source: &Path,
+    id: uuid::Uuid,
+    image: &str,
+    script: &str,
+    strict_pdf: bool,
+) -> Result<serde_json::Value, InterpreterError> {
     let source = tokio::fs::canonicalize(source).await?;
     let config = SandboxConfig {
         image: image.into(),
@@ -441,7 +458,7 @@ pub async fn inspect_pdf_attempt_with_image(
     args.truncate(args.len() - 3);
     let index = args.len() - 1;
     args.splice(index..index, ["--entrypoint".into(), "python3".into()]);
-    args.extend(["-I".into(), "/usr/local/lib/jrip/inspect.py".into()]);
+    args.extend(["-I".into(), format!("/usr/local/lib/jrip/{script}")]);
     let mut child = Command::new("docker")
         .args(args)
         .stdin(Stdio::null())
@@ -462,19 +479,40 @@ pub async fn inspect_pdf_attempt_with_image(
             return Err(InterpreterError::Rejected("inspection_output_limit"));
         }
         if !child.wait().await?.success() {
-            return Err(InterpreterError::Rejected("pdf_inspection_failed"));
+            return Err(InterpreterError::Rejected(if strict_pdf {
+                "pdf_inspection_failed"
+            } else {
+                "source_profile_analysis_failed"
+            }));
         }
         let value: serde_json::Value = serde_json::from_slice(&bytes)
             .map_err(|_| InterpreterError::Rejected("invalid_inspection"))?;
-        if value["schemaVersion"] != 1
-            || value["contentParsed"] != true
-            || value["repaired"] != false
-            || value["encrypted"] != false
-            || !value["pages"]
+        if strict_pdf {
+            if value["schemaVersion"] != 1
+                || value["contentParsed"] != true
+                || value["repaired"] != false
+                || value["encrypted"] != false
+                || !value["pages"]
+                    .as_array()
+                    .is_some_and(|pages| !pages.is_empty() && pages.len() <= 100)
+            {
+                return Err(InterpreterError::Rejected("invalid_inspection"));
+            }
+        } else if value["schemaVersion"] != 1
+            || value["profile"] != "org.jrip.source-color-profiles-v1"
+            || value["automaticSelection"] != false
+            || value["outputIntentIsInputProfile"] != false
+            || !matches!(
+                value["status"].as_str(),
+                Some("DECLARATIONS_INSPECTED" | "INCOMPLETE")
+            )
+            || !value["profiles"]
                 .as_array()
-                .is_some_and(|pages| !pages.is_empty() && pages.len() <= 100)
+                .is_some_and(|profiles| profiles.len() <= 64)
         {
-            return Err(InterpreterError::Rejected("invalid_inspection"));
+            return Err(InterpreterError::Rejected(
+                "invalid_source_profile_analysis",
+            ));
         }
         Ok(value)
     })

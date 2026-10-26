@@ -298,3 +298,7 @@ PrintIntent事前確認・原稿一括受付・RIP待機・ICC処理・承認・
 - [ACX lifecycle](docs/ACX-LIFECYCLE.md): discovery and durable acceptance / 発見可能な経路と永続受付 / 可发现流程及持久接收。
 
 - [Persistent Color Policy](docs/COLOR-POLICIES.md): versioned ICC settings / ICC設定の永続版管理 / ICC设置持久版本管理。
+
+- [Color input profile evidence](docs/COLOR-INPUT-PROFILE.md): TIFF ICC inspection / TIFF入力ICC証跡 / TIFF输入ICC证据。
+
+- [Source ICC analysis](docs/SOURCE-COLOR-PROFILES.md): PDF/PS/EPS declarations / 原稿内部ICC証跡 / 原稿内部ICC证据。

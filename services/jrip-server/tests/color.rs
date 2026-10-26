@@ -394,3 +394,124 @@ async fn immutable_color_policies_are_scoped_durable_and_used_by_attempts() {
         StatusCode::UNPROCESSABLE_ENTITY
     );
 }
+
+#[tokio::test]
+async fn input_profile_evidence_is_hash_verified_scoped_and_never_selects_implicitly() {
+    let (_dir, mut app, job, icc) = seed().await;
+    let path = format!("/api/v1/jobs/{}/color-input-profile", job.id);
+    let get = |token: &str| {
+        Request::get(&path)
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+    let response = jrip_server::router(app.clone())
+        .oneshot(get("admin-token"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let report: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(report["status"], "EXPLICIT_PROFILE_AVAILABLE");
+    assert_eq!(report["candidateProfileSha256"], icc);
+    assert_eq!(report["automaticSelection"], false);
+    assert_eq!(report["evidence"]["pages"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        report["evidenceDigest"],
+        rip_digest::digest(&report["evidence"]).unwrap()
+    );
+    assert!(app.repo.next_color().await.unwrap().is_none());
+    app.credentials = vec![jrip_server::Credential {
+        token: "reader".into(),
+        identity: "reader".into(),
+        scopes: vec!["jobs:read".into()],
+    }];
+    assert_eq!(
+        jrip_server::router(app.clone())
+            .oneshot(get("reader"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    app.credentials.clear();
+    std::fs::remove_file(app.root.join("color-profiles").join(format!("{icc}.icc"))).unwrap();
+    let response = jrip_server::router(app.clone())
+        .oneshot(get("admin-token"))
+        .await
+        .unwrap();
+    let report: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(report["status"], "EXPLICIT_SELECTION_REQUIRED");
+    assert!(report["candidateProfileSha256"].is_null());
+    assert_eq!(report["evidence"]["pages"][0]["registered"], false);
+    let mut mixed_job = job.clone();
+    mixed_job.id = Uuid::new_v4();
+    mixed_job.state = JobState::Spooling;
+    mixed_job.revision = 0;
+    app.repo.insert(&mixed_job).await.unwrap();
+    let root = app
+        .root
+        .join("jobs")
+        .join(mixed_job.id.to_string())
+        .join("raster");
+    std::fs::create_dir_all(&root).unwrap();
+    let registry = rip_color::registry::Registry::open(app.root.join("color-profiles")).unwrap();
+    let mut files = Vec::new();
+    for page in 1..=2 {
+        let mut profile = lcms2::Profile::new_srgb().icc().unwrap();
+        profile[64..68].copy_from_slice(&(page as u32 - 1).to_be_bytes());
+        registry.register(&profile).unwrap();
+        let file = root.join(format!("page-{page:06}.tiff"));
+        let mut encoder =
+            tiff::encoder::TiffEncoder::new(std::fs::File::create(&file).unwrap()).unwrap();
+        let mut image = encoder
+            .new_image::<tiff::encoder::colortype::RGB8>(1, 1)
+            .unwrap();
+        image
+            .encoder()
+            .write_tag(tiff::tags::Tag::Unknown(34675), profile.as_slice())
+            .unwrap();
+        image.write_data(&[0, 0, 0]).unwrap();
+        files.push(file);
+    }
+    app.repo
+        .complete_with_artifacts(
+            mixed_job.clone(),
+            &jrip_server::artifacts::hash_pages(&files).await.unwrap(),
+        )
+        .await
+        .unwrap();
+    let response = jrip_server::router(app.clone())
+        .oneshot(
+            Request::get(format!("/api/v1/jobs/{}/color-input-profile", mixed_job.id))
+                .header("authorization", "Bearer admin-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mixed: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(mixed["mixedProfiles"], true);
+    assert!(mixed["candidateProfileSha256"].is_null());
+    assert_eq!(mixed["status"], "EXPLICIT_SELECTION_REQUIRED");
+    // Tampering cannot turn an untrusted new profile into evidence about the original artifact.
+    std::fs::write(
+        app.root
+            .join("jobs")
+            .join(job.id.to_string())
+            .join("raster/page-000001.tiff"),
+        b"corrupt",
+    )
+    .unwrap();
+    assert_ne!(
+        jrip_server::router(app.clone())
+            .oneshot(get("admin-token"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+}

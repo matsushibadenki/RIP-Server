@@ -124,7 +124,7 @@
 - 🟢 [Done] `POST /api/v1/print/resolve` でACX PrintIntentをTIFF出力用JobTicketへ能力照合する。必須条件の競合、推奨値の調整、実機出力・ICC・用紙・両面・期限など未対応設定を明示する。原稿取得・検証、認可、コミット、ジョブ投入は後続工程。
 - 🟢 [Done] ACX namespaced lifecycle discoveryと、公開経路を使うpreflight→主体／digest／原稿照合→同時commit重複排除→再起動後Receiptの統合検証。[ACX-LIFECYCLE.md](ACX-LIFECYCLE.md)。 / Discoverable settings lifecycle and durable acceptance integration / 可发现的设置生命周期及持久接收集成。
 - 🟢 [Done] 固定ACX Manifest／Receipt schemaとPython jsonschema・Node独立検証器で、受付／成功／失敗／取消Receiptの関連・digest・公開鍵署名を検証。再署名した契約不一致も拒否しCIへ組み込み。成功artifactは模擬metadataで、実描画・実機認証とは区別。[検証範囲](../tests/acx/README.md)。 / Independent schema and signed lifecycle evidence checks / 独立schema及已签名生命周期证据验证。
-- ⭕️ [Pending] Docker実interpreterを通す統合lifecycle受入試験（現在Docker停止）。 / Real interpreter lifecycle acceptance / 实际interpreter生命周期验收。
+- ⭕️ [Pending] Docker実interpreterを通す統合lifecycle受入試験（受入未実施）。 / Real interpreter lifecycle acceptance / 实际interpreter生命周期验收。
 
 ```text
 Agent
@@ -188,8 +188,10 @@ Printer
 - 🟢 [Done] SHA-256で固定するICC profile registryと登録・照会CLI。重複登録は同じhashを返し、破損・シンボリックリンクを拒否する。 / Immutable ICC registry and CLI / 不可变ICC注册库及CLI。
 - 🟢 [Done] ICC登録API（settings:write）、永続Color attempt、隔離Docker Worker、ページ進捗、hash付きカラー成果物・レポート、profileを照合するDelivery接続、MCP色処理tool。 / Isolated color pipeline and scoped control / 隔离颜色流程及权限控制。
 - 🟢 [Done] 永続Color Policy/presetのJCS内容digest版管理、ICC hash固定、3言語名称、登録scope・理由・原子監査、cursor一覧・再起動復旧、保存版からの変換投入とticket／結果への参照。[COLOR-POLICIES.md](COLOR-POLICIES.md)。 / Persistent immutable color policies and reference-based submission / 持久不可变颜色策略及引用投入。
-- ⭕️ [Pending] 保存Color Policy参照を使うDocker実変換試験（現在Docker停止）。 / Saved-policy Docker conversion / 保存策略的Docker实际转换。
-- 🟠 [Next] 入力profile判定、gamut警告、共通artifact保持期限への統合。 / Input profile inference, gamut and retention / 输入profile推断、色域及保留期限。
+- ⭕️ [Pending] 保存Color Policy参照を使うDocker実変換試験（受入未実施）。 / Saved-policy Docker conversion / 保存策略的Docker实际转换。
+- 🟢 [Done] Color工程入力TIFFのICC証跡API。有界hash検証snapshot、未埋込／不正／色空間不一致／DeviceLink分類、登録照合・ページ間混在・manifest一致、JCS証跡digest。自動推定・投入は行わない。[COLOR-INPUT-PROFILE.md](COLOR-INPUT-PROFILE.md)。 / Bounded raster input-profile evidence / 有界光栅输入profile证据。
+- 🟢 [Done] 原稿PDFのICCBased／OutputIntentとPS/EPSの静的ICC DSC宣言を隔離workerで有界解析。原稿hash・run・lease拘束、JCS証跡、結果Receipt伝播、Python fixtureと実Docker通常worker試験。[SOURCE-COLOR-PROFILES.md](SOURCE-COLOR-PROFILES.md)。 / Bounded passive source ICC declarations and durable evidence / 有界被动原稿ICC声明及持久证据。
+- 🟠 [Next] gamut警告、共通artifact保持期限への統合。 / Gamut warnings and common artifact retention / 色域警告及共同artifact保留期限集成。
 - ⭕️ [Pending] 実機ICCによるK-only／K-planeと色再現品質の受入確認。
 - 🔴 [Later] オーバープリント、分版プレビュー、gamut解析。
 - 🔴 [Later] CMYK16、タイルRIP、メモリ予算、ハーフトーン、DeviceN、特色、Trapping。

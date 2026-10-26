@@ -106,6 +106,10 @@ pub fn router(app: App) -> Router {
         )
         .route("/api/v1/color/capabilities", get(color::capabilities))
         .route(
+            "/api/v1/jobs/{id}/color-input-profile",
+            get(color::input_profile::inspect),
+        )
+        .route(
             "/api/v1/color/policies",
             get(color::policies::list)
                 .post(color::policies::create)
@@ -263,6 +267,11 @@ impl IntoResponse for ApiError {
 }
 fn messages(code: &str) -> serde_json::Value {
     let (en, ja, zh) = match code {
+        "color_profile_inspection_limit" => (
+            "Inspect at most 32 pages, 64 MiB per page and 256 MiB total",
+            "32ページ・1ページ64 MiB・合計256 MiB以内の原稿を使用してください",
+            "请使用最多32页、每页64 MiB、总计256 MiB的原稿",
+        ),
         "invalid_color_policy_definition" => (
             "Provide version 1, three nonempty labels and a reason",
             "version 1・3言語の名称・変更理由を指定してください",

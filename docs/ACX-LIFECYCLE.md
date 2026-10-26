@@ -37,7 +37,7 @@ the validator before ignored tests. See [fixture contract](../tests/acx/README.m
 Successful artifact metadata is synthetic; this validates the evidence publisher,
 not interpreter output or physical printing.
 ⭕️ [Pending] Combined lifecycle acceptance through the real Docker interpreters
-while Docker is unavailable; cross-provider interoperability and physical printer
+with the independent conformance checker is still outstanding; cross-provider interoperability and physical printer
 acceptance remain separate work.
 
 ## 日本語
@@ -56,7 +56,7 @@ preflightのticket・主体・認可証跡・期限をJCS digestへ拘束し、c
 🟢 [Done] ACX schema固定コピーとPython／Nodeで受付・成功・失敗・取消証跡を独立検証します。
 署名・digest・記録間の関連を照合し、再署名された契約不一致も拒否します。CIにも組み込みました。
 成功artifactは模擬metadataで、実描画・実機印刷の検証とは区別します。
-⭕️ [Pending] Docker停止中のため実interpreterを通す統合lifecycle受入試験。
+⭕️ [Pending] 独立適合checkerと実interpreterを組み合わせた統合lifecycle受入試験。
 
 ## 简体中文
 
@@ -71,4 +71,4 @@ preflightのticket・主体・認可証跡・期限をJCS digestへ拘束し、c
 不将这些测试视为全部job的tenant隔离或独立ACX schema验证。
 🟢 [Done] 用固定ACX schema及Python／Node独立验证接收、成功、失败及取消证据。
 核对签名、digest及记录关联，拒绝重新签名的契约不一致，并纳入CI。成功artifact为模拟元数据，不证明实际渲染或打印。
-⭕️ [Pending] Docker未运行，实际interpreter的完整lifecycle验收暂缓。
+⭕️ [Pending] 独立符合性checker与实际interpreter组合的完整lifecycle验收。
