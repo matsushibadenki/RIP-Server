@@ -1,21 +1,28 @@
 use super::*;
 impl Repository {
     pub async fn claim_upload_retention(&self, id: Uuid) -> Result<(), StorageError> {
-        let changed=sqlx::query("INSERT INTO retention_tombstones(job_id,created_at,finished_at) SELECT ?,?,NULL WHERE NOT EXISTS(SELECT 1 FROM jobs WHERE id=? UNION ALL SELECT 1 FROM job_events WHERE job_id=? UNION ALL SELECT 1 FROM job_tickets WHERE job_id=? UNION ALL SELECT 1 FROM worker_leases WHERE job_id=? UNION ALL SELECT 1 FROM retention_tombstones WHERE job_id=?)")
-            .bind(id.to_string()).bind(now()).bind(id.to_string()).bind(id.to_string()).bind(id.to_string()).bind(id.to_string()).bind(id.to_string()).execute(&self.pool).await?;
+        let changed=sqlx::query("INSERT INTO retention_tombstones(job_id,created_at,finished_at) SELECT ?1,?2,NULL WHERE NOT EXISTS(SELECT 1 FROM jobs WHERE id=?1 UNION ALL SELECT 1 FROM job_events WHERE job_id=?1 UNION ALL SELECT 1 FROM job_tickets WHERE job_id=?1 UNION ALL SELECT 1 FROM worker_leases WHERE job_id=?1 UNION ALL SELECT 1 FROM retention_tombstones WHERE job_id=?1 UNION ALL SELECT 1 FROM artifact_retention_holds WHERE job_id=?1 UNION ALL SELECT 1 FROM artifact_retention_revisions WHERE job_id=?1)")
+            .bind(id.to_string()).bind(now()).execute(&self.pool).await?;
         if changed.rows_affected() != 1 {
             return Err(StorageError::Conflict);
         }
         Ok(())
     }
     pub async fn upload_has_registration(&self, id: Uuid) -> Result<bool, StorageError> {
-        let exists: i64 = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM jobs WHERE id=? UNION ALL SELECT 1 FROM job_events WHERE job_id=? UNION ALL SELECT 1 FROM job_tickets WHERE job_id=? UNION ALL SELECT 1 FROM worker_leases WHERE job_id=? UNION ALL SELECT 1 FROM retention_tombstones WHERE job_id=?)")
-            .bind(id.to_string()).bind(id.to_string()).bind(id.to_string()).bind(id.to_string()).bind(id.to_string()).fetch_one(&self.pool).await?;
+        let exists:i64=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM jobs WHERE id=?1 UNION ALL SELECT 1 FROM job_events WHERE job_id=?1 UNION ALL SELECT 1 FROM job_tickets WHERE job_id=?1 UNION ALL SELECT 1 FROM worker_leases WHERE job_id=?1 UNION ALL SELECT 1 FROM retention_tombstones WHERE job_id=?1 UNION ALL SELECT 1 FROM artifact_retention_holds WHERE job_id=?1 UNION ALL SELECT 1 FROM artifact_retention_revisions WHERE job_id=?1)")
+            .bind(id.to_string()).fetch_one(&self.pool).await?;
         Ok(exists == 1)
     }
     pub async fn retention_candidates(&self, cutoff: i64) -> Result<Vec<Uuid>, StorageError> {
-        let ids:Vec<String>=sqlx::query_scalar("SELECT j.id FROM jobs j WHERE json_extract(j.payload,'$.state') IN ('COMPLETED','CANCELLED','FAILED') AND json_extract(j.payload,'$.updated_at')<=? AND NOT EXISTS(SELECT 1 FROM worker_leases l WHERE l.job_id=j.id) AND NOT EXISTS(SELECT 1 FROM print_pipelines p WHERE p.source_job=j.id AND p.state NOT IN ('COMPLETED','FAILED','CANCELLED')) AND NOT EXISTS(SELECT 1 FROM color_attempts c WHERE c.source_job=j.id AND (c.state IN ('QUEUED','RUNNING') OR EXISTS(SELECT 1 FROM color_cleanup cc WHERE cc.attempt_id=c.id))) AND NOT EXISTS(SELECT 1 FROM deliveries d WHERE json_extract(d.payload,'$.ticket.sourceJob')=j.id AND d.state IN ('QUEUED','SENDING','ACCEPTED','UNKNOWN')) ORDER BY j.created_at,j.id LIMIT 100")
-            .bind(cutoff).fetch_all(&self.pool).await?;
+        let guard = crate::retention::guard("j.id", "?1", "?2");
+        let sql = format!(
+            "SELECT j.id FROM jobs j WHERE json_extract(j.payload,'$.state') IN ('COMPLETED','CANCELLED','FAILED') AND json_type(j.payload,'$.updated_at')='integer' AND json_extract(j.payload,'$.updated_at')>=0 AND json_extract(j.payload,'$.updated_at')<=?1 AND NOT EXISTS(SELECT 1 FROM worker_leases l WHERE l.job_id=j.id) AND {guard} ORDER BY j.created_at,j.id LIMIT 100"
+        );
+        let ids: Vec<String> = sqlx::query_scalar(&sql)
+            .bind(cutoff)
+            .bind(now())
+            .fetch_all(&self.pool)
+            .await?;
         ids.into_iter()
             .map(|id| Uuid::parse_str(&id).map_err(|_| StorageError::Conflict))
             .collect()
@@ -24,20 +31,43 @@ impl Repository {
         &self,
         cutoff: i64,
     ) -> Result<Vec<Uuid>, StorageError> {
-        let ids:Vec<String>=sqlx::query_scalar("SELECT e.job_id FROM job_events e WHERE e.sequence=(SELECT MAX(last.sequence) FROM job_events last WHERE last.job_id=e.job_id) AND e.state IN ('\"COMPLETED\"','\"CANCELLED\"','\"FAILED\"') AND e.created_at<=? AND NOT EXISTS(SELECT 1 FROM jobs j WHERE j.id=e.job_id) AND NOT EXISTS(SELECT 1 FROM retention_tombstones t WHERE t.job_id=e.job_id) AND NOT EXISTS(SELECT 1 FROM worker_leases l WHERE l.job_id=e.job_id) AND NOT EXISTS(SELECT 1 FROM print_pipelines p WHERE p.source_job=e.job_id AND p.state NOT IN ('COMPLETED','FAILED','CANCELLED')) AND NOT EXISTS(SELECT 1 FROM color_attempts c WHERE c.source_job=e.job_id AND (c.state IN ('QUEUED','RUNNING') OR EXISTS(SELECT 1 FROM color_cleanup cc WHERE cc.attempt_id=c.id))) AND NOT EXISTS(SELECT 1 FROM deliveries d WHERE json_extract(d.payload,'$.ticket.sourceJob')=e.job_id AND d.state IN ('QUEUED','SENDING','ACCEPTED','UNKNOWN')) ORDER BY e.sequence LIMIT 100")
-            .bind(cutoff).fetch_all(&self.pool).await?;
+        let guard = crate::retention::guard("e.job_id", "?1", "?2");
+        let sql = format!(
+            "SELECT e.job_id FROM job_events e WHERE e.sequence=(SELECT MAX(last.sequence) FROM job_events last WHERE last.job_id=e.job_id) AND e.state IN ('\"COMPLETED\"','\"CANCELLED\"','\"FAILED\"') AND e.created_at>=0 AND e.created_at<=?1 AND NOT EXISTS(SELECT 1 FROM jobs j WHERE j.id=e.job_id) AND NOT EXISTS(SELECT 1 FROM retention_tombstones t WHERE t.job_id=e.job_id) AND NOT EXISTS(SELECT 1 FROM worker_leases l WHERE l.job_id=e.job_id) AND {guard} ORDER BY e.sequence LIMIT 100"
+        );
+        let ids: Vec<String> = sqlx::query_scalar(&sql)
+            .bind(cutoff)
+            .bind(now())
+            .fetch_all(&self.pool)
+            .await?;
         ids.into_iter()
             .map(|id| Uuid::parse_str(&id).map_err(|_| StorageError::Conflict))
             .collect()
     }
     pub async fn claim_retention(&self, id: Uuid, cutoff: i64) -> Result<(), StorageError> {
         let mut tx = self.pool.begin().await?;
-        let result=sqlx::query("DELETE FROM jobs WHERE id=? AND json_extract(payload,'$.state') IN ('COMPLETED','CANCELLED','FAILED') AND json_extract(payload,'$.updated_at')<=? AND NOT EXISTS(SELECT 1 FROM worker_leases l WHERE l.job_id=jobs.id) AND NOT EXISTS(SELECT 1 FROM print_pipelines p WHERE p.source_job=jobs.id AND p.state NOT IN ('COMPLETED','FAILED','CANCELLED')) AND NOT EXISTS(SELECT 1 FROM color_attempts c WHERE c.source_job=jobs.id AND (c.state IN ('QUEUED','RUNNING') OR EXISTS(SELECT 1 FROM color_cleanup cc WHERE cc.attempt_id=c.id))) AND NOT EXISTS(SELECT 1 FROM deliveries d WHERE json_extract(d.payload,'$.ticket.sourceJob')=jobs.id AND d.state IN ('QUEUED','SENDING','ACCEPTED','UNKNOWN'))")
-            .bind(id.to_string()).bind(cutoff).execute(&mut *tx).await?;
-        if result.rows_affected() != 1 {
-            let orphan:i64=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM job_events e WHERE e.job_id=? AND e.sequence=(SELECT MAX(last.sequence) FROM job_events last WHERE last.job_id=e.job_id) AND e.state IN ('\"COMPLETED\"','\"CANCELLED\"','\"FAILED\"') AND e.created_at<=? AND NOT EXISTS(SELECT 1 FROM jobs j WHERE j.id=e.job_id) AND NOT EXISTS(SELECT 1 FROM retention_tombstones t WHERE t.job_id=e.job_id) AND NOT EXISTS(SELECT 1 FROM worker_leases l WHERE l.job_id=e.job_id) AND NOT EXISTS(SELECT 1 FROM print_pipelines p WHERE p.source_job=e.job_id AND p.state NOT IN ('COMPLETED','FAILED','CANCELLED')) AND NOT EXISTS(SELECT 1 FROM color_attempts c WHERE c.source_job=e.job_id AND (c.state IN ('QUEUED','RUNNING') OR EXISTS(SELECT 1 FROM color_cleanup cc WHERE cc.attempt_id=c.id))) AND NOT EXISTS(SELECT 1 FROM deliveries d WHERE json_extract(d.payload,'$.ticket.sourceJob')=e.job_id AND d.state IN ('QUEUED','SENDING','ACCEPTED','UNKNOWN')))")
-                .bind(id.to_string()).bind(cutoff).fetch_one(&mut *tx).await?;
-            if orphan != 1 {
+        let guard = crate::retention::guard("jobs.id", "?2", "?3");
+        let sql = format!(
+            "DELETE FROM jobs WHERE id=?1 AND json_extract(payload,'$.state') IN ('COMPLETED','CANCELLED','FAILED') AND json_type(payload,'$.updated_at')='integer' AND json_extract(payload,'$.updated_at')>=0 AND json_extract(payload,'$.updated_at')<=?2 AND NOT EXISTS(SELECT 1 FROM worker_leases l WHERE l.job_id=jobs.id) AND {guard}"
+        );
+        let changed = sqlx::query(&sql)
+            .bind(id.to_string())
+            .bind(cutoff)
+            .bind(now())
+            .execute(&mut *tx)
+            .await?;
+        if changed.rows_affected() != 1 {
+            let guard = crate::retention::guard("e.job_id", "?2", "?3");
+            let sql = format!(
+                "SELECT EXISTS(SELECT 1 FROM job_events e WHERE e.job_id=?1 AND e.sequence=(SELECT MAX(last.sequence) FROM job_events last WHERE last.job_id=e.job_id) AND e.state IN ('\"COMPLETED\"','\"CANCELLED\"','\"FAILED\"') AND e.created_at>=0 AND e.created_at<=?2 AND NOT EXISTS(SELECT 1 FROM jobs j WHERE j.id=e.job_id) AND NOT EXISTS(SELECT 1 FROM retention_tombstones t WHERE t.job_id=e.job_id) AND NOT EXISTS(SELECT 1 FROM worker_leases l WHERE l.job_id=e.job_id) AND {guard})"
+            );
+            let eligible: i64 = sqlx::query_scalar(&sql)
+                .bind(id.to_string())
+                .bind(cutoff)
+                .bind(now())
+                .fetch_one(&mut *tx)
+                .await?;
+            if eligible != 1 {
                 return Err(StorageError::Conflict);
             }
         }

@@ -48,9 +48,10 @@ async fn retention_is_opt_in_preserves_active_jobs_and_resumes_interrupted_purge
         .await
         .unwrap();
     let expired = seed(&app, JobState::Completed, 3 * 86400).await;
+    let recent_delivery_source = seed(&app, JobState::Completed, 3 * 86400).await;
     let finished = app
         .repo
-        .enqueue_delivery(Uuid::new_v4(), ticket(&expired))
+        .enqueue_delivery(Uuid::new_v4(), ticket(&recent_delivery_source))
         .await
         .unwrap();
     let run = Uuid::new_v4();
@@ -110,11 +111,12 @@ async fn retention_is_opt_in_preserves_active_jobs_and_resumes_interrupted_purge
     assert_eq!(applied["purgedJobs"], serde_json::json!([expired.id]));
     assert!(!app.root.join("jobs").join(expired.id.to_string()).exists());
     assert!(reopened.repo.events(expired.id, 0, 100).await.is_ok());
-    for job in [fresh, queued, active] {
+    for job in [fresh, queued, active, recent_delivery_source] {
         assert!(app.repo.get(job.id).await.is_ok());
         assert!(app.root.join("jobs").join(job.id.to_string()).exists());
     }
-    assert!(!delivery_dir.join(format!("{}.pwg", finished.id)).exists());
+    // The source is old, but the derived delivery spool was just completed.
+    assert!(delivery_dir.join(format!("{}.pwg", finished.id)).exists());
     assert!(app.repo.delivery(finished.id).await.is_ok());
     assert!(app.repo.pending_retention().await.unwrap().is_empty());
     assert!(
@@ -415,4 +417,130 @@ async fn orphan_upload_claim_resumes_even_after_marker_removal() {
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn explicit_family_retention_is_scoped_revisioned_and_preserves_orphan_files() {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use http_body_util::BodyExt;
+    use serde_json::{Value, json};
+    use tower::ServiceExt;
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = jrip_server::open(dir.path().into(), "token".into())
+        .await
+        .unwrap();
+    let job = seed(&app, JobState::Completed, 3 * 86400).await;
+    let color_dir = app
+        .root
+        .join("jobs")
+        .join(job.id.to_string())
+        .join("color/example");
+    std::fs::create_dir_all(&color_dir).unwrap();
+    std::fs::write(color_dir.join("page.tiff"), b"retained").unwrap();
+    app.credentials = vec![
+        jrip_server::Credential {
+            token: "reader".into(),
+            identity: "reader".into(),
+            scopes: vec!["jobs:read".into()],
+        },
+        jrip_server::Credential {
+            token: "writer".into(),
+            identity: "operator".into(),
+            scopes: vec!["settings:write".into()],
+        },
+    ];
+    let path = format!("/api/v1/jobs/{}/retention", job.id);
+    let put = |token: &str, revision: i64, until: i64| {
+        Request::put(&path).header("authorization",format!("Bearer {token}")).header("content-type","application/json").body(Body::from(json!({"expectedRevision":revision,"retainUntil":until,"reason":"keep proof artifacts"}).to_string())).unwrap()
+    };
+    let cutoff = rip_storage::now() - 86400;
+    let until = rip_storage::now() + 86400;
+    assert_eq!(
+        jrip_server::router(app.clone())
+            .oneshot(put("reader", 0, until))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let response = jrip_server::router(app.clone())
+        .oneshot(put("writer", 0, until))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let policy: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(policy["revision"], 1);
+    assert_eq!(policy["actor"], "operator");
+    assert_eq!(
+        jrip_server::router(app.clone())
+            .oneshot(put("writer", 0, until + 10))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        jrip_server::router(app.clone())
+            .oneshot(put("writer", 1, until - 10))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        jrip_server::router(app.clone())
+            .oneshot(put("writer", 1, 0))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert!(
+        app.repo
+            .retention_candidates(cutoff)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(app.repo.claim_retention(job.id, cutoff).await.is_err());
+    // Metadata deletion is not physical artifact deletion; orphan maintenance obeys the hold.
+    app.repo.delete(job.clone()).await.unwrap();
+    let mut reopened = jrip_server::open(dir.path().into(), "token".into())
+        .await
+        .unwrap();
+    reopened.credentials = app.credentials.clone();
+    assert_eq!(
+        reopened
+            .repo
+            .artifact_retention_policy(job.id)
+            .await
+            .unwrap(),
+        policy
+    );
+    let preview = jrip_server::maintenance::run(&reopened, cutoff, false)
+        .await
+        .unwrap();
+    assert!(preview["candidateJobs"].as_array().unwrap().is_empty());
+    let result = jrip_server::maintenance::run(&reopened, cutoff, true)
+        .await
+        .unwrap();
+    assert!(result["purgedJobs"].as_array().unwrap().is_empty());
+    assert!(color_dir.join("page.tiff").exists());
+    let response = jrip_server::router(reopened)
+        .oneshot(
+            Request::get(path)
+                .header("authorization", "Bearer reader")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let read: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(read, policy);
 }

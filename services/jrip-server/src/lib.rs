@@ -28,6 +28,7 @@ pub mod pipeline;
 mod pipeline_preflight;
 mod preflight;
 pub mod print;
+mod retention;
 mod retry;
 pub mod source_validation;
 pub use authorization::Credential;
@@ -103,6 +104,12 @@ pub fn router(app: App) -> Router {
         .route(
             "/api/v1/budgets/snapshots/reservations/{id}/reconcile",
             post(budget::reconcile).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
+            "/api/v1/jobs/{id}/retention",
+            get(retention::get)
+                .put(retention::extend)
+                .layer(DefaultBodyLimit::max(4096)),
         )
         .route("/api/v1/color/capabilities", get(color::capabilities))
         .route(
@@ -271,6 +278,11 @@ fn messages(code: &str) -> serde_json::Value {
             "Inspect at most 32 pages, 64 MiB per page and 256 MiB total",
             "32ページ・1ページ64 MiB・合計256 MiB以内の原稿を使用してください",
             "请使用最多32页、每页64 MiB、总计256 MiB的原稿",
+        ),
+        "invalid_artifact_retention" => (
+            "Provide a revision, a future retainUntil within 3650 days, and a reason",
+            "revision・3650日以内の将来のretainUntil・理由を指定してください",
+            "请提供revision、3650天以内的未来retainUntil及原因",
         ),
         "invalid_color_policy_definition" => (
             "Provide version 1, three nonempty labels and a reason",

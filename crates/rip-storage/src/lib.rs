@@ -15,6 +15,7 @@ pub mod maintenance;
 pub mod pipeline;
 pub mod progress;
 pub mod receipts;
+pub mod retention;
 pub mod s3;
 mod s3_resolution;
 pub mod source_validation;
@@ -149,6 +150,7 @@ impl Repository {
         sqlx::query("CREATE TABLE IF NOT EXISTS pipeline_events(sequence INTEGER PRIMARY KEY AUTOINCREMENT,pipeline_id TEXT NOT NULL,payload TEXT NOT NULL)").execute(&pool).await?;
         sqlx::query("CREATE INDEX IF NOT EXISTS pipeline_event_cursor ON pipeline_events(pipeline_id,sequence)").execute(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS delivery_event_details(sequence INTEGER PRIMARY KEY,payload TEXT NOT NULL)").execute(&pool).await?;
+        retention::install(&pool).await?;
         receipts::install(&pool, signer.as_ref()).await?;
         unified::install(&pool).await?;
         Ok(Self {

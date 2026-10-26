@@ -304,3 +304,5 @@ PrintIntent事前確認・原稿一括受付・RIP待機・ICC処理・承認・
 - [Source ICC analysis](docs/SOURCE-COLOR-PROFILES.md): PDF/PS/EPS declarations / 原稿内部ICC証跡 / 原稿内部ICC证据。
 
 - [Gamut warnings](docs/GAMUT-WARNINGS.md): full-pixel ICC diagnostics / 全画素ICC色域警告 / 全像素ICC色域警告。
+
+- [Common artifact retention](docs/ARTIFACT-RETENTION.md): local family retention and holds / 共通保持期限と延長 / 共同保留期限及延长。

@@ -19,7 +19,7 @@ pub async fn run(
         .await?;
     if !apply {
         return Ok(
-            serde_json::json!({"candidateJobs":candidates,"pendingPurges":pending,"admissions":admissions,"abandonedSnapshots":abandoned_snapshots,"abandonedColorStages":abandoned_color_stages,"abandonedUploads":abandoned_uploads,"applied":false}),
+            serde_json::json!({"artifactRetentionProfile":"org.jrip.artifact-family-retention-v1","ageBasis":"latest-related-stage-activity","candidateJobs":candidates,"pendingPurges":pending,"admissions":admissions,"abandonedSnapshots":abandoned_snapshots,"abandonedColorStages":abandoned_color_stages,"abandonedUploads":abandoned_uploads,"applied":false}),
         );
     }
     let sequence = app
@@ -93,7 +93,7 @@ pub async fn run(
             purged.push(id);
         }
         Ok::<_, Box<dyn std::error::Error>>(
-            serde_json::json!({"purgedJobs":purged,"admissions":admissions,"abandonedSnapshots":abandoned_snapshots,"abandonedColorStages":abandoned_color_stages,"abandonedUploads":abandoned_uploads,"applied":true}),
+            serde_json::json!({"artifactRetentionProfile":"org.jrip.artifact-family-retention-v1","ageBasis":"latest-related-stage-activity","purgedJobs":purged,"admissions":admissions,"abandonedSnapshots":abandoned_snapshots,"abandonedColorStages":abandoned_color_stages,"abandonedUploads":abandoned_uploads,"applied":true}),
         )
     }
     .await;
