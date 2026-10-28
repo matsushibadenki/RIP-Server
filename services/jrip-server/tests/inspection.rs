@@ -31,6 +31,7 @@ async fn queue_replay_conflicts_owner_and_invalid_sources_are_bounded() {
         .await
         .unwrap();
     app.credentials = vec![jrip_server::Credential {
+        validity: None,
         token: "token".into(),
         identity: "owner".into(),
         scopes: vec!["jobs:submit".into()],

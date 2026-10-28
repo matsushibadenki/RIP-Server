@@ -32,8 +32,8 @@ pub mod print;
 mod retention;
 mod retry;
 pub mod source_validation;
-pub use authorization::Credential;
 use authorization::authorize;
+pub use authorization::{Credential, CredentialValidity};
 
 pub const MAX_DOCUMENT_BYTES: usize = rip_jobs::MAX_DOCUMENT_BYTES as usize;
 #[derive(Clone)]

@@ -90,16 +90,19 @@ async fn stream_enforces_owners_cursors_scopes_and_releases_capacity() {
         .unwrap();
     app.credentials = vec![
         jrip_server::Credential {
+            validity: None,
             token: "owner".into(),
             identity: "owner".into(),
             scopes: vec!["jobs:submit".into()],
         },
         jrip_server::Credential {
+            validity: None,
             token: "other".into(),
             identity: "other".into(),
             scopes: vec!["jobs:submit".into()],
         },
         jrip_server::Credential {
+            validity: None,
             token: "reader".into(),
             identity: "owner".into(),
             scopes: vec!["jobs:read".into()],
@@ -186,4 +189,58 @@ async fn pipeline_stream_drains_multiple_pages_without_gaps() {
         received.push(value);
     }
     assert_eq!(received, expected);
+}
+
+#[tokio::test]
+async fn expiring_credentials_reject_rest_and_stop_buffered_events() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = jrip_server::open(dir.path().into(), "legacy-token".into())
+        .await
+        .unwrap();
+    let now = rip_storage::now();
+    let expires = now + 5;
+    app.credentials = vec![jrip_server::Credential {
+        token: "short-lived-token-at-least-24-characters".into(),
+        identity: "owner".into(),
+        scopes: vec!["jobs:submit".into()],
+        validity: Some(jrip_server::CredentialValidity {
+            not_before: now - 1,
+            expires_at: expires,
+        }),
+    }];
+    let id = Uuid::new_v4();
+    app.repo
+        .enqueue_inspection(id, "owner", &"a".repeat(64), 1, Uuid::new_v4())
+        .await
+        .unwrap();
+    let token = &app.credentials[0].token;
+    let url = format!("/api/v1/print/document-inspection-requests/{id}/events/stream?after=0");
+    let response = connect(&app, &url, token, None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body();
+    // connect already loaded a durable event page; do not poll it before expiry.
+    tokio::time::sleep(std::time::Duration::from_secs(
+        (expires - rip_storage::now()).max(0) as u64 + 1,
+    ))
+    .await;
+    let frame = body.frame().await.unwrap().unwrap().into_data().unwrap();
+    let text = std::str::from_utf8(&frame).unwrap();
+    assert!(text.contains("AUTHORIZATION_EXPIRED"), "{text}");
+    assert!(!text.contains("QUEUED"));
+    assert!(body.frame().await.is_none());
+    drop(body);
+    assert_eq!(app.event_streams.available_permits(), 64);
+    assert_eq!(
+        connect(&app, &url, token, None).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    // Expiration does not allow fallback to the legacy admin token.
+    assert_eq!(
+        connect(&app, &url, "legacy-token", None).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        app.repo.inspection_request(id, "owner").await.unwrap()["state"],
+        "QUEUED"
+    );
 }

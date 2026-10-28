@@ -107,6 +107,7 @@ async fn independent_roots_share_http_budget_and_release_after_disconnect_or_has
     ]
     .into_iter()
     .map(|(token, identity, scope)| jrip_server::Credential {
+        validity: None,
         token: token.into(),
         identity: identity.into(),
         scopes: vec![scope.into()],

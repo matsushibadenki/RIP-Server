@@ -24,6 +24,7 @@ fn credentials() -> Vec<jrip_server::Credential> {
     [(OWNER, "alice"), (OTHER, "bob")]
         .into_iter()
         .map(|(token, identity)| jrip_server::Credential {
+            validity: None,
             token: token.into(),
             identity: identity.into(),
             scopes: vec!["jobs:submit".into(), "jobs:read".into()],

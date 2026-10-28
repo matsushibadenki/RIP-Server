@@ -29,6 +29,25 @@ use tokio::sync::{Mutex, Semaphore};
 use uuid::Uuid;
 const VERSION: &str = "2025-11-25";
 const SESSION_SECONDS: u64 = 900;
+#[derive(Clone, Copy, Default)]
+pub struct HttpOptions {
+    pub limits: RequestLimits,
+    pub require_expiring_tokens: bool,
+}
+impl HttpOptions {
+    pub fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
+        let require_expiring_tokens =
+            match std::env::var("JRIP_MCP_REQUIRE_EXPIRING_TOKENS").as_deref() {
+                Ok("1") => true,
+                Ok("0") | Err(std::env::VarError::NotPresent) => false,
+                _ => return Err("JRIP_MCP_REQUIRE_EXPIRING_TOKENS must be 0 or 1".into()),
+            };
+        Ok(Self {
+            limits: RequestLimits::from_env()?,
+            require_expiring_tokens,
+        })
+    }
+}
 struct Entry {
     token: String,
     session: Mutex<Session>,
@@ -42,6 +61,7 @@ struct Http {
     sessions: Arc<Mutex<BTreeMap<Uuid, Arc<Entry>>>>,
     origins: Arc<Vec<String>>,
     rate_limiter: Arc<RateLimiter>,
+    require_expiring_tokens: bool,
 }
 /// An empty Origin allowlist rejects every request carrying an Origin header.
 /// Remote sessions deliberately do not receive a filesystem inbox.
@@ -53,11 +73,26 @@ pub fn router_with_limits(
     allowed_origins: Vec<String>,
     limits: RequestLimits,
 ) -> Router {
+    router_with_options(
+        app,
+        allowed_origins,
+        HttpOptions {
+            limits,
+            ..HttpOptions::default()
+        },
+    )
+}
+pub fn router_with_options(
+    app: jrip_server::App,
+    allowed_origins: Vec<String>,
+    options: HttpOptions,
+) -> Router {
     let state = Http {
         app,
         sessions: Arc::new(Mutex::new(BTreeMap::new())),
         origins: Arc::new(allowed_origins),
-        rate_limiter: Arc::new(RateLimiter::new(limits)),
+        rate_limiter: Arc::new(RateLimiter::new(options.limits)),
+        require_expiring_tokens: options.require_expiring_tokens,
     };
     Router::new()
         .route("/mcp", post(receive).get(listen).delete(terminate))
@@ -120,10 +155,13 @@ fn auth(state: &Http, headers: &HeaderMap) -> Result<(String, String, Vec<String
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
         .ok_or((StatusCode::UNAUTHORIZED, "unauthorized"))?;
-    let (identity, scopes) = state
+    let (identity, scopes, expiry) = state
         .app
-        .access(token)
+        .access_with_expiry(token)
         .ok_or((StatusCode::UNAUTHORIZED, "unauthorized"))?;
+    if state.require_expiring_tokens && expiry.is_none() {
+        return Err((StatusCode::UNAUTHORIZED, "expiring_token_required"));
+    }
     Ok((token.into(), identity, scopes))
 }
 fn accepts(headers: &HeaderMap, kind: &str) -> bool {
@@ -240,6 +278,7 @@ async fn receive(
     }
     let entry = entry(&state, &headers, &token).await?;
     let mut session = entry.session.lock().await;
+    auth(&state, &headers)?;
     if entry.closed.load(Ordering::Acquire) || entry.expires <= tokio::time::Instant::now() {
         return Err((StatusCode::NOT_FOUND, "session_not_found"));
     }
@@ -281,6 +320,7 @@ async fn listen(State(state): State<Http>, headers: HeaderMap) -> Result<Respons
         .map_err(|_| (StatusCode::CONFLICT, "notification_stream_already_open"))?;
     {
         let mut session = entry.session.lock().await;
+        auth(&state, &headers)?;
         if !session.ready {
             return Err((StatusCode::BAD_REQUEST, "initialize_session_first"));
         }

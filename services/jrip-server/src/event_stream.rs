@@ -134,6 +134,15 @@ async fn connect(
                     state,
                 ));
             }
+            if authorize(&state.app, &state.headers, state.kind.scope()).is_err() {
+                state.closed = true;
+                return Some((
+                    Ok(Event::default()
+                        .event("stream-error")
+                        .data("{\"reasonCode\":\"AUTHORIZATION_EXPIRED\"}")),
+                    state,
+                ));
+            }
             if let Some(value) = state.events.pop_front() {
                 state.after = value["sequence"]
                     .as_i64()

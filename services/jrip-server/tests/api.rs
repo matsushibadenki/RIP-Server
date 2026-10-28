@@ -950,11 +950,13 @@ async fn scoped_api_credentials_enforce_operations_and_reject_legacy_bypass() {
     let submitter = "submit-token-at-least-24-characters";
     state.credentials = vec![
         jrip_server::Credential {
+            validity: None,
             token: reader.into(),
             identity: "reader".into(),
             scopes: vec!["jobs:read".into()],
         },
         jrip_server::Credential {
+            validity: None,
             token: submitter.into(),
             identity: "submitter".into(),
             scopes: vec!["jobs:submit".into()],
@@ -1231,21 +1233,25 @@ async fn settings_preflight_owner_scope_rotation_and_receipt_survive_restart() {
         .unwrap();
     let credentials = vec![
         jrip_server::Credential {
+            validity: None,
             token: TOKEN.into(),
             identity: "alice".into(),
             scopes: vec!["jobs:submit".into()],
         },
         jrip_server::Credential {
+            validity: None,
             token: "rotated-token-at-least-24-characters".into(),
             identity: "alice".into(),
             scopes: vec!["jobs:submit".into()],
         },
         jrip_server::Credential {
+            validity: None,
             token: "bob-admin-token-at-least-24-characters".into(),
             identity: "bob".into(),
             scopes: vec!["admin".into()],
         },
         jrip_server::Credential {
+            validity: None,
             token: "reader-token-at-least-24-characters".into(),
             identity: "alice".into(),
             scopes: vec!["jobs:read".into()],

@@ -163,7 +163,7 @@ Printer
 2. 🟠 [Next] **RIP操作を細粒度のtoolsにする。** `rip_validate`、`rip_submit`、`rip_get_job`、`rip_list_jobs`、`rip_watch_job`、`rip_hold_job`、`rip_release_job`、`rip_cancel_job`、`rip_retry_job`、`rip_delete_job` を提供する。投入時は原稿、エンジン、DPI、色空間、ページ範囲、優先度、出力先を明示できるようにし、検証だけを行うdry-runとidempotency keyを用意する。更新系toolは期待revisionを受け取り、AIの並行操作による上書きを防ぐ。
 3. 🟠 [Next] **成果物と診断情報をresourcesにする。** `jrip://jobs/{id}`、`jrip://jobs/{id}/events`、`jrip://jobs/{id}/manifest`、`jrip://jobs/{id}/artifacts`、`jrip://jobs/{id}/artifacts/{name}`、`jrip://printers/{id}` を定義する。TIFF、サムネイル、プリフライト結果、エンジンログを列挙し、大容量成果物はMCPメッセージへ埋め込まず、期限付きURLまたは範囲取得可能なresourceとして渡す。ジョブイベント購読と進捗通知に対応し、ポーリング間隔をAI側へ強制しない。
 4. 🟠 [Next] **AIが安全に印刷仕様を組み立てられるようにする。** `print_resolve_intent`、`print_validate_ticket`、`rip_get_presets`、`rip_compare_engines`、`rip_estimate`、`rip_create_preview` を提供し、実行前に能力照合済みJobTicket、代替案、予想ページ数、ラスター寸法、色変換、メモリ・ディスク使用量、印刷機の利用可否を返す。永続preset、Color Policy、キュー、実機プリンター設定の変更は別scopeに分け、変更前後の値と監査理由を必須にする。任意のシェルコマンド、Docker引数、ホストパスは受け付けない。
-5. 🟠 [Next] **リモート認証・接続保護を仕上げる。** identity別scope、stdio／API監査、許可済みroot、入力容量制限、実機印刷と[削除／永続設定の個別承認](OPERATION-APPROVALS.md)は実装済み。MCP HTTPのidentity別要求レート制限も実装済み。残る短期認証トークンとTLSの配備・検証を進める。900秒MCPセッション有効期限は、Bearerトークン自体の失効とは区別する。
+5. 🟠 [Next] **リモート認証・接続保護を仕上げる。** identity別scope、stdio／API監査、許可済みroot、入力容量制限、実機印刷と[削除／永続設定の個別承認](OPERATION-APPROVALS.md)は実装済み。MCP HTTPのidentity別要求レート制限も実装済み。[設定済み短期Bearerの期限検査](EXPIRING-CREDENTIALS.md)も実装済み。残る自動発行・更新・即時失効とTLSの配備・検証を進める。900秒MCPセッション有効期限は、Bearerトークン自体の失効とは区別する。
 6. 🟠 [Next] **長時間処理と再接続を標準化する。** tool呼出しは短時間で永続job-idを返し、RIP処理をMCPセッションの寿命へ結び付けない。AIが切断・再接続してもjob-idとidempotency keyから処理を追跡できるようにする。構造化エラーには安定したcode、再試行可否、推奨待機時間、現在revisionを含め、失敗時に別エンジンへ自動変更せず、AIが差分を確認して明示的に再実行する。
 7. 🔴 [Later] **複数RIPノードの統合制御へ拡張する。** MCP Gatewayから複数のJ-RIP Workerを能力・負荷・データ所在で選択できるようにする。Cloud側と独立WorkerはHTTPS APIまたはジョブキューで疎結合にし、WorkerからManaged PostgreSQLへの直接接続に依存しない。認証情報や原稿をモデルの会話履歴へ露出させず、データ所在地と保持期限をポリシーで制御する。
 
@@ -216,6 +216,7 @@ Printer
 - 🟢 [Done] API／本番stdio MCPの永続監査、管理者監査API、ジョブ・manifest・成果物一覧resources。詳細は[AGENT-CONTROL.md](AGENT-CONTROL.md)。 / Durable audit and JSON resources / 持久化审计与JSON资源。
 - 🟢 [Done] 実機出力承認ポリシー：主体・revision・attempt・出力先profile・用紙に固定した5分間の承認、取消、enqueue時の原子的再検査。 / Bound physical-delivery approvals / 绑定实体投递审批。
 - 🟢 [Done] MCPの個別TIFFバイナリresource。最大32KiBの範囲取得、base64 blob、SHA-256 ETag・総サイズ、APIの全体hash検証・容量制限・権限を共有。[MCP-ARTIFACT-CHUNKS.md](MCP-ARTIFACT-CHUNKS.md)。 / Bounded verified TIFF binary resources / 有界验证TIFF二进制resource。
+- 🟢 [Done] 設定済みBearerの1〜900秒有効期間、REST／MCP HTTP毎要求の期限検査、無期限token拒否オプション、通知／イベントSSE停止、期限境界・ローテーション試験。[EXPIRING-CREDENTIALS.md](EXPIRING-CREDENTIALS.md)。 / Bounded configured Bearer validity and stream expiry / 有界配置Bearer有效期及事件流到期。
 - 🟢 [Done] MCP HTTPのidentity別要求レート制限。token／session／method間共有、本文読取前の拒否、連続補充・有限burst、429・Retry-After・3言語回復案、同時要求・補充・session継続試験。[MCP-HTTP.md](MCP-HTTP.md)。 / Identity-based HTTP request rate limits / 按identity限制HTTP请求频率。
 - 🟢 [Done] 削除／永続設定APIの選択的承認必須化。別admin identity、変更前後・理由・revision・要求digestへの拘束、300秒・1回限りの受付、失効・同時使用・監査ロールバック・再起動、MCP承認転送とpolicy resource。[OPERATION-APPROVALS.md](OPERATION-APPROVALS.md)。 / Scoped deletion/settings approvals with atomic one-use admission / 带原子一次性受理的删除及设置审批。
 

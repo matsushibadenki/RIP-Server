@@ -38,11 +38,13 @@ async fn setup_with_limits(
         .unwrap();
     app.credentials = vec![
         jrip_server::Credential {
+            validity: None,
             token: TOKEN.into(),
             identity: "owner".into(),
             scopes: vec!["jobs:submit".into()],
         },
         jrip_server::Credential {
+            validity: None,
             token: "other-token".into(),
             identity: "other".into(),
             scopes: vec!["jobs:submit".into()],
@@ -382,6 +384,7 @@ async fn rate_limits_share_identity_across_tokens_sessions_and_methods_before_bo
     };
     let (_dir, mut app, _, _) = setup().await;
     app.credentials.push(jrip_server::Credential {
+        validity: None,
         token: "owner-alias-token".into(),
         identity: "owner".into(),
         scopes: vec!["jobs:submit".into()],
@@ -519,4 +522,155 @@ async fn rate_limit_recovery_keeps_the_same_session_and_does_not_dispatch_denied
     let result: Value =
         serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
     assert!(result["result"]["tools"].is_array());
+}
+
+#[tokio::test]
+async fn expiring_only_http_rejects_static_expired_and_future_credentials() {
+    let (_dir, mut app, _, _) = setup().await;
+    let now = rip_storage::now();
+    for (token, not_before, expires_at) in [
+        ("expired", now - 120, now - 1),
+        ("future", now + 100, now + 200),
+        ("active", now - 1, now + 120),
+    ] {
+        app.credentials.push(jrip_server::Credential {
+            token: token.into(),
+            identity: "short-lived".into(),
+            scopes: vec!["jobs:read".into()],
+            validity: Some(jrip_server::CredentialValidity {
+                not_before,
+                expires_at,
+            }),
+        });
+    }
+    let router = jrip_mcp::http::router_with_options(
+        app,
+        vec![],
+        jrip_mcp::http::HttpOptions {
+            require_expiring_tokens: true,
+            ..Default::default()
+        },
+    );
+    for token in [TOKEN, "expired", "future"] {
+        assert_eq!(
+            post(&router, token, None, initialize()).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    assert_eq!(
+        post(&router, "active", None, initialize()).await.status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn credential_expiration_closes_notification_stream_and_rejects_all_http_methods() {
+    use http_body_util::BodyExt;
+    let (_dir, mut app, _, _) = setup().await;
+    let now = rip_storage::now();
+    let expires = now + 5;
+    app.credentials[0].validity = Some(jrip_server::CredentialValidity {
+        not_before: now - 1,
+        expires_at: expires,
+    });
+    // Later token of the same identity is a rotation, not a new session credential.
+    app.credentials.push(jrip_server::Credential {
+        token: "rotated-token".into(),
+        identity: "owner".into(),
+        scopes: vec!["jobs:submit".into()],
+        validity: Some(jrip_server::CredentialValidity {
+            not_before: expires,
+            expires_at: expires + 120,
+        }),
+    });
+    let id = Uuid::new_v4();
+    app.repo
+        .enqueue_inspection(id, "owner", &"a".repeat(64), 1, Uuid::new_v4())
+        .await
+        .unwrap();
+    let router = jrip_mcp::http::router_with_options(
+        app.clone(),
+        vec![],
+        jrip_mcp::http::HttpOptions {
+            require_expiring_tokens: true,
+            ..Default::default()
+        },
+    );
+    let first = post(&router, TOKEN, None, initialize()).await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let session = first.headers()["mcp-session-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        post(
+            &router,
+            TOKEN,
+            Some(&session),
+            json!({"jsonrpc":"2.0","method":"notifications/initialized"})
+        )
+        .await
+        .status(),
+        StatusCode::ACCEPTED
+    );
+    let subscribe = json!({"jsonrpc":"2.0","id":2,"method":"resources/subscribe","params":{"uri":format!("jrip://inspections/{id}/events")}});
+    assert_eq!(
+        post(&router, TOKEN, Some(&session), subscribe)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let response = get(&router, &session).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body();
+    assert!(body.frame().await.unwrap().is_ok()); // initial non-sensitive retry frame
+    tokio::time::sleep(std::time::Duration::from_secs(
+        (expires - rip_storage::now()).max(0) as u64 + 1,
+    ))
+    .await;
+    // Buffered subscription updates must not escape after expiration.
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(2), body.frame())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    for method in ["POST", "GET", "DELETE"] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri("/mcp")
+                    .header("authorization", format!("Bearer {TOKEN}"))
+                    .header("mcp-session-id", &session)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+    assert_eq!(
+        post(
+            &router,
+            "rotated-token",
+            Some(&session),
+            json!({"jsonrpc":"2.0","id":3,"method":"tools/list"})
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        post(&router, "rotated-token", None, initialize())
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    // Authentication expiry does not cancel already accepted inspection work.
+    assert_eq!(
+        app.repo.inspection_request(id, "owner").await.unwrap()["state"],
+        "QUEUED"
+    );
 }

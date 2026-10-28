@@ -1132,11 +1132,13 @@ async fn inspection_reader_is_scoped_and_owner_bound() {
         .unwrap();
     app.credentials = vec![
         jrip_server::Credential {
+            validity: None,
             token: TOKEN.into(),
             identity: "owner".into(),
             scopes: vec!["admin".into()],
         },
         jrip_server::Credential {
+            validity: None,
             token: "other".into(),
             identity: "other".into(),
             scopes: vec!["admin".into()],
@@ -1289,16 +1291,19 @@ async fn inspection_subscriptions_require_submit_scope_and_owner() {
         .unwrap();
     app.credentials = vec![
         jrip_server::Credential {
+            validity: None,
             token: TOKEN.into(),
             identity: "owner".into(),
             scopes: vec!["jobs:submit".into()],
         },
         jrip_server::Credential {
+            validity: None,
             token: "other-token".into(),
             identity: "other".into(),
             scopes: vec!["jobs:submit".into()],
         },
         jrip_server::Credential {
+            validity: None,
             token: "reader-token".into(),
             identity: "owner".into(),
             scopes: vec!["jobs:read".into()],
@@ -1360,6 +1365,7 @@ async fn stdio_pushes_inspection_updates_with_submit_scope_only() {
         .await
         .unwrap();
     app.credentials = vec![jrip_server::Credential {
+        validity: None,
         token: TOKEN.into(),
         identity: "owner".into(),
         scopes: vec!["jobs:submit".into()],
@@ -1856,11 +1862,13 @@ async fn deletion_approval_is_reviewable_and_mcp_forwards_exact_grant() {
     let human = "human-admin-token-at-least-24-characters";
     app.credentials = vec![
         jrip_server::Credential {
+            validity: None,
             token: TOKEN.into(),
             identity: "agent".into(),
             scopes: vec!["admin".into()],
         },
         jrip_server::Credential {
+            validity: None,
             token: human.into(),
             identity: "human".into(),
             scopes: vec!["admin".into()],

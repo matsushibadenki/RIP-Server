@@ -287,11 +287,13 @@ async fn validation_evidence_is_read_only_and_scope_checked() {
         .unwrap();
     app.credentials = vec![
         jrip_server::Credential {
+            validity: None,
             token: "reader".into(),
             identity: "reader".into(),
             scopes: vec!["jobs:read".into()],
         },
         jrip_server::Credential {
+            validity: None,
             token: "submitter".into(),
             identity: "submitter".into(),
             scopes: vec!["jobs:submit".into()],

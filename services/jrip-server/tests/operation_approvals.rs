@@ -25,6 +25,7 @@ async fn app() -> (tempfile::TempDir, jrip_server::App) {
     ]
     .into_iter()
     .map(|(token, identity, scopes)| jrip_server::Credential {
+        validity: None,
         token: token.into(),
         identity: identity.into(),
         scopes: scopes.into_iter().map(Into::into).collect(),

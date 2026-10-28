@@ -84,6 +84,7 @@ async fn color_managed_delivery_requires_matching_target_and_binds_attempt() {
     raw.as_object_mut().unwrap().remove("colorAttemptId");
     assert_eq!(send(&app, &job, &raw).await, StatusCode::BAD_REQUEST);
     app.credentials = vec![jrip_server::Credential {
+        validity: None,
         token: "token".into(),
         identity: "operator".into(),
         scopes: vec!["admin".into()],
@@ -481,6 +482,7 @@ async fn permissions_geometry_and_destination_changes_prevent_printing() {
         Request::post(format!("/api/v1/jobs/{}/deliveries",job.id)).header("authorization","Bearer token").header("content-type","application/json").body(Body::from(serde_json::json!({"requestId":Uuid::new_v4(),"printerId":"test","media":"custom_square_25.4x25.4mm","expectedRevision":job.revision}).to_string())).unwrap()
     };
     app.credentials = vec![jrip_server::Credential {
+        validity: None,
         token: "token".into(),
         identity: "reader".into(),
         scopes: vec!["jobs:read".into()],
@@ -627,11 +629,13 @@ async fn approval_binds_actor_attempt_profile_and_can_be_revoked() {
     app.require_print_approval = true;
     app.credentials = vec![
         jrip_server::Credential {
+            validity: None,
             token: "admin-token-at-least-24-characters".into(),
             identity: "operator".into(),
             scopes: vec!["admin".into()],
         },
         jrip_server::Credential {
+            validity: None,
             token: "agent-token-at-least-24-characters".into(),
             identity: "agent".into(),
             scopes: vec!["printers:print".into(), "artifacts:read".into()],
@@ -1048,6 +1052,7 @@ async fn pipeline_waits_for_approval_and_rechecks_authorization() {
         StatusCode::OK
     );
     app.credentials = vec![jrip_server::Credential {
+        validity: None,
         token: "token".into(),
         identity: "legacy-local".into(),
         scopes: vec!["jobs:read".into()],
@@ -1087,6 +1092,7 @@ async fn pipeline_color_approval_and_delivery_survive_restart() {
     });
     app.require_print_approval = true;
     app.credentials = vec![jrip_server::Credential {
+        validity: None,
         token: "token".into(),
         identity: "operator".into(),
         scopes: vec!["admin".into()],
@@ -1549,6 +1555,7 @@ async fn physical_intent_selects_live_settings_and_commits_bound_workflow() {
 async fn physical_preflight_rechecks_actor_digest_and_configuration() {
     let (_dir, mut app, _, fake, task) = fixture(false).await;
     app.credentials = vec![jrip_server::Credential {
+        validity: None,
         token: "token".into(),
         identity: "owner".into(),
         scopes: vec!["admin".into()],
@@ -1737,6 +1744,7 @@ async fn physical_preflight_expiry_and_icc_integrity_block_acceptance() {
 async fn source_inspection_is_owner_hash_and_media_bound() {
     let (_dir, mut app, _, fake, task) = fixture(false).await;
     app.credentials = vec![jrip_server::Credential {
+        validity: None,
         token: "token".into(),
         identity: "owner".into(),
         scopes: vec!["admin".into()],

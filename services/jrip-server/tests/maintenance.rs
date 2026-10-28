@@ -442,11 +442,13 @@ async fn explicit_family_retention_is_scoped_revisioned_and_preserves_orphan_fil
     std::fs::write(color_dir.join("page.tiff"), b"retained").unwrap();
     app.credentials = vec![
         jrip_server::Credential {
+            validity: None,
             token: "reader".into(),
             identity: "reader".into(),
             scopes: vec!["jobs:read".into()],
         },
         jrip_server::Credential {
+            validity: None,
             token: "writer".into(),
             identity: "operator".into(),
             scopes: vec!["settings:write".into()],

@@ -15,7 +15,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let address: std::net::SocketAddr = std::env::var("JRIP_MCP_LISTEN")
         .unwrap_or_else(|_| "127.0.0.1:8091".into())
         .parse()?;
-    let limits = jrip_mcp::rate_limit::RequestLimits::from_env()?;
+    let options = jrip_mcp::http::HttpOptions::from_env()?;
     let listener = tokio::net::TcpListener::bind(address).await?;
     eprintln!(
         "MCP Streamable HTTP listening on {}",
@@ -24,7 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (shutdown, signal) = tokio::sync::oneshot::channel();
     let server = axum::serve(
         listener,
-        jrip_mcp::http::router_with_limits(app, origins, limits),
+        jrip_mcp::http::router_with_options(app, origins, options),
     )
     .with_graceful_shutdown(async {
         let _ = signal.await;

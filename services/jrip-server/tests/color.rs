@@ -105,11 +105,13 @@ async fn color_queue_is_scoped_idempotent_cancellable_and_pins_source_retention(
     let (_dir, mut app, job, digest) = seed().await;
     app.credentials = vec![
         jrip_server::Credential {
+            validity: None,
             token: "admin-token".into(),
             identity: "admin".into(),
             scopes: vec!["admin".into()],
         },
         jrip_server::Credential {
+            validity: None,
             token: "reader".into(),
             identity: "reader".into(),
             scopes: vec!["jobs:read".into()],
@@ -310,11 +312,13 @@ async fn immutable_color_policies_are_scoped_durable_and_used_by_attempts() {
     );
     app.credentials = vec![
         jrip_server::Credential {
+            validity: None,
             token: "reader".into(),
             identity: "reader".into(),
             scopes: vec!["jobs:read".into()],
         },
         jrip_server::Credential {
+            validity: None,
             token: "admin-token".into(),
             identity: "operator".into(),
             scopes: vec!["jobs:submit".into(), "artifacts:read".into()],
@@ -424,6 +428,7 @@ async fn input_profile_evidence_is_hash_verified_scoped_and_never_selects_implic
     );
     assert!(app.repo.next_color().await.unwrap().is_none());
     app.credentials = vec![jrip_server::Credential {
+        validity: None,
         token: "reader".into(),
         identity: "reader".into(),
         scopes: vec!["jobs:read".into()],

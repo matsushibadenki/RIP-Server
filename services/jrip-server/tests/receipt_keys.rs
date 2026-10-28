@@ -13,11 +13,13 @@ async fn discovery_is_authenticated_scoped_and_has_strict_pagination() {
         .unwrap();
     app.credentials = vec![
         jrip_server::Credential {
+            validity: None,
             token: "reader".into(),
             identity: "reader".into(),
             scopes: vec!["jobs:read".into()],
         },
         jrip_server::Credential {
+            validity: None,
             token: "submitter".into(),
             identity: "submitter".into(),
             scopes: vec!["jobs:submit".into()],
@@ -83,11 +85,13 @@ async fn revocation_is_admin_only_atomic_audited_and_survives_restart() {
     .unwrap();
     app.credentials = vec![
         jrip_server::Credential {
+            validity: None,
             token: "admin".into(),
             identity: "operator".into(),
             scopes: vec!["admin".into()],
         },
         jrip_server::Credential {
+            validity: None,
             token: "reader".into(),
             identity: "reader".into(),
             scopes: vec!["jobs:read".into()],
