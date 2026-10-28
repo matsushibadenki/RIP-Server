@@ -1529,6 +1529,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "rip-core",
  "rip-ipp",
  "rip-raster",
  "rustls-native-certs",

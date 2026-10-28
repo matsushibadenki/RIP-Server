@@ -2004,3 +2004,48 @@ async fn deletion_approval_is_reviewable_and_mcp_forwards_exact_grant() {
     assert_eq!(result["result"]["isError"], false, "{result}");
     assert!(key_repo.receipt_key_approval_state(key).await.unwrap()["revokedAt"].is_i64());
 }
+
+#[tokio::test]
+async fn copy_count_is_validated_and_forwarded_for_delivery_preview_and_pipeline() {
+    use axum::{Json, Router, routing::post};
+    async fn echo(Json(value): Json<Value>) -> Json<Value> {
+        Json(value)
+    }
+    let router = Router::new()
+        .route("/api/v1/jobs/{id}/deliveries", post(echo))
+        .route("/api/v1/jobs/{id}/delivery-preview", post(echo))
+        .route("/api/v1/jobs/{id}/pipelines", post(echo));
+    let mut session = Session::new(router, TOKEN.into());
+    initialize(&mut session).await;
+    for name in [
+        "print_deliver_job",
+        "print_preview_delivery",
+        "print_create_pipeline",
+    ] {
+        let mut args = json!({"jobId":uuid::Uuid::new_v4(),"requestId":uuid::Uuid::new_v4(),"expectedRevision":0,"printerId":"proof","media":"iso_a4_210x297mm","copies":3});
+        let result = session
+            .handle(req(2, "tools/call", json!({"name":name,"arguments":args})))
+            .await
+            .unwrap();
+        assert_eq!(result["result"]["isError"], false, "{result}");
+        let payload: Value =
+            serde_json::from_str(result["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(payload["copies"], 3);
+        for count in [json!(0), json!(1000), json!(-1), json!(1.5), json!("2")] {
+            args["copies"] = count;
+            let reply = session
+                .handle(req(3, "tools/call", json!({"name":name,"arguments":args})))
+                .await
+                .unwrap();
+            assert_eq!(reply["error"]["code"], -32602, "{reply}");
+        }
+        args.as_object_mut().unwrap().remove("copies");
+        let result = session
+            .handle(req(4, "tools/call", json!({"name":name,"arguments":args})))
+            .await
+            .unwrap();
+        let payload: Value =
+            serde_json::from_str(result["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(payload["copies"], 1);
+    }
+}

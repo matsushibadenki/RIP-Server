@@ -31,7 +31,7 @@
 
 埋め込み利用では `Credential.validity` と `CredentialValidity`、`http::HttpOptions.require_expiring_tokens` を使います。`http::router`／`router_with_limits` は従来通り無期限tokenも許し、`router_with_options` で必須化できます。CLIは `HttpOptions::from_env` を使います。直接Repository／DB／ファイル操作はこのAPI認証の対象外です。
 
-🟠 [Next] 自動発行・更新・即時失効の仕組みと外部IdP／OAuth連携。今回の実装は設定済みopaque Bearerの時間制限です。TLS配備・証明書の検証も別項目です。
+🔴 [Later] 自動発行・更新・即時失効の仕組みと外部IdP／OAuth連携。今回の実装は設定済みopaque Bearerの時間制限です。TLS配備・証明書の検証も別項目です。
 
 ## English
 
@@ -41,7 +41,7 @@ Omitted/null `validity` preserves unbounded legacy credentials. Configured expir
 
 MCP rechecks authentication after session-lock waits and in notification loops. Expiration closes notification SSE before buffered updates can be emitted. Inspection/Pipeline REST SSE rechecks before each event and ends with `stream-error` / `AUTHORIZATION_EXPIRED`. Checks run as streams are polled, normally within one second while waiting. Expiration does not cancel accepted jobs or guarantee interruption of already authorized operations/downloads.
 
-Configure distinct tokens under the same identity for rotation. New tokens must initialize new MCP sessions; use durable job IDs and history cursors to reconnect. Ownership, scopes and approvals retain their existing semantics, and request quotas remain identity-based. Policy files load at process startup, not dynamically. This is bounded configured opaque Bearer authentication, not an issuance, refresh, immediate-revocation or OAuth service. These remain Next, alongside TLS deployment verification. Embedded routers support `HttpOptions` and `router_with_options`; existing router helpers keep compatibility defaults. Direct repository/CLI/database/filesystem access is outside the API authentication boundary.
+Configure distinct tokens under the same identity for rotation. New tokens must initialize new MCP sessions; use durable job IDs and history cursors to reconnect. Ownership, scopes and approvals retain their existing semantics, and request quotas remain identity-based. Policy files load at process startup, not dynamically. This is bounded configured opaque Bearer authentication, not an issuance, refresh, immediate-revocation or OAuth service. These remain Later while everyday RIP usability takes priority, alongside TLS deployment verification. Embedded routers support `HttpOptions` and `router_with_options`; existing router helpers keep compatibility defaults. Direct repository/CLI/database/filesystem access is outside the API authentication boundary.
 
 ## 简体中文
 
@@ -51,4 +51,4 @@ Configure distinct tokens under the same identity for rotation. New tokens must 
 
 MCP在等待session锁后及通知循环中再次认证。过期后关闭通知SSE，不发送缓冲中的更新。Inspection／Pipeline REST SSE在每个事件前验证，过期发送 `stream-error` / `AUTHORIZATION_EXPIRED` 并结束。验证在流被读取时执行，等待期间通常约1秒内结束。过期不取消已接受的任务，也不保证中断已授权操作或文件下载。
 
-可为同一identity配置不同token及连续有效期进行轮换。新token须重新初始化MCP session，再使用持久job-id及历史cursor继续跟踪。所有权、scope及审批规则保持有效，频率配额继续按identity共享。配置只在进程启动时加载，不自动热更新。此实现为配置好的opaque Bearer添加时限；自动签发、更新、即时撤销及OAuth／外部IdP集成仍为Next，TLS部署验证也是独立工作。嵌入式使用 `HttpOptions`／`router_with_options`；原router辅助函数保留兼容默认值。直接Repository、CLI、DB及文件访问不属于此API认证边界。
+可为同一identity配置不同token及连续有效期进行轮换。新token须重新初始化MCP session，再使用持久job-id及历史cursor继续跟踪。所有权、scope及审批规则保持有效，频率配额继续按identity共享。配置只在进程启动时加载，不自动热更新。此实现为配置好的opaque Bearer添加时限；自动签发、更新、即时撤销及OAuth／外部IdP集成按一般RIP可用性优先的方针暂列Later，TLS部署验证也是独立工作。嵌入式使用 `HttpOptions`／`router_with_options`；原router辅助函数保留兼容默认值。直接Repository、CLI、DB及文件访问不属于此API认证边界。

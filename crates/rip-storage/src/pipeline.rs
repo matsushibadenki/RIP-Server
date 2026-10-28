@@ -69,7 +69,15 @@ impl Repository {
         let contract = parse(contract)?;
         if (!color.is_null() && color["sourceJob"] != source)
             || (!delivery.is_null()
-                && (delivery["ticket"]["sourceJob"] != source
+                && (delivery["ticket"]
+                    .get("copies")
+                    .cloned()
+                    .unwrap_or(json!(1))
+                    != workflow["ticket"]["request"]
+                        .get("copies")
+                        .cloned()
+                        .unwrap_or(json!(1))
+                    || delivery["ticket"]["sourceJob"] != source
                     || delivery["ticket"]["printerId"]
                         != workflow["ticket"]["request"]["printerId"]
                     || delivery["ticket"]["media"] != workflow["ticket"]["request"]["media"]))
@@ -83,7 +91,12 @@ impl Repository {
             return Err(StorageError::Conflict);
         }
         if !contract.is_null()
-            && (contract["ticket"]["jobId"] != source
+            && (contract["ticket"]["copies"]
+                != workflow["ticket"]["request"]
+                    .get("copies")
+                    .cloned()
+                    .unwrap_or(json!(1))
+                || contract["ticket"]["jobId"] != source
                 || contract["ticket"]["attemptId"] != id.to_string()
                 || contract["ticket"]["sourceSha256"] != workflow["ticket"]["sourceSha256"]
                 || contract["ticket"]["printerConfigSha256"]

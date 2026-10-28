@@ -5,6 +5,11 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DeliveryTicket {
     pub source_job: Uuid,
+    #[serde(
+        default = "rip_core::print::default_copies",
+        skip_serializing_if = "rip_core::print::single_copy"
+    )]
+    pub copies: u32,
     #[serde(default)]
     pub color_attempt_id: Option<Uuid>,
     pub printer_id: String,
@@ -101,7 +106,8 @@ impl Repository {
         approval: Option<Uuid>,
         contract: Option<serde_json::Value>,
     ) -> Result<Delivery, StorageError> {
-        if ticket.printer_id.is_empty()
+        if !(1..=rip_core::print::MAX_DELIVERY_COPIES).contains(&ticket.copies)
+            || ticket.printer_id.is_empty()
             || ticket.printer_id.len() > 128
             || !ticket
                 .printer_id
@@ -150,7 +156,8 @@ impl Repository {
             let revision = contract["ticket"]["sourceRevision"]
                 .as_i64()
                 .ok_or(StorageError::Conflict)?;
-            if contract["ticket"]["jobId"] != delivery.ticket.source_job.to_string()
+            if contract["ticket"]["copies"] != delivery.ticket.copies
+                || contract["ticket"]["jobId"] != delivery.ticket.source_job.to_string()
                 || contract["ticket"]["attemptId"] != id.to_string()
                 || contract["ticket"]["delivery"] != serde_json::to_value(&delivery.ticket)?
             {
@@ -169,9 +176,9 @@ impl Repository {
             }
         }
         if let Some(approval) = approval {
-            let allowed:i64=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM execution_approvals WHERE id=? AND revoked=0 AND expires_at>? AND json_extract(payload,'$.requestId')=? AND json_extract(payload,'$.jobId')=? AND json_extract(payload,'$.printerId')=? AND json_extract(payload,'$.media')=? AND json_extract(payload,'$.colorAttemptId') IS ?)")
+            let allowed:i64=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM execution_approvals WHERE id=? AND revoked=0 AND expires_at>? AND json_extract(payload,'$.requestId')=? AND json_extract(payload,'$.jobId')=? AND json_extract(payload,'$.printerId')=? AND json_extract(payload,'$.media')=? AND json_extract(payload,'$.colorAttemptId') IS ? AND coalesce(json_extract(payload,'$.copies'),1)=?)")
                 .bind(approval.to_string()).bind(now()).bind(id.to_string()).bind(delivery.ticket.source_job.to_string())
-                .bind(&delivery.ticket.printer_id).bind(&delivery.ticket.media).bind(delivery.ticket.color_attempt_id.map(|id|id.to_string())).fetch_one(&mut *tx).await?;
+                .bind(&delivery.ticket.printer_id).bind(&delivery.ticket.media).bind(delivery.ticket.color_attempt_id.map(|id|id.to_string())).bind(delivery.ticket.copies).fetch_one(&mut *tx).await?;
             if allowed != 1 {
                 return Err(StorageError::Conflict);
             }
@@ -453,6 +460,7 @@ mod tests {
         };
         repo.insert(&source).await.unwrap();
         let ticket = DeliveryTicket {
+            copies: 1,
             source_job: source.id,
             color_attempt_id: None,
             printer_id: "proof-printer".into(),
@@ -463,6 +471,50 @@ mod tests {
             media: "iso_a4_210x297mm".into(),
         };
         (dir, repo, ticket)
+    }
+    #[tokio::test]
+    async fn copies_preserve_legacy_json_and_atomic_approval_and_replay_guards() {
+        let (_dir, repo, mut ticket) = fixture().await;
+        let legacy = serde_json::to_value(&ticket).unwrap();
+        assert!(legacy.get("copies").is_none());
+        assert_eq!(
+            serde_json::from_value::<DeliveryTicket>(legacy.clone())
+                .unwrap()
+                .copies,
+            1
+        );
+        let id = Uuid::new_v4();
+        let approval = Uuid::new_v4();
+        let old = serde_json::json!({"requestId":id,"jobId":ticket.source_job,"printerId":ticket.printer_id,"media":ticket.media,"colorAttemptId":null});
+        repo.save_approval(approval, &old, now() + 300)
+            .await
+            .unwrap();
+        ticket.copies = 2;
+        assert!(
+            repo.enqueue_approved_delivery(id, ticket.clone(), Some(approval))
+                .await
+                .is_err()
+        );
+        assert!(repo.delivery(id).await.is_err());
+        let approved = Uuid::new_v4();
+        let mut new = old;
+        new["copies"] = serde_json::json!(2);
+        repo.save_approval(approved, &new, now() + 300)
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.enqueue_approved_delivery(id, ticket.clone(), Some(approved))
+                .await
+                .unwrap()
+                .ticket
+                .copies,
+            2
+        );
+        ticket.copies = 1;
+        assert!(repo.enqueue_delivery(id, ticket.clone()).await.is_err());
+        ticket.copies = 0;
+        assert!(repo.enqueue_delivery(Uuid::new_v4(), ticket).await.is_err());
+        assert_eq!(repo.delivery(id).await.unwrap().ticket.copies, 2);
     }
     #[tokio::test]
     async fn terminal_receipts_are_signed_immutable_and_unknown_is_not_completion() {

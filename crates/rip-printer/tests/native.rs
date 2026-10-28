@@ -55,6 +55,17 @@ async fn handle(
             );
             response.attribute(0x23, "printer-state", &3i32.to_be_bytes());
             response.text(0x44, "printer-state-reasons", "none");
+            match fake.mode {
+                8 => response.attribute(0x33, "copies-supported", &[0, 0, 0, 1, 0, 0, 0, 5]),
+                9 => response.integer("copies-supported", 5),
+                10 => response.attribute(0x33, "copies-supported", &[0, 0, 0, 5, 0, 0, 0, 1]),
+                11 => {
+                    response.attribute(0x33, "copies-supported", &[0, 0, 0, 1, 0, 0, 0, 5]);
+                    response.additional(0x33, &[0, 0, 0, 1, 0, 0, 0, 5]);
+                }
+                _ => {}
+            }
+
             if fake.mode == 7 {
                 response.text(0x49, "document-format-supported", "image/pwg-raster");
                 response.resolution_dpi("pwg-raster-document-resolution-supported", 300);
@@ -249,4 +260,45 @@ async fn pwg_capabilities_require_exact_dpi_type_and_media() {
         assert!(capabilities.check_pwg(dpi, color, media).is_err());
     }
     task.abort();
+}
+
+#[tokio::test]
+async fn copies_capability_is_typed_bounded_and_conservative_when_missing() {
+    let (device, _, task) = printer(8).await;
+    let capabilities = device.capabilities().await.unwrap();
+    assert_eq!(capabilities.copies_supported, Some([1, 5]));
+    for count in [1, 5] {
+        capabilities.check_copies(count).unwrap();
+    }
+    assert!(matches!(
+        capabilities.check_copies(6),
+        Err(Error::UnsupportedCopies)
+    ));
+    assert!(matches!(
+        capabilities.check_copies(0),
+        Err(Error::InvalidInput)
+    ));
+    assert!(matches!(
+        capabilities.check_copies(1000),
+        Err(Error::InvalidInput)
+    ));
+    task.abort();
+    let (device, _, task) = printer(0).await;
+    let capabilities = device.capabilities().await.unwrap();
+    assert_eq!(capabilities.copies_supported, None);
+    capabilities.check_copies(1).unwrap();
+    assert!(matches!(
+        capabilities.check_copies(2),
+        Err(Error::UnsupportedCopies)
+    ));
+    task.abort();
+    for mode in [9, 10, 11] {
+        let (device, fake, task) = printer(mode).await;
+        assert!(matches!(
+            device.capabilities().await,
+            Err(Error::InvalidResponse)
+        ));
+        assert_eq!(fake.prints.load(Ordering::SeqCst), 0);
+        task.abort();
+    }
 }

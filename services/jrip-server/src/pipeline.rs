@@ -7,6 +7,11 @@ use sha2::{Digest, Sha256};
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Request {
     pub request_id: Uuid,
+    #[serde(
+        default = "rip_core::print::default_copies",
+        skip_serializing_if = "rip_core::print::single_copy"
+    )]
+    pub copies: u32,
     pub expected_revision: i64,
     pub printer_id: String,
     pub media: String,
@@ -52,6 +57,9 @@ pub(crate) async fn create(
     Json(req): Json<Request>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     scopes(&app, &headers)?;
+    if !(1..=rip_core::print::MAX_DELIVERY_COPIES).contains(&req.copies) {
+        return Err(bad("invalid_copies"));
+    }
     match app.repo.pipeline(req.request_id).await {
         Ok(existing) => {
             if existing["sourceJob"] != job.to_string()
@@ -327,7 +335,8 @@ async fn advance(app: &App, id: Uuid, value: &Value) -> Result<&'static str, Api
             .ok_or(bad("invalid_pipeline"))?,
     )?;
     if let Ok(delivery) = app.repo.delivery(id).await {
-        if delivery.ticket.source_job != job
+        if delivery.ticket.copies != request.copies
+            || delivery.ticket.source_job != job
             || delivery.ticket.printer_id != request.printer_id
             || delivery.ticket.media != request.media
             || delivery.ticket.color_attempt_id != request.color.as_ref().map(|_| id)
@@ -406,7 +415,7 @@ async fn advance(app: &App, id: Uuid, value: &Value) -> Result<&'static str, Api
     if let Some(approval) = value["approvalId"].as_str() {
         headers.insert("x-jrip-approval-id", approval.parse().map_err(internal)?);
     }
-    let req=serde_json::from_value(json!({"requestId":id,"printerId":request.printer_id,"media":request.media,"expectedRevision":request.expected_revision,"colorAttemptId":if value["ticket"]["request"]["color"].is_null(){None}else{Some(id)}})).map_err(internal)?;
+    let req=serde_json::from_value(json!({"copies":request.copies,"requestId":id,"printerId":request.printer_id,"media":request.media,"expectedRevision":request.expected_revision,"colorAttemptId":if value["ticket"]["request"]["color"].is_null(){None}else{Some(id)}})).map_err(internal)?;
     let _ = delivery::prepare(State(app.clone()), headers, Path(job), Json(req)).await?;
     Ok("DELIVERY")
 }

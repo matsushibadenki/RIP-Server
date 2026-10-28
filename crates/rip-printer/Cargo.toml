@@ -3,6 +3,7 @@ name = "rip-printer"
 version.workspace = true
 edition.workspace = true
 [dependencies]
+rip-core.workspace = true
 rip-ipp.workspace = true
 rip-raster.workspace = true
 serde.workspace = true

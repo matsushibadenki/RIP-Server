@@ -2,6 +2,14 @@
 use super::*;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+/// Device-side copy count is independent of the source raster page count.
+pub const MAX_DELIVERY_COPIES: u32 = 999;
+pub fn default_copies() -> u32 {
+    1
+}
+pub fn single_copy(value: &u32) -> bool {
+    *value == 1
+}
 pub const RIP_REVISION: &str = "jrip-rip-v1";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -378,6 +386,12 @@ pub fn delivery_intersection(models: &[CapabilityModel]) -> Value {
     if !rip.bit_depths.contains(&8) || !printer.bit_depths.contains(&8) {
         conflicts.push(json!({"code":"pipeline_bit_depth_mismatch","retryable":false}));
     }
+    if printer
+        .copies
+        .is_none_or(|[min, max]| !(min..=max).contains(&1))
+    {
+        conflicts.push(json!({"code":"pipeline_copies_mismatch","retryable":false}));
+    }
     if printer.media.is_empty() {
         conflicts.push(json!({"code":"pipeline_media_required","retryable":false}));
     }
@@ -426,6 +440,7 @@ mod tests {
     fn intersection_checks_bridge_and_discrete_dpi_without_granting_authority() {
         let mut printer = CapabilityModel::rip();
         printer.stage = Stage::Printer;
+        printer.copies = Some([1, 1]);
         printer.input_media_types = vec!["image/pwg-raster".into()];
         printer.dpi = Some(DpiSupport {
             minimum: 300,
@@ -448,6 +463,14 @@ mod tests {
         assert_eq!(result["settingsCompatible"], true);
         assert_eq!(result["artifactBytes"], 33554432);
         assert_eq!(result["authorizationGranted"], false);
+        models[3].copies = Some([2, 5]);
+        assert_eq!(delivery_intersection(&models)["settingsCompatible"], false);
+        assert_eq!(
+            delivery_intersection(&models)["conflicts"][0]["code"],
+            "pipeline_copies_mismatch"
+        );
+        models[3].copies = Some([1, 5]);
+
         models[3].profiles = vec!["a".repeat(64)];
         assert_eq!(
             delivery_intersection(&models)["explicitColorRequired"],

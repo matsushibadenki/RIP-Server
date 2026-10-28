@@ -193,6 +193,8 @@ async fn color_managed_delivery_requires_matching_target_and_binds_attempt() {
 }
 #[derive(Clone)]
 struct Fake {
+    copies: Arc<AtomicUsize>,
+    copies_max: Arc<AtomicUsize>,
     prints: Arc<AtomicUsize>,
     state: Arc<AtomicUsize>,
     malformed: bool,
@@ -209,6 +211,9 @@ async fn handle(
     match q.operation {
         rip_ipp::GET_PRINTER_ATTRIBUTES => {
             r.group(4);
+            let mut range = 1i32.to_be_bytes().to_vec();
+            range.extend_from_slice(&(f.copies_max.load(Ordering::SeqCst) as i32).to_be_bytes());
+            r.attribute(0x33, "copies-supported", &range);
             r.text(0x49, "document-format-supported", "image/pwg-raster");
             r.attribute(0x22, "printer-is-accepting-jobs", &[1]);
             r.attribute(0x23, "printer-state", &3i32.to_be_bytes());
@@ -217,6 +222,10 @@ async fn handle(
             r.text(0x44, "media-supported", "custom_square_25.4x25.4mm");
         }
         rip_ipp::PRINT_JOB => {
+            let copies = q.integer(2, "copies").unwrap();
+            assert!((1..=f.copies_max.load(Ordering::SeqCst) as i32).contains(&copies));
+            f.copies.store(copies as usize, Ordering::SeqCst);
+            assert_eq!(q.one(1, "ipp-attribute-fidelity").unwrap().value, [1]);
             assert_eq!(q.text(1, "document-format", 0x49), Some("image/pwg-raster"));
             assert_eq!(q.text(2, "media", 0x44), Some("custom_square_25.4x25.4mm"));
             assert_eq!(rip_raster::inspect(q.document).unwrap().len(), 1);
@@ -267,6 +276,8 @@ async fn fixture(
         .await
         .unwrap();
     let f = Fake {
+        copies: Arc::new(AtomicUsize::new(0)),
+        copies_max: Arc::new(AtomicUsize::new(5)),
         prints: Arc::new(AtomicUsize::new(0)),
         state: Arc::new(AtomicUsize::new(3)),
         malformed,
@@ -991,6 +1002,7 @@ async fn unified_ticket_rejects_unrelated_attempt_with_same_id() {
         .enqueue_approved_delivery(
             id,
             rip_storage::delivery::DeliveryTicket {
+                copies: 1,
                 source_job: other.id,
                 color_attempt_id: None,
                 printer_id: "test".into(),
@@ -1859,5 +1871,164 @@ async fn legacy_physical_preflight_keeps_its_digest_and_workflow_effects() {
             .any(|v| v == "workflow-queued")
     );
     assert_eq!(fake.prints.load(Ordering::SeqCst), 0);
+    task.abort();
+}
+
+async fn copies_request(
+    app: &jrip_server::App,
+    job: &Job,
+    id: Uuid,
+    copies: u32,
+    preview: bool,
+    approval: Option<Uuid>,
+) -> (StatusCode, serde_json::Value) {
+    let path = format!(
+        "/api/v1/jobs/{}/{}",
+        job.id,
+        if preview {
+            "delivery-preview"
+        } else {
+            "deliveries"
+        }
+    );
+    let mut request = Request::post(path)
+        .header("authorization", "Bearer token")
+        .header("content-type", "application/json");
+    if let Some(approval) = approval {
+        request = request.header("x-jrip-approval-id", approval.to_string());
+    }
+    let response=jrip_server::router(app.clone()).oneshot(request.body(Body::from(serde_json::json!({"requestId":id,"expectedRevision":job.revision,"printerId":"test","media":"custom_square_25.4x25.4mm","copies":copies}).to_string())).unwrap()).await.unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    )
+}
+#[tokio::test]
+async fn device_copies_are_pinned_previewed_persisted_and_sent_once() {
+    let (_dir, app, job, fake, task) = fixture(false).await;
+    let id = Uuid::new_v4();
+    let (status, preview) = copies_request(&app, &job, id, 3, true, None).await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert_eq!(fake.prints.load(Ordering::SeqCst), 0);
+    let (status, queued) = copies_request(&app, &job, id, 3, false, None).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{queued}");
+    assert_eq!(queued["ticket"]["copies"], 3);
+    let contract = app.repo.delivery_contract(id).await.unwrap();
+    assert_eq!(contract["ticket"]["copies"], 3);
+    assert_eq!(contract["ticket"]["delivery"]["copies"], 3);
+    assert_eq!(
+        copies_request(&app, &job, id, 2, false, None).await.0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        copies_request(&app, &job, id, 3, false, None).await.0,
+        StatusCode::ACCEPTED
+    );
+    let reopened = rip_storage::Repository::open(&app.root.join("jobs.sqlite3"))
+        .await
+        .unwrap();
+    assert_eq!(reopened.delivery(id).await.unwrap().ticket.copies, 3);
+    jrip_server::delivery::tick(&app).await.unwrap();
+    assert_eq!(fake.copies.load(Ordering::SeqCst), 3);
+    assert_eq!(fake.prints.load(Ordering::SeqCst), 1);
+    jrip_server::delivery::tick(&app).await.unwrap();
+    assert_eq!(fake.prints.load(Ordering::SeqCst), 1);
+    fake.state.store(9, Ordering::SeqCst);
+    jrip_server::delivery::tick(&app).await.unwrap();
+    let receipt = app.repo.delivery_result_receipt(id).await.unwrap();
+    assert_eq!(receipt["proof"]["result"]["request"]["ticket"]["copies"], 3);
+    assert_eq!(
+        app.repo.delivery(id).await.unwrap().state,
+        DeliveryState::Completed
+    );
+    task.abort();
+}
+#[tokio::test]
+async fn unsupported_and_changed_copy_capabilities_never_send() {
+    let (_dir, app, job, fake, task) = fixture(false).await;
+    for count in [0, 6, 1000] {
+        let id = Uuid::new_v4();
+        assert_eq!(
+            copies_request(&app, &job, id, count, false, None).await.0,
+            StatusCode::BAD_REQUEST
+        );
+        assert!(app.repo.delivery(id).await.is_err());
+    }
+    let id = Uuid::new_v4();
+    assert_eq!(
+        copies_request(&app, &job, id, 3, false, None).await.0,
+        StatusCode::ACCEPTED
+    );
+    fake.copies_max.store(1, Ordering::SeqCst);
+    jrip_server::delivery::tick(&app).await.unwrap();
+    let result = app.repo.delivery(id).await.unwrap();
+    assert_eq!(result.state, DeliveryState::Rejected);
+    assert_eq!(result.reason.as_deref(), Some("unsupported_copies"));
+    assert_eq!(fake.prints.load(Ordering::SeqCst), 0);
+    task.abort();
+}
+#[tokio::test]
+async fn physical_approval_is_bound_to_the_exact_copy_count() {
+    let (_dir, mut app, job, fake, task) = fixture(false).await;
+    app.require_print_approval = true;
+    app.credentials = vec![jrip_server::Credential {
+        token: "token".into(),
+        identity: "operator".into(),
+        scopes: vec!["admin".into()],
+        validity: None,
+    }];
+    let id = Uuid::new_v4();
+    let response=jrip_server::router(app.clone()).oneshot(Request::post("/api/v1/approvals").header("authorization","Bearer token").header("content-type","application/json").body(Body::from(serde_json::json!({"identity":"operator","jobId":job.id,"expectedRevision":job.revision,"requestId":id,"printerId":"test","media":"custom_square_25.4x25.4mm","copies":3,"reason":"three copies approved"}).to_string())).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let value: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let approval = Uuid::parse_str(value["id"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        copies_request(&app, &job, id, 2, false, Some(approval))
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        copies_request(&app, &job, id, 3, false, Some(approval))
+            .await
+            .0,
+        StatusCode::ACCEPTED
+    );
+    jrip_server::delivery::tick(&app).await.unwrap();
+    assert_eq!(fake.copies.load(Ordering::SeqCst), 3);
+    assert_eq!(fake.prints.load(Ordering::SeqCst), 1);
+    task.abort();
+}
+
+#[tokio::test]
+async fn pipeline_copies_survive_restart_and_conflicting_replay_is_rejected() {
+    let (_dir, app, job, fake, task) = fixture(false).await;
+    let id = Uuid::new_v4();
+    let body = serde_json::json!({"requestId":id,"expectedRevision":job.revision,"printerId":"test","media":"custom_square_25.4x25.4mm","copies":4});
+    let path = format!("/api/v1/jobs/{}/pipelines", job.id);
+    assert_eq!(
+        pipeline_request(&app, &path, body.clone()).await.0,
+        StatusCode::ACCEPTED
+    );
+    let mut changed = body;
+    changed["copies"] = serde_json::json!(2);
+    assert_eq!(
+        pipeline_request(&app, &path, changed).await.0,
+        StatusCode::CONFLICT
+    );
+    let mut reopened = jrip_server::open(app.root.clone(), "token".into())
+        .await
+        .unwrap();
+    reopened.printers = app.printers.clone();
+    jrip_server::pipeline::tick(&reopened).await.unwrap();
+    assert_eq!(app.repo.delivery(id).await.unwrap().ticket.copies, 4);
+    let ticket = app.repo.pipeline_ticket(id).await.unwrap();
+    assert_eq!(ticket["ticket"]["physical"]["ticket"]["copies"], 4);
+    jrip_server::delivery::tick(&reopened).await.unwrap();
+    assert_eq!(fake.copies.load(Ordering::SeqCst), 4);
+    assert_eq!(fake.prints.load(Ordering::SeqCst), 1);
     task.abort();
 }

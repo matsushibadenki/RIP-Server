@@ -349,6 +349,16 @@ fn messages(code: &str) -> serde_json::Value {
             "このプリンターは明示的に完了した色処理attemptが必要です",
             "此打印机须使用显式完成的颜色尝试",
         ),
+        "invalid_copies" => (
+            "Specify 1–999 copies",
+            "部数は1〜999で指定してください",
+            "请指定1至999份",
+        ),
+        "unsupported_copies" => (
+            "The printer does not advertise support for this copy count",
+            "指定部数はプリンターの対応範囲外か、対応を確認できません",
+            "打印机不支持此份数或未公布支持范围",
+        ),
         "approval_required" => (
             "Approval required for this exact delivery",
             "この出力要求に対応する承認が必要です",

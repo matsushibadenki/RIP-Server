@@ -58,3 +58,5 @@ The local TLS test verifies trusted delivery, untrusted certificate rejection, h
 ```
 
 See [Color processing](COLOR-MANAGEMENT.md) for registration, worker and API details. / 登録・Worker・APIは色処理文書を参照。 / 注册、Worker及API详见颜色处理文档。
+
+Device copy counts / 実機出力部数 / 实体输出份数: [PRINT-COPIES.md](PRINT-COPIES.md).

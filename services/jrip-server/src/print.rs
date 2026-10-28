@@ -101,12 +101,19 @@ pub async fn models(app: &App, printer_id: Option<&str>) -> Result<Value, ApiErr
             .collect();
         model.media.sort_by(|a, b| a.name.cmp(&b.name));
         model.sides = vec!["one-sided".into()];
-        model.copies = Some([1, 1]);
+        model.copies = match device.copies_supported {
+            Some([min, max]) if min <= rip_core::print::MAX_DELIVERY_COPIES => {
+                Some([min, max.min(rip_core::print::MAX_DELIVERY_COPIES)])
+            }
+            None => Some([1, 1]),
+            _ => None,
+        };
         model.finishings = vec!["none".into()];
         model.availability = if device.accepting_jobs
             && !model.input_media_types.is_empty()
             && !model.color_spaces.is_empty()
             && !model.media.is_empty()
+            && model.copies.is_some()
             && model.dpi.as_ref().is_some_and(|dpi| dpi.minimum > 0)
         {
             Availability::Available

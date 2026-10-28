@@ -19,6 +19,8 @@ pub enum Error {
     InvalidInput,
     #[error("unsupported_document_format")]
     UnsupportedFormat,
+    #[error("unsupported_copies")]
+    UnsupportedCopies,
     #[error("printer_not_accepting_jobs")]
     NotAccepting,
     #[error("printer_transport_failure")]
@@ -40,8 +42,19 @@ pub struct Capabilities {
     pub pwg_resolutions: Vec<[u32; 2]>,
     pub pwg_types: Vec<String>,
     pub media: Vec<String>,
+    pub copies_supported: Option<[u32; 2]>,
 }
 impl Capabilities {
+    pub fn check_copies(&self, copies: u32) -> Result<(), Error> {
+        if !(1..=rip_core::print::MAX_DELIVERY_COPIES).contains(&copies) {
+            return Err(Error::InvalidInput);
+        }
+        match self.copies_supported {
+            Some([min, max]) if (min..=max).contains(&copies) => Ok(()),
+            None if copies == 1 => Ok(()),
+            _ => Err(Error::UnsupportedCopies),
+        }
+    }
     /// Require exact matches. Never substitute DPI, color, or media silently.
     pub fn check_pwg(&self, dpi: u32, document_type: &str, media: &str) -> Result<(), Error> {
         if !self.accepting_jobs {
@@ -336,6 +349,21 @@ impl NativeIpp {
         document_type: &str,
         media: &str,
     ) -> Result<AcceptedJob, Error> {
+        self.submit_pwg_with_copies(name, document, dpi, document_type, media, 1)
+            .await
+    }
+    pub async fn submit_pwg_with_copies(
+        &self,
+        name: &str,
+        document: Vec<u8>,
+        dpi: u32,
+        document_type: &str,
+        media: &str,
+        copies: u32,
+    ) -> Result<AcceptedJob, Error> {
+        if !(1..=rip_core::print::MAX_DELIVERY_COPIES).contains(&copies) {
+            return Err(Error::InvalidInput);
+        }
         if name.is_empty()
             || name.len() > 255
             || name.chars().any(char::is_control)
@@ -358,10 +386,10 @@ impl NativeIpp {
                 return Err(Error::InvalidInput);
             }
         }
-        self.capabilities()
-            .await?
-            .check_pwg(dpi, document_type, media)?;
-        self.send_document(name, "image/pwg-raster", document, Some(media))
+        let capabilities = self.capabilities().await?;
+        capabilities.check_pwg(dpi, document_type, media)?;
+        capabilities.check_copies(copies)?;
+        self.send_document(name, "image/pwg-raster", document, Some(media), copies)
             .await
     }
     async fn send_document(
@@ -370,13 +398,15 @@ impl NativeIpp {
         mime: &str,
         document: Vec<u8>,
         media: Option<&str>,
+        copies: u32,
     ) -> Result<AcceptedJob, Error> {
         let (id, mut message) = self.message(ipp::PRINT_JOB);
         message.text(0x49, "document-format", mime);
         message.text(0x42, "job-name", name);
         message.attribute(0x22, "ipp-attribute-fidelity", &[1]);
+        message.group(2);
+        message.integer("copies", copies as i32);
         if let Some(media) = media {
-            message.group(2);
             message.text(0x44, "media", media);
         }
         let mut body = message.finish();
@@ -434,6 +464,7 @@ impl PrinterBackend for NativeIpp {
             "pwg-raster-document-resolution-supported",
             "pwg-raster-document-type-supported",
             "media-supported",
+            "copies-supported",
         ] {
             message.additional(0x44, name.as_bytes());
         }
@@ -471,7 +502,25 @@ impl PrinterBackend for NativeIpp {
             }
             pwg_resolutions.push([x as u32, y as u32]);
         }
+        let copies: Vec<_> = message
+            .attributes
+            .iter()
+            .filter(|a| a.group == 4 && a.name == "copies-supported")
+            .collect();
+        let copies_supported = match copies.as_slice() {
+            [] => None,
+            [a] if a.tag == 0x33 && a.value.len() == 8 => {
+                let min = i32::from_be_bytes(a.value[..4].try_into().unwrap());
+                let max = i32::from_be_bytes(a.value[4..].try_into().unwrap());
+                if min < 1 || max < min {
+                    return Err(Error::InvalidResponse);
+                }
+                Some([min as u32, max as u32])
+            }
+            _ => return Err(Error::InvalidResponse),
+        };
         Ok(Capabilities {
+            copies_supported,
             document_formats: formats,
             accepting_jobs: accepting.value == [1],
             state: printer_state,
@@ -506,7 +555,8 @@ impl PrinterBackend for NativeIpp {
         if !capabilities.document_formats.iter().any(|f| f == mime) {
             return Err(Error::UnsupportedFormat);
         }
-        self.send_document(name, mime, document, None).await
+        capabilities.check_copies(1)?;
+        self.send_document(name, mime, document, None, 1).await
     }
     async fn job_status(&self, job_id: i32) -> Result<JobStatus, Error> {
         if job_id <= 0 {

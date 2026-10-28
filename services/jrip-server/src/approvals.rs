@@ -15,6 +15,8 @@ fn profile_hash(app: &App, id: &str) -> Result<String, ApiError> {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Request {
     identity: String,
+    #[serde(default = "rip_core::print::default_copies")]
+    copies: u32,
     job_id: Uuid,
     expected_revision: i64,
     request_id: Uuid,
@@ -38,7 +40,8 @@ pub(crate) async fn create(
     Json(req): Json<Request>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     authorize(&app, &headers, "admin")?;
-    if req.reason.trim().is_empty()
+    if !(1..=rip_core::print::MAX_DELIVERY_COPIES).contains(&req.copies)
+        || req.reason.trim().is_empty()
         || req.reason.len() > 512
         || req.reason.chars().any(char::is_control)
         || !app
@@ -65,7 +68,7 @@ pub(crate) async fn create(
     let id = Uuid::new_v4();
     let expires = rip_storage::now() + 300;
     let payload = serde_json::json!({"id":id,"identity":req.identity,"jobId":req.job_id,
-        "expectedRevision":req.expected_revision,"requestId":req.request_id,"printerId":req.printer_id,
+        "copies":req.copies,"expectedRevision":req.expected_revision,"requestId":req.request_id,"printerId":req.printer_id,
         "profileHash":profile_hash(&app,&req.printer_id)?,"media":req.media,"colorAttemptId":req.color_attempt_id,"expiresAt":expires,"issuer":actor(&app,&headers)?,"reason":req.reason});
     app.repo.save_approval(id, &payload, expires).await?;
     Ok((StatusCode::CREATED, Json(payload)))
@@ -86,7 +89,7 @@ pub(crate) async fn check_delivery(
     revision: i64,
     request: Uuid,
     printer: &str,
-    media_color: (&str, Option<Uuid>),
+    media_color: (&str, Option<Uuid>, u32),
 ) -> Result<Option<Uuid>, ApiError> {
     if !app.require_print_approval {
         return Ok(None);
@@ -101,7 +104,8 @@ pub(crate) async fn check_delivery(
         .approval(id)
         .await
         .map_err(|_| ApiError(StatusCode::FORBIDDEN, "approval_required"))?;
-    if approval["identity"] != actor(app, headers)?
+    if approval["copies"].as_u64().unwrap_or(1) != u64::from(media_color.2)
+        || approval["identity"] != actor(app, headers)?
         || approval["jobId"] != job.to_string()
         || approval["expectedRevision"] != revision
         || approval["requestId"] != request.to_string()

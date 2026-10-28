@@ -5,6 +5,16 @@
 - 🔴 [Later] planned, but not the closest next step / 後続の作業 / 后续计划
 - ⭕️ [Pending] cannot be tested in the dev environment; on hold / 開発環境で検証できないため保留 / 开发环境无法验证，暂缓
 
+## 当面の優先順位：一般RIPの実用度
+
+管理・Agent基盤の追加より、日常の原稿投入・印刷条件指定・結果確認・実機互換性を優先する。 / Prioritize everyday RIP usability over additional control-plane features / 优先日常RIP可用性而非继续扩展控制基盘。
+
+1. 🟢 [Done] 明示Delivery／後続pipelineの部数指定。機器能力照合・永続ticket・承認・送信直前再検査・MCP転送・再起動／再送試験。[PRINT-COPIES.md](PRINT-COPIES.md)。 / Explicit device copies / 显式设备输出份数。
+2. 🟠 [Next] 両面・ページ範囲・用紙指定の拡充と、PrintIntent／IPP受付への統合。未対応設定は拒否し、対応済みの範囲から公開する。 / Duplex, page selection and media controls / 双面、页码范围及介质控制。
+3. 🟠 [Next] 基本プレビューと、投入・設定・状態・取消を扱う操作画面。 / Basic preview and job controls / 基础预览及任务操作界面。
+4. 🟠 [Next] 日本語フォント・透明効果・オーバープリント等の描画比較、実用原稿による品質回帰試験。 / Practical-document rendering regressions / 实用原稿渲染回归。
+5. ⭕️ [Pending] 実機1台で複数部、両面、色、取消、障害復旧、Mac／Windowsアプリ投入を通して受入確認。実機を使える検証環境が必要。 / Real-printer acceptance / 实体打印机验收。
+
 - 🟢 [Done] Agent向けジョブ状態履歴API：`GET /api/v1/jobs/{id}/events?after=0&limit=50`。Bearer認証、永続sequenceによる差分取得、最大100件、再起動・メタデータ削除後の履歴参照に対応。状態変更と実測したページ成果物検証進捗を記録する。 / Authenticated, persistent, resumable state history / 认证、持久化、可恢复的状态历史。
 - 🟢 [Done] 新規履歴に工程・reason code・revision・再試行ヒント・TIFF完了種別を同一トランザクションで保存。未計測の工程の途中進捗率はnull。旧履歴は元の情報を保持。 / Durable stage and reason metadata / 持久化阶段与原因元数据。
 - 🟢 [Done] TIFFのページ単位の検証進捗を永続化し、REST履歴・SSE・MCPと既存のRIP／色管理／実機共通timelineへ接続。進捗はartifact-verification工程だけを示す。 / Durable measured TIFF verification progress across event transports and the unified timeline / 持久化TIFF逐页验证进度，并接入事件接口及统一时间线。
@@ -163,7 +173,7 @@ Printer
 2. 🟠 [Next] **RIP操作を細粒度のtoolsにする。** `rip_validate`、`rip_submit`、`rip_get_job`、`rip_list_jobs`、`rip_watch_job`、`rip_hold_job`、`rip_release_job`、`rip_cancel_job`、`rip_retry_job`、`rip_delete_job` を提供する。投入時は原稿、エンジン、DPI、色空間、ページ範囲、優先度、出力先を明示できるようにし、検証だけを行うdry-runとidempotency keyを用意する。更新系toolは期待revisionを受け取り、AIの並行操作による上書きを防ぐ。
 3. 🟠 [Next] **成果物と診断情報をresourcesにする。** `jrip://jobs/{id}`、`jrip://jobs/{id}/events`、`jrip://jobs/{id}/manifest`、`jrip://jobs/{id}/artifacts`、`jrip://jobs/{id}/artifacts/{name}`、`jrip://printers/{id}` を定義する。TIFF、サムネイル、プリフライト結果、エンジンログを列挙し、大容量成果物はMCPメッセージへ埋め込まず、期限付きURLまたは範囲取得可能なresourceとして渡す。ジョブイベント購読と進捗通知に対応し、ポーリング間隔をAI側へ強制しない。
 4. 🟠 [Next] **AIが安全に印刷仕様を組み立てられるようにする。** `print_resolve_intent`、`print_validate_ticket`、`rip_get_presets`、`rip_compare_engines`、`rip_estimate`、`rip_create_preview` を提供し、実行前に能力照合済みJobTicket、代替案、予想ページ数、ラスター寸法、色変換、メモリ・ディスク使用量、印刷機の利用可否を返す。永続preset、Color Policy、キュー、実機プリンター設定の変更は別scopeに分け、変更前後の値と監査理由を必須にする。任意のシェルコマンド、Docker引数、ホストパスは受け付けない。
-5. 🟠 [Next] **リモート認証・接続保護を仕上げる。** identity別scope、stdio／API監査、許可済みroot、入力容量制限、実機印刷と[削除／永続設定の個別承認](OPERATION-APPROVALS.md)は実装済み。MCP HTTPのidentity別要求レート制限も実装済み。[設定済み短期Bearerの期限検査](EXPIRING-CREDENTIALS.md)も実装済み。残る自動発行・更新・即時失効とTLSの配備・検証を進める。900秒MCPセッション有効期限は、Bearerトークン自体の失効とは区別する。
+5. 🔴 [Later] **リモート認証・接続保護を仕上げる。** identity別scope、stdio／API監査、許可済みroot、入力容量制限、実機印刷と[削除／永続設定の個別承認](OPERATION-APPROVALS.md)は実装済み。MCP HTTPのidentity別要求レート制限も実装済み。[設定済み短期Bearerの期限検査](EXPIRING-CREDENTIALS.md)も実装済み。残る自動発行・更新・即時失効とTLSの配備・検証を進める。900秒MCPセッション有効期限は、Bearerトークン自体の失効とは区別する。
 6. 🟠 [Next] **長時間処理と再接続を標準化する。** tool呼出しは短時間で永続job-idを返し、RIP処理をMCPセッションの寿命へ結び付けない。AIが切断・再接続してもjob-idとidempotency keyから処理を追跡できるようにする。構造化エラーには安定したcode、再試行可否、推奨待機時間、現在revisionを含め、失敗時に別エンジンへ自動変更せず、AIが差分を確認して明示的に再実行する。
 7. 🔴 [Later] **複数RIPノードの統合制御へ拡張する。** MCP Gatewayから複数のJ-RIP Workerを能力・負荷・データ所在で選択できるようにする。Cloud側と独立WorkerはHTTPS APIまたはジョブキューで疎結合にし、WorkerからManaged PostgreSQLへの直接接続に依存しない。認証情報や原稿をモデルの会話履歴へ露出させず、データ所在地と保持期限をポリシーで制御する。
 
@@ -176,7 +186,7 @@ Printer
 - 🟢 [Done] Native IPPのIPPS/TLS、システム／独自CAによる証明書・接続先名検証、TLS限定Bearer認証。模擬TLSプリンターで検証。 / Verified IPPS and TLS-only Bearer / 经验证IPPS与TLS专用Bearer。
 - ⭕️ [Pending] 実機IPPSの証明書・認証互換性。 / Physical IPPS acceptance / 实体IPPS验收。
 - 🟢 [Done] 8-bit TIFFからPWG Rasterへの変換、ページ順序・用紙寸法・解像度・色型の照合、明示的なDelivery要求での送信。
-- 🟠 [Next] 実装済みのリースと失敗復旧を基盤に、残存コンテナー回収と回数制限付き再試行を加え、送信完了とプリンター側のジョブ結果を区別する。部数・両面などはバックエンドで反映可能になったものから順に公開する。
+- 🟠 [Next] 実装済みのリースと失敗復旧を基盤に、残存コンテナー回収と回数制限付き再試行を加え、送信完了とプリンター側のジョブ結果を区別する。部数は明示Delivery／後続pipelineで実装済み。両面などをバックエンドで反映可能になったものから順に公開する。
 - ⭕️ [Pending] Mac / Windowsの実機印刷、取消、障害、再起動を通し、クライアント表示と実際の印刷結果が一致することを確認する。対象クライアントと実機を使用できる検証環境が必要。
 - 🟠 [Next] IPP Everywhereを名乗る前に、必要なPWG Raster入力と、カラー機で必要なJPEG入力、属性・DNS-SD・セキュリティ要件を満たし、PWGの自己認証テストを実行する。PDFだけの受付では適合を主張しない。
 

@@ -186,6 +186,8 @@ pub fn load() -> Result<Vec<Printer>, Box<dyn std::error::Error>> {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Request {
     request_id: Uuid,
+    #[serde(default = "rip_core::print::default_copies")]
+    copies: u32,
     printer_id: String,
     media: String,
     expected_revision: i64,
@@ -294,6 +296,9 @@ async fn prepare_impl(
     {
         return Err(bad("invalid_ticket_digest"));
     }
+    if !(1..=rip_core::print::MAX_DELIVERY_COPIES).contains(&req.copies) {
+        return Err(bad("invalid_copies"));
+    }
     let job = app.repo.get(id).await?;
     if job.state != JobState::Completed || job.revision != req.expected_revision {
         return Err(ApiError(StatusCode::CONFLICT, "revision_conflict"));
@@ -326,6 +331,7 @@ async fn prepare_impl(
         rip_core::ColorMode::Gray => (rip_raster::Color::Black, "black_8"),
     };
     let mut ticket = DeliveryTicket {
+        copies: req.copies,
         source_job: id,
         color_attempt_id: req.color_attempt_id,
         printer_id: req.printer_id,
@@ -364,7 +370,8 @@ async fn prepare_impl(
         None
     };
     if !preview && let Ok(existing) = app.repo.delivery(req.request_id).await {
-        if existing.ticket.source_job == id
+        if existing.ticket.copies == ticket.copies
+            && existing.ticket.source_job == id
             && existing.ticket.printer_id == ticket.printer_id
             && existing.ticket.media == ticket.media
             && existing.ticket.color_attempt_id == ticket.color_attempt_id
@@ -392,17 +399,21 @@ async fn prepare_impl(
             req.expected_revision,
             req.request_id,
             &ticket.printer_id,
-            (&ticket.media, ticket.color_attempt_id),
+            (&ticket.media, ticket.color_attempt_id, ticket.copies),
         )
         .await?
     };
-    backend(&app, printer)
+    let capabilities = backend(&app, printer)
         .map_err(|_| bad("invalid_printer"))?
         .capabilities()
         .await
-        .map_err(|_| bad("printer_unavailable"))?
+        .map_err(|_| bad("printer_unavailable"))?;
+    capabilities
         .check_pwg(ticket.dpi, kind, &ticket.media)
         .map_err(|_| bad("unsupported_printer_profile"))?;
+    capabilities
+        .check_copies(ticket.copies)
+        .map_err(|_| bad("unsupported_copies"))?;
     let artifacts: Vec<rip_core::Artifact> =
         serde_json::from_value(if let Some(result) = &color_result {
             result["artifacts"].clone()
@@ -468,7 +479,7 @@ async fn prepare_impl(
     let physical = serde_json::json!({"schemaVersion":1,"version":"0.1","jobId":id,"attemptId":req.request_id,
         "sourceRevision":req.expected_revision,"sourceSha256":job.source_sha256,"manifest":job.manifest,"selectedEngine":job.selected_engine,
         "delivery":ticket,"printerConfigSha256":format!("{:x}",Sha256::digest(serde_json::to_vec(printer).map_err(internal)?)),
-        "copies":1,"sides":"one-sided","pageSelection":"all","numberUp":1,"imposition":"none",
+        "copies":ticket.copies,"sides":"one-sided","pageSelection":"all","numberUp":1,"imposition":"none",
         "completionMeaning":"device-confirmed","approvalRequired":app.require_print_approval});
     let contract = serde_json::json!({"ticket":physical,"ticketSha256":format!("{:x}",Sha256::digest(serde_json::to_vec(&physical).map_err(internal)?))});
     if req
@@ -646,12 +657,13 @@ pub async fn tick(app: &App) -> Result<(), StorageError> {
                 validate(&bytes, &d.ticket, &media)
                     .map_err(|_| rip_printer::Error::InvalidInput)?;
                 printer
-                    .submit_pwg(
+                    .submit_pwg_with_copies(
                         &format!("J-RIP {}", d.id),
                         bytes,
                         d.ticket.dpi,
                         &d.ticket.document_type,
                         &d.ticket.media,
+                        d.ticket.copies,
                     )
                     .await
             }
