@@ -31,6 +31,7 @@ async fn seed(app: &jrip_server::App, state: JobState, age: i64) -> Job {
 }
 fn ticket(job: &Job) -> DeliveryTicket {
     DeliveryTicket {
+        page_ranges: Default::default(),
         copies: 1,
         source_job: job.id,
         color_attempt_id: None,

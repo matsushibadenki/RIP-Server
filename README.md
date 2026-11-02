@@ -281,6 +281,7 @@ Mac native CUPS validation now includes the dedicated [PDF passthrough PPD](adap
 ### Additional implemented controls / 追加した制御 / 新增控制
 
 - [Source validation](docs/SOURCE-VALIDATION.md): mandatory standard-worker gate and runtime evidence / 標準workerの必須原稿検証と証跡 / 标准worker强制原稿验证与证据。
+- [Print page ranges](docs/PRINT-PAGE-RANGES.md): selected raster pages / RIP後のページ範囲指定 / RIP后页码选择。
 - [Device copies](docs/PRINT-COPIES.md): explicit printer copy counts / 実機出力の部数指定 / 实体输出份数。
 - [Expiring credentials](docs/EXPIRING-CREDENTIALS.md): bounded Bearer validity / 期限付き認証と通知停止 / 有效期凭据及通知停止。
 - [Operation approvals](docs/OPERATION-APPROVALS.md): deletion and persistent-setting approvals / 削除・永続設定の個別操作承認 / 删除及持久设置审批。

@@ -349,6 +349,21 @@ fn messages(code: &str) -> serde_json::Value {
             "このプリンターは明示的に完了した色処理attemptが必要です",
             "此打印机须使用显式完成的颜色尝试",
         ),
+        "delivery_page_count_mismatch" => (
+            "The delivery page count differs from the selected range",
+            "送信ページ数が指定範囲と一致しません",
+            "投递页数与所选范围不一致",
+        ),
+        "invalid_page_ranges" => (
+            "Specify ascending non-overlapping page ranges from 1 to 100",
+            "ページ範囲は1〜100の昇順・重複なしで指定してください",
+            "请按升序指定1至100内不重叠的页码范围",
+        ),
+        "page_range_out_of_bounds" => (
+            "The selected range exceeds the rendered page count",
+            "指定範囲がRIP済みページ数を超えています",
+            "所选范围超出已渲染页数",
+        ),
         "invalid_copies" => (
             "Specify 1–999 copies",
             "部数は1〜999で指定してください",

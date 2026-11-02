@@ -188,6 +188,8 @@ pub(crate) struct Request {
     request_id: Uuid,
     #[serde(default = "rip_core::print::default_copies")]
     copies: u32,
+    #[serde(default)]
+    page_ranges: rip_core::pages::PageRanges,
     printer_id: String,
     media: String,
     expected_revision: i64,
@@ -223,6 +225,13 @@ fn validate(bytes: &[u8], ticket: &DeliveryTicket, media: &Media) -> Result<(), 
         return Err(bad("delivery_artifact_mismatch"));
     }
     let pages = rip_raster::inspect(bytes).map_err(|_| bad("invalid_pwg_raster"))?;
+    if ticket
+        .page_ranges
+        .selected_count()
+        .is_some_and(|count| count != pages.len())
+    {
+        return Err(bad("delivery_page_count_mismatch"));
+    }
     for p in pages {
         let pixels =
             |microns: u32| ((u64::from(microns) * u64::from(ticket.dpi) + 12700) / 25400) as u32;
@@ -331,6 +340,7 @@ async fn prepare_impl(
         rip_core::ColorMode::Gray => (rip_raster::Color::Black, "black_8"),
     };
     let mut ticket = DeliveryTicket {
+        page_ranges: req.page_ranges,
         copies: req.copies,
         source_job: id,
         color_attempt_id: req.color_attempt_id,
@@ -370,7 +380,8 @@ async fn prepare_impl(
         None
     };
     if !preview && let Ok(existing) = app.repo.delivery(req.request_id).await {
-        if existing.ticket.copies == ticket.copies
+        if existing.ticket.page_ranges == ticket.page_ranges
+            && existing.ticket.copies == ticket.copies
             && existing.ticket.source_job == id
             && existing.ticket.printer_id == ticket.printer_id
             && existing.ticket.media == ticket.media
@@ -395,11 +406,9 @@ async fn prepare_impl(
         approvals::check_delivery(
             &app,
             &headers,
-            id,
             req.expected_revision,
             req.request_id,
-            &ticket.printer_id,
-            (&ticket.media, ticket.color_attempt_id, ticket.copies),
+            &ticket,
         )
         .await?
     };
@@ -426,6 +435,18 @@ async fn prepare_impl(
     }
     if artifacts
         .iter()
+        .enumerate()
+        .any(|(index, a)| a.page != index as u32 + 1)
+    {
+        return Err(bad("invalid_artifacts"));
+    }
+    let selected_indices = ticket
+        .page_ranges
+        .indices(artifacts.len() as u32)
+        .map_err(|_| bad("page_range_out_of_bounds"))?;
+    if selected_indices
+        .iter()
+        .map(|&index| &artifacts[index])
         .try_fold(0u64, |sum, a| sum.checked_add(a.bytes))
         .is_none_or(|sum| sum > 32 * 1024 * 1024)
     {
@@ -438,10 +459,8 @@ async fn prepare_impl(
         .await
         .map_err(internal)?;
     let mut snapshots = Vec::new();
-    for (index, a) in artifacts.iter().enumerate() {
-        if a.page != index as u32 + 1 {
-            return Err(bad("invalid_artifacts"));
-        }
+    for &index in &selected_indices {
+        let a = &artifacts[index];
         snapshots.push(if let Some(color_id) = ticket.color_attempt_id {
             color::verified_page(&app, color_id, &a.name).await?
         } else {
@@ -476,11 +495,17 @@ async fn prepare_impl(
     ticket.artifact_bytes = bytes.len() as u64;
     ticket.artifact_sha256 = format!("{:x}", Sha256::digest(&bytes));
     validate(&bytes, &ticket, &media)?;
-    let physical = serde_json::json!({"schemaVersion":1,"version":"0.1","jobId":id,"attemptId":req.request_id,
+    let mut physical = serde_json::json!({"schemaVersion":1,"version":"0.1","jobId":id,"attemptId":req.request_id,
         "sourceRevision":req.expected_revision,"sourceSha256":job.source_sha256,"manifest":job.manifest,"selectedEngine":job.selected_engine,
         "delivery":ticket,"printerConfigSha256":format!("{:x}",Sha256::digest(serde_json::to_vec(printer).map_err(internal)?)),
-        "copies":ticket.copies,"sides":"one-sided","pageSelection":"all","numberUp":1,"imposition":"none",
+        "copies":ticket.copies,"sides":"one-sided","pageSelection":ticket.page_ranges.label(),"numberUp":1,"imposition":"none",
         "completionMeaning":"device-confirmed","approvalRequired":app.require_print_approval});
+    if !ticket.page_ranges.is_all() {
+        physical["sourcePageCount"] = serde_json::json!(artifacts.len());
+        physical["selectedSourcePages"] =
+            serde_json::json!(selected_indices.iter().map(|i| i + 1).collect::<Vec<_>>());
+        physical["selectedPageCount"] = serde_json::json!(selected_indices.len());
+    }
     let contract = serde_json::json!({"ticket":physical,"ticketSha256":format!("{:x}",Sha256::digest(serde_json::to_vec(&physical).map_err(internal)?))});
     if req
         .expected_ticket_sha256
@@ -493,7 +518,7 @@ async fn prepare_impl(
         return Ok((
             StatusCode::OK,
             Json(
-                serde_json::json!({"contract":contract,"settingsVerified":true,"artifactVerified":true,"geometryVerified":true,"documentStructureVerified":false,"authorizationGranted":false,"queued":false,
+                serde_json::json!({"contract":contract,"verificationScope":"selected-raster-pages","settingsVerified":true,"artifactVerified":true,"geometryVerified":true,"documentStructureVerified":false,"authorizationGranted":false,"queued":false,
             "messages":{"en":"Verified delivery preview; commit rechecks capabilities and approval","ja":"送信設定・成果物を確認しました。投入時に能力と承認を再検査します","zh-CN":"已验证投递设置和产物；提交时重新检查能力与审批"}}),
             ),
         ));

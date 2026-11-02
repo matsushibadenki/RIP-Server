@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 default-run = "jrip-mcp"
 [dependencies]
+rip-core.workspace = true
 base64 = "0.22"
 jrip-server = { path = "../jrip-server" }
 axum = "0.8"
@@ -18,7 +19,6 @@ ring = "0.17"
 tokio = { workspace = true, features = ["test-util"] }
 http-body-util = "0.1"
 lcms2 = { version = "=6.2.0", features = ["static"] }
-rip-core.workspace = true
 rip-color.workspace = true
 tempfile = "3"
 sha2 = "0.10"

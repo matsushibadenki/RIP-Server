@@ -12,6 +12,8 @@ pub struct Request {
         skip_serializing_if = "rip_core::print::single_copy"
     )]
     pub copies: u32,
+    #[serde(default, skip_serializing_if = "rip_core::pages::PageRanges::is_all")]
+    pub page_ranges: rip_core::pages::PageRanges,
     pub expected_revision: i64,
     pub printer_id: String,
     pub media: String,
@@ -335,7 +337,8 @@ async fn advance(app: &App, id: Uuid, value: &Value) -> Result<&'static str, Api
             .ok_or(bad("invalid_pipeline"))?,
     )?;
     if let Ok(delivery) = app.repo.delivery(id).await {
-        if delivery.ticket.copies != request.copies
+        if delivery.ticket.page_ranges != request.page_ranges
+            || delivery.ticket.copies != request.copies
             || delivery.ticket.source_job != job
             || delivery.ticket.printer_id != request.printer_id
             || delivery.ticket.media != request.media
@@ -415,7 +418,7 @@ async fn advance(app: &App, id: Uuid, value: &Value) -> Result<&'static str, Api
     if let Some(approval) = value["approvalId"].as_str() {
         headers.insert("x-jrip-approval-id", approval.parse().map_err(internal)?);
     }
-    let req=serde_json::from_value(json!({"copies":request.copies,"requestId":id,"printerId":request.printer_id,"media":request.media,"expectedRevision":request.expected_revision,"colorAttemptId":if value["ticket"]["request"]["color"].is_null(){None}else{Some(id)}})).map_err(internal)?;
+    let req=serde_json::from_value(json!({"pageRanges":request.page_ranges,"copies":request.copies,"requestId":id,"printerId":request.printer_id,"media":request.media,"expectedRevision":request.expected_revision,"colorAttemptId":if value["ticket"]["request"]["color"].is_null(){None}else{Some(id)}})).map_err(internal)?;
     let _ = delivery::prepare(State(app.clone()), headers, Path(job), Json(req)).await?;
     Ok("DELIVERY")
 }

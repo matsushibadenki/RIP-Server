@@ -57,3 +57,5 @@ REST投递预览、显式投递、RIP后续pipeline，以及MCP `print_preview_d
 发送前重新取得设备能力，范围变化时拒绝，不发送Print-Job。使用一个IPP任务，显式传递 `copies` 和属性fidelity，不复制光栅页数据。设备忽略或替换属性的成功响应仍归为UNKNOWN，不自动重发。设备完成报告不证明实际纸张数量或外观。未新增逐份整理控制，使用设备默认值。
 
 PDF虚拟打印机和原稿投入前的PrintIntent／raster ticket协商仍限制为1份，对应 `deliveryIntersection.copies` 仍为1。本功能适用于显式实体投递和后续pipeline。真实设备多份、整理顺序及取消验收为Pending。双面、页码范围、更丰富的介质控制及基础预览／GUI为Next。
+
+🟢 [Done] Rendered-page selection is now available for explicit delivery/pipelines. RIP後のページ範囲指定／RIP后页码范围选择: [PRINT-PAGE-RANGES.md](PRINT-PAGE-RANGES.md).

@@ -169,7 +169,7 @@ impl Session {
                 )
             };
             let body = if name == "print_create_pipeline" {
-                json!({"requestId":args["requestId"],"expectedRevision":args["expectedRevision"],"printerId":args["printerId"],"media":args["media"],"copies":args["copies"].as_u64().unwrap_or(1),"color":args["color"]})
+                json!({"requestId":args["requestId"],"expectedRevision":args["expectedRevision"],"printerId":args["printerId"],"media":args["media"],"copies":args["copies"].as_u64().unwrap_or(1),"pageRanges":args.get("pageRanges").cloned().unwrap_or(json!([])),"color":args["color"]})
             } else if name == "print_resume_pipeline" {
                 json!({"expectedRevision":args["expectedRevision"],"approvalId":args["approvalId"]})
             } else {
@@ -227,7 +227,7 @@ impl Session {
                 )
             };
             let body = if name != "print_cancel_delivery" {
-                json!({"requestId":args["requestId"],"printerId":args["printerId"],"media":args["media"],"copies":args["copies"].as_u64().unwrap_or(1),"expectedRevision":args["expectedRevision"],"colorAttemptId":args["colorAttemptId"],"expectedTicketSha256":args["expectedTicketSha256"]})
+                json!({"requestId":args["requestId"],"printerId":args["printerId"],"media":args["media"],"copies":args["copies"].as_u64().unwrap_or(1),"pageRanges":args.get("pageRanges").cloned().unwrap_or(json!([])),"expectedRevision":args["expectedRevision"],"colorAttemptId":args["colorAttemptId"],"expectedTicketSha256":args["expectedTicketSha256"]})
             } else {
                 json!({"expectedRevision":args["expectedRevision"]})
             };
@@ -906,6 +906,7 @@ fn tools() -> Vec<Value> {
         if matches!(name,"print_create_pipeline"|"print_resume_pipeline"|"print_cancel_pipeline") {properties["expectedRevision"]=json!({"type":"integer","minimum":0});required.push("expectedRevision");}
         if matches!(name,"rip_delete_job"|"print_revoke_receipt_key") {properties["approvalId"]=json!({"type":"string","format":"uuid","description":"One-use approval issued by a separate administrator / 別の管理者が発行した1回限りの承認 / 另一管理员签发的一次性审批"});}
         if matches!(name,"print_deliver_job"|"print_preview_delivery"|"print_create_pipeline") {properties["copies"]=json!({"type":"integer","minimum":1,"maximum":999,"default":1,"description":"Device-side copies / 実機出力部数 / 实体输出份数"});}
+        if matches!(name,"print_deliver_job"|"print_preview_delivery"|"print_create_pipeline") {properties["pageRanges"]=json!({"type":"array","maxItems":100,"items":{"type":"object","additionalProperties":false,"required":["first","last"],"properties":{"first":{"type":"integer","minimum":1,"maximum":100},"last":{"type":"integer","minimum":1,"maximum":100}}},"description":"Rendered page ranges, ascending and non-overlapping; empty means all / RIP済みページの昇順範囲、空は全ページ / 已渲染页码升序范围，空为全部"});}
         if name=="print_resume_pipeline" {properties["approvalId"]=json!({"type":"string","format":"uuid"});}
         if name=="print_validate_ticket" {properties["ticket"]=json!({"type":"object","description":"Versioned JobTicket; deeply validated by Print API / Print APIで検証 / 由Print API验证"});required.push("ticket");}
         if control || name=="print_preview_delivery" {properties["expectedRevision"]=json!({"type":"integer","minimum":0});required.push("expectedRevision");}
@@ -1008,6 +1009,15 @@ fn validate(name: &str, args: &Value) -> Result<(), &'static str> {
                             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
                 {
                     return Err("Invalid profile digest");
+                }
+            }
+            "array" => {
+                if !value.is_array() {
+                    return Err("Expected array");
+                }
+                if key == "pageRanges" {
+                    serde_json::from_value::<rip_core::pages::PageRanges>(value.clone())
+                        .map_err(|_| "Invalid page ranges")?;
                 }
             }
             "object" if !value.is_object() => return Err("Expected object"),

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+pub mod pages;
 pub mod print;
 
 #[derive(Debug, thiserror::Error)]

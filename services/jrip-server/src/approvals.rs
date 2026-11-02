@@ -17,6 +17,8 @@ pub(crate) struct Request {
     identity: String,
     #[serde(default = "rip_core::print::default_copies")]
     copies: u32,
+    #[serde(default)]
+    page_ranges: rip_core::pages::PageRanges,
     job_id: Uuid,
     expected_revision: i64,
     request_id: Uuid,
@@ -68,7 +70,7 @@ pub(crate) async fn create(
     let id = Uuid::new_v4();
     let expires = rip_storage::now() + 300;
     let payload = serde_json::json!({"id":id,"identity":req.identity,"jobId":req.job_id,
-        "copies":req.copies,"expectedRevision":req.expected_revision,"requestId":req.request_id,"printerId":req.printer_id,
+        "copies":req.copies,"pageRanges":req.page_ranges,"expectedRevision":req.expected_revision,"requestId":req.request_id,"printerId":req.printer_id,
         "profileHash":profile_hash(&app,&req.printer_id)?,"media":req.media,"colorAttemptId":req.color_attempt_id,"expiresAt":expires,"issuer":actor(&app,&headers)?,"reason":req.reason});
     app.repo.save_approval(id, &payload, expires).await?;
     Ok((StatusCode::CREATED, Json(payload)))
@@ -85,11 +87,9 @@ pub(crate) async fn revoke(
 pub(crate) async fn check_delivery(
     app: &App,
     headers: &HeaderMap,
-    job: Uuid,
     revision: i64,
     request: Uuid,
-    printer: &str,
-    media_color: (&str, Option<Uuid>, u32),
+    ticket: &rip_storage::delivery::DeliveryTicket,
 ) -> Result<Option<Uuid>, ApiError> {
     if !app.require_print_approval {
         return Ok(None);
@@ -104,15 +104,20 @@ pub(crate) async fn check_delivery(
         .approval(id)
         .await
         .map_err(|_| ApiError(StatusCode::FORBIDDEN, "approval_required"))?;
-    if approval["copies"].as_u64().unwrap_or(1) != u64::from(media_color.2)
+    if approval
+        .get("pageRanges")
+        .cloned()
+        .unwrap_or(serde_json::json!([]))
+        != serde_json::json!(ticket.page_ranges)
+        || approval["copies"].as_u64().unwrap_or(1) != u64::from(ticket.copies)
         || approval["identity"] != actor(app, headers)?
-        || approval["jobId"] != job.to_string()
+        || approval["jobId"] != ticket.source_job.to_string()
         || approval["expectedRevision"] != revision
         || approval["requestId"] != request.to_string()
-        || approval["printerId"] != printer
-        || approval["media"] != media_color.0
-        || approval["colorAttemptId"] != serde_json::json!(media_color.1)
-        || approval["profileHash"] != profile_hash(app, printer)?
+        || approval["printerId"] != ticket.printer_id
+        || approval["media"] != ticket.media
+        || approval["colorAttemptId"] != serde_json::json!(ticket.color_attempt_id)
+        || approval["profileHash"] != profile_hash(app, &ticket.printer_id)?
     {
         return Err(ApiError(StatusCode::FORBIDDEN, "approval_required"));
     }

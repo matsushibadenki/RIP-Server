@@ -10,10 +10,11 @@
 管理・Agent基盤の追加より、日常の原稿投入・印刷条件指定・結果確認・実機互換性を優先する。 / Prioritize everyday RIP usability over additional control-plane features / 优先日常RIP可用性而非继续扩展控制基盘。
 
 1. 🟢 [Done] 明示Delivery／後続pipelineの部数指定。機器能力照合・永続ticket・承認・送信直前再検査・MCP転送・再起動／再送試験。[PRINT-COPIES.md](PRINT-COPIES.md)。 / Explicit device copies / 显式设备输出份数。
-2. 🟠 [Next] 両面・ページ範囲・用紙指定の拡充と、PrintIntent／IPP受付への統合。未対応設定は拒否し、対応済みの範囲から公開する。 / Duplex, page selection and media controls / 双面、页码范围及介质控制。
-3. 🟠 [Next] 基本プレビューと、投入・設定・状態・取消を扱う操作画面。 / Basic preview and job controls / 基础预览及任务操作界面。
-4. 🟠 [Next] 日本語フォント・透明効果・オーバープリント等の描画比較、実用原稿による品質回帰試験。 / Practical-document rendering regressions / 实用原稿渲染回归。
-5. ⭕️ [Pending] 実機1台で複数部、両面、色、取消、障害復旧、Mac／Windowsアプリ投入を通して受入確認。実機を使える検証環境が必要。 / Real-printer acceptance / 实体打印机验收。
+2. 🟢 [Done] RIP後の明示Delivery／後続pipelineでページ範囲を指定。選択ページだけの検証・変換、承認・契約・再起動・再送を検証。[PRINT-PAGE-RANGES.md](PRINT-PAGE-RANGES.md)。 / Rendered-page selection for delivery / 投递时选择已渲染页。
+3. 🟠 [Next] 両面・用紙指定、原稿投入時のページ指定とPrintIntent／IPP受付への統合。未対応設定は拒否し、対応済みの範囲から公開する。 / Duplex, media and source-time page selection / 双面、介质及原稿投入时页码选择。
+4. 🟠 [Next] 基本プレビューと、投入・設定・状態・取消を扱う操作画面。 / Basic preview and job controls / 基础预览及任务操作界面。
+5. 🟠 [Next] 日本語フォント・透明効果・オーバープリント等の描画比較、実用原稿による品質回帰試験。 / Practical-document rendering regressions / 实用原稿渲染回归。
+6. ⭕️ [Pending] 実機1台で複数部、両面、色、取消、障害復旧、Mac／Windowsアプリ投入を通して受入確認。実機を使える検証環境が必要。 / Real-printer acceptance / 实体打印机验收。
 
 - 🟢 [Done] Agent向けジョブ状態履歴API：`GET /api/v1/jobs/{id}/events?after=0&limit=50`。Bearer認証、永続sequenceによる差分取得、最大100件、再起動・メタデータ削除後の履歴参照に対応。状態変更と実測したページ成果物検証進捗を記録する。 / Authenticated, persistent, resumable state history / 认证、持久化、可恢复的状态历史。
 - 🟢 [Done] 新規履歴に工程・reason code・revision・再試行ヒント・TIFF完了種別を同一トランザクションで保存。未計測の工程の途中進捗率はnull。旧履歴は元の情報を保持。 / Durable stage and reason metadata / 持久化阶段与原因元数据。

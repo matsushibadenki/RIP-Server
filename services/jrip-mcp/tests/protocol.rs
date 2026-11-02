@@ -2049,3 +2049,55 @@ async fn copy_count_is_validated_and_forwarded_for_delivery_preview_and_pipeline
         assert_eq!(payload["copies"], 1);
     }
 }
+
+#[tokio::test]
+async fn page_ranges_are_forwarded_and_invalid_selections_never_reach_the_api() {
+    use axum::{Json, Router, routing::post};
+    async fn echo(Json(value): Json<Value>) -> Json<Value> {
+        Json(value)
+    }
+    let router = Router::new()
+        .route("/api/v1/jobs/{id}/deliveries", post(echo))
+        .route("/api/v1/jobs/{id}/delivery-preview", post(echo))
+        .route("/api/v1/jobs/{id}/pipelines", post(echo));
+    let mut session = Session::new(router, TOKEN.into());
+    initialize(&mut session).await;
+    for name in [
+        "print_deliver_job",
+        "print_preview_delivery",
+        "print_create_pipeline",
+    ] {
+        let mut args = json!({"jobId":uuid::Uuid::new_v4(),"requestId":uuid::Uuid::new_v4(),"expectedRevision":0,"printerId":"proof","media":"iso_a4_210x297mm","pageRanges":[{"first":2,"last":3}]});
+        let result = session
+            .handle(req(2, "tools/call", json!({"name":name,"arguments":args})))
+            .await
+            .unwrap();
+        assert_eq!(result["result"]["isError"], false, "{result}");
+        let payload: Value =
+            serde_json::from_str(result["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(payload["pageRanges"], args["pageRanges"]);
+        for invalid in [
+            json!(null),
+            json!("2-3"),
+            json!([{"first":0,"last":3}]),
+            json!([{"first":2,"last":101}]),
+            json!([{"first":2,"last":1}]),
+            json!([{"first":1,"last":2},{"first":2,"last":3}]),
+        ] {
+            args["pageRanges"] = invalid;
+            let reply = session
+                .handle(req(3, "tools/call", json!({"name":name,"arguments":args})))
+                .await
+                .unwrap();
+            assert_eq!(reply["error"]["code"], -32602, "{reply}");
+        }
+        args.as_object_mut().unwrap().remove("pageRanges");
+        let result = session
+            .handle(req(4, "tools/call", json!({"name":name,"arguments":args})))
+            .await
+            .unwrap();
+        let payload: Value =
+            serde_json::from_str(result["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(payload["pageRanges"], json!([]));
+    }
+}

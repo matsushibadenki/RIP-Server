@@ -70,13 +70,21 @@ impl Repository {
         if (!color.is_null() && color["sourceJob"] != source)
             || (!delivery.is_null()
                 && (delivery["ticket"]
-                    .get("copies")
+                    .get("pageRanges")
                     .cloned()
-                    .unwrap_or(json!(1))
+                    .unwrap_or(json!([]))
                     != workflow["ticket"]["request"]
+                        .get("pageRanges")
+                        .cloned()
+                        .unwrap_or(json!([]))
+                    || delivery["ticket"]
                         .get("copies")
                         .cloned()
                         .unwrap_or(json!(1))
+                        != workflow["ticket"]["request"]
+                            .get("copies")
+                            .cloned()
+                            .unwrap_or(json!(1))
                     || delivery["ticket"]["sourceJob"] != source
                     || delivery["ticket"]["printerId"]
                         != workflow["ticket"]["request"]["printerId"]

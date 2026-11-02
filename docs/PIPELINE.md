@@ -187,3 +187,5 @@ MCP resource `jrip://inspections/{inspectionId}/events` は参照・購読・解
 **简体中文：** 认证REST SSE提供统一timeline（jobs:read）和所有者限定检查历史（jobs:submit），event名为timeline/inspection，data为JSON，id为持久sequence。使用支持Authorization头的fetch/SSE客户端；浏览器原生EventSource不能设置该头。Last-Event-ID优先于初始非负after参数，每个resource单独保存cursor。服务端每秒检查历史，每页最多100事件并遵守背压。两个路由共用进程内64连接额度，断开后释放。每15秒发送keep-alive注释，并返回no-store及不缓冲头。900秒后用RECONNECT_REQUIRED关闭；响应开始后的读取错误用通用EVENT_STREAM_UNAVAILABLE关闭。以最后处理的ID重连并按sequence去重。每次历史查询重新检查权限，配置变更仍需重启。本REST功能不是remote MCP transport。
 
 Explicit follow-on pipelines accept `copies` (default 1); physical capability and approval checks are deferred to delivery preparation. 明示的な後続pipelineの部数指定／显式后续pipeline份数: [PRINT-COPIES.md](PRINT-COPIES.md).
+
+Follow-on pipelines also persist `pageRanges`; actual bounds are checked after RIP. 後続pipelineはページ範囲を保持しRIP後に範囲を検証します。后续pipeline保存页码范围，在RIP后验证实际边界。[PRINT-PAGE-RANGES.md](PRINT-PAGE-RANGES.md).

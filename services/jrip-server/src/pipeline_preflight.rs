@@ -178,6 +178,7 @@ pub async fn create(
         worker_run_id: None,
     };
     let workflow = pipeline::Request {
+        page_ranges: Default::default(),
         copies: 1,
         request_id: req.request_id,
         expected_revision: 0,

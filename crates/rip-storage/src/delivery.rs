@@ -10,6 +10,8 @@ pub struct DeliveryTicket {
         skip_serializing_if = "rip_core::print::single_copy"
     )]
     pub copies: u32,
+    #[serde(default, skip_serializing_if = "rip_core::pages::PageRanges::is_all")]
+    pub page_ranges: rip_core::pages::PageRanges,
     #[serde(default)]
     pub color_attempt_id: Option<Uuid>,
     pub printer_id: String,
@@ -163,6 +165,26 @@ impl Repository {
             {
                 return Err(StorageError::Conflict);
             }
+            if contract["ticket"]["pageSelection"] != delivery.ticket.page_ranges.label() {
+                return Err(StorageError::Conflict);
+            }
+            if !delivery.ticket.page_ranges.is_all() {
+                let total = contract["ticket"]["sourcePageCount"]
+                    .as_u64()
+                    .filter(|n| *n <= 100)
+                    .ok_or(StorageError::Conflict)?;
+                let indices = delivery
+                    .ticket
+                    .page_ranges
+                    .indices(total as u32)
+                    .map_err(|_| StorageError::Conflict)?;
+                if contract["ticket"]["selectedSourcePages"]
+                    != serde_json::json!(indices.iter().map(|i| i + 1).collect::<Vec<_>>())
+                    || contract["ticket"]["selectedPageCount"] != indices.len()
+                {
+                    return Err(StorageError::Conflict);
+                }
+            }
             let valid: i64 = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM jobs WHERE id=? AND json_extract(payload,'$.state')='COMPLETED' AND json_extract(payload,'$.revision')=?)")
                 .bind(delivery.ticket.source_job.to_string()).bind(revision).fetch_one(&mut *tx).await?;
             if valid != 1 {
@@ -176,9 +198,9 @@ impl Repository {
             }
         }
         if let Some(approval) = approval {
-            let allowed:i64=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM execution_approvals WHERE id=? AND revoked=0 AND expires_at>? AND json_extract(payload,'$.requestId')=? AND json_extract(payload,'$.jobId')=? AND json_extract(payload,'$.printerId')=? AND json_extract(payload,'$.media')=? AND json_extract(payload,'$.colorAttemptId') IS ? AND coalesce(json_extract(payload,'$.copies'),1)=?)")
+            let allowed:i64=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM execution_approvals WHERE id=? AND revoked=0 AND expires_at>? AND json_extract(payload,'$.requestId')=? AND json_extract(payload,'$.jobId')=? AND json_extract(payload,'$.printerId')=? AND json_extract(payload,'$.media')=? AND json_extract(payload,'$.colorAttemptId') IS ? AND coalesce(json_extract(payload,'$.copies'),1)=? AND json(coalesce(json_extract(payload,'$.pageRanges'),'[]'))=json(?))")
                 .bind(approval.to_string()).bind(now()).bind(id.to_string()).bind(delivery.ticket.source_job.to_string())
-                .bind(&delivery.ticket.printer_id).bind(&delivery.ticket.media).bind(delivery.ticket.color_attempt_id.map(|id|id.to_string())).bind(delivery.ticket.copies).fetch_one(&mut *tx).await?;
+                .bind(&delivery.ticket.printer_id).bind(&delivery.ticket.media).bind(delivery.ticket.color_attempt_id.map(|id|id.to_string())).bind(delivery.ticket.copies).bind(serde_json::to_string(&delivery.ticket.page_ranges)?).fetch_one(&mut *tx).await?;
             if allowed != 1 {
                 return Err(StorageError::Conflict);
             }
@@ -460,6 +482,7 @@ mod tests {
         };
         repo.insert(&source).await.unwrap();
         let ticket = DeliveryTicket {
+            page_ranges: Default::default(),
             copies: 1,
             source_job: source.id,
             color_attempt_id: None,
@@ -471,6 +494,49 @@ mod tests {
             media: "iso_a4_210x297mm".into(),
         };
         (dir, repo, ticket)
+    }
+    #[tokio::test]
+    async fn page_ranges_preserve_legacy_json_and_atomic_approval_binding() {
+        let (_dir, repo, mut ticket) = fixture().await;
+        let legacy = serde_json::to_value(&ticket).unwrap();
+        assert!(legacy.get("pageRanges").is_none());
+        assert!(
+            serde_json::from_value::<DeliveryTicket>(legacy)
+                .unwrap()
+                .page_ranges
+                .is_all()
+        );
+        let id = Uuid::new_v4();
+        let approval = Uuid::new_v4();
+        let payload = serde_json::json!({"requestId":id,"jobId":ticket.source_job,"printerId":ticket.printer_id,"media":ticket.media,"colorAttemptId":null});
+        repo.save_approval(approval, &payload, now() + 300)
+            .await
+            .unwrap();
+        ticket.page_ranges =
+            serde_json::from_value(serde_json::json!([{"first":2,"last":3}])).unwrap();
+        assert!(
+            repo.enqueue_approved_delivery(id, ticket.clone(), Some(approval))
+                .await
+                .is_err()
+        );
+        assert!(repo.delivery(id).await.is_err());
+        let approved = Uuid::new_v4();
+        let mut exact = payload;
+        exact["pageRanges"] = serde_json::to_value(&ticket.page_ranges).unwrap();
+        repo.save_approval(approved, &exact, now() + 300)
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.enqueue_approved_delivery(id, ticket.clone(), Some(approved))
+                .await
+                .unwrap()
+                .ticket
+                .page_ranges
+                .label(),
+            "2-3"
+        );
+        ticket.page_ranges = Default::default();
+        assert!(repo.enqueue_delivery(id, ticket).await.is_err());
     }
     #[tokio::test]
     async fn copies_preserve_legacy_json_and_atomic_approval_and_replay_guards() {
