@@ -19,6 +19,7 @@ mod audit;
 mod authorization;
 mod budget;
 pub mod color;
+mod console;
 pub mod delivery;
 pub mod dispatch;
 mod event_stream;
@@ -28,6 +29,7 @@ mod operation_approvals;
 pub mod pipeline;
 mod pipeline_preflight;
 mod preflight;
+mod preview;
 pub mod print;
 mod retention;
 mod retry;
@@ -91,6 +93,10 @@ fn approval_flag(name: &str) -> Result<bool, Box<dyn std::error::Error>> {
 }
 pub fn router(app: App) -> Router {
     Router::new()
+        .route("/console", get(console::index))
+        .route("/console/", get(console::index))
+        .route("/console/app.js", get(console::script))
+        .route("/console/style.css", get(console::style))
         .route(
             "/health",
             get(|| async {
@@ -160,6 +166,10 @@ pub fn router(app: App) -> Router {
         .route(
             "/api/v1/color/attempts/{id}/artifacts/{name}",
             get(color::download),
+        )
+        .route(
+            "/api/v1/color/attempts/{id}/artifacts/{name}/preview",
+            get(preview::color),
         )
         .route("/api/v1/print/submissions", post(submit_pipeline))
         .route("/api/v1/jobs/{id}/pipelines", post(pipeline::create))
@@ -250,6 +260,10 @@ pub fn router(app: App) -> Router {
         )
         .route("/api/v1/jobs/{id}/receipt", get(preflight::receipt))
         .route("/api/v1/jobs/{id}/artifacts", get(preflight::artifacts))
+        .route(
+            "/api/v1/jobs/{id}/artifacts/{name}/preview",
+            get(preview::get),
+        )
         .route(
             "/api/v1/jobs/{id}/source-validation",
             get(preflight::source_validation),
@@ -353,6 +367,11 @@ fn messages(code: &str) -> serde_json::Value {
             "The delivery page count differs from the selected range",
             "送信ページ数が指定範囲と一致しません",
             "投递页数与所选范围不一致",
+        ),
+        "preview_unsupported" => (
+            "Preview requires a supported 8-bit TIFF and a matching valid ICC for CMYK",
+            "プレビューには対応する8ビットTIFFと、CMYKでは一致する有効なICCが必要です",
+            "预览需要支持的8位TIFF，CMYK还需要匹配且有效的ICC",
         ),
         "invalid_page_ranges" => (
             "Specify ascending non-overlapping page ranges from 1 to 100",

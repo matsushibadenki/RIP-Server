@@ -310,3 +310,7 @@ PrintIntent事前確認・原稿一括受付・RIP待機・ICC処理・承認・
 - [Gamut warnings](docs/GAMUT-WARNINGS.md): full-pixel ICC diagnostics / 全画素ICC色域警告 / 全像素ICC色域警告。
 
 - [Common artifact retention](docs/ARTIFACT-RETENTION.md): local family retention and holds / 共通保持期限と延長 / 共同保留期限及延长。
+
+- [Page preview / ページプレビュー / 页面预览](docs/PAGE-PREVIEW.md)
+
+- [Operator console / 操作画面 / 操作界面](docs/OPERATOR-CONSOLE.md): `/console`

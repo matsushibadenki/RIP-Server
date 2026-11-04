@@ -3,7 +3,11 @@ name = "rip-raster"
 version.workspace = true
 edition.workspace = true
 [dependencies]
+rip-color.workspace = true
 tiff = "0.10"
 thiserror.workspace = true
 tempfile = "3"
 sha2 = "0.10"
+
+[dev-dependencies]
+lcms2 = { version = "=6.2.0", features = ["static"] }

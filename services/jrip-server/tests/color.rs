@@ -690,3 +690,209 @@ async fn device_link_worker_reports_unassessed_gamut_instead_of_zero() {
             .any(|w| w["code"] == "GAMUT_NOT_ASSESSED")
     );
 }
+
+async fn preview_get(
+    app: &jrip_server::App,
+    url: &str,
+    token: Option<&str>,
+) -> axum::response::Response {
+    let mut request = Request::get(url);
+    if let Some(token) = token {
+        request = request.header("authorization", format!("Bearer {token}"));
+    }
+    jrip_server::router(app.clone())
+        .oneshot(request.body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn color_stage_preview_pins_profile_authenticates_and_survives_restart() {
+    use sha2::{Digest, Sha256};
+    let (dir, mut app, job, input_digest) = seed().await;
+    let input_profile = rip_color::registry::Registry::open(app.root.join("color-profiles"))
+        .unwrap()
+        .read(&input_digest)
+        .unwrap();
+    let originals = app.repo.artifacts(job.id).await.unwrap();
+    app.credentials = vec![
+        jrip_server::Credential {
+            validity: None,
+            token: "admin-token".into(),
+            identity: "admin".into(),
+            scopes: vec!["admin".into()],
+        },
+        jrip_server::Credential {
+            validity: None,
+            token: "reader".into(),
+            identity: "reader".into(),
+            scopes: vec!["jobs:read".into()],
+        },
+    ];
+    for mode in ["rgb", "cmyk", "missing", "mismatch", "space", "link"] {
+        let id = Uuid::new_v4();
+        let profile = if mode == "cmyk" {
+            include_bytes!("../../../crates/rip-raster/tests/fixtures/synthetic-cmyk.icc").to_vec()
+        } else {
+            lcms2::Profile::new_srgb().icc().unwrap()
+        };
+        let digest = format!("{:x}", Sha256::digest(&profile));
+        let expected = if mode == "link" {
+            Value::Null
+        } else if mode == "mismatch" {
+            json!("a".repeat(64))
+        } else {
+            json!(digest)
+        };
+        let ticket = json!({"sourceArtifacts":originals,"outputProfileSha256":expected,"policy":{"outputColor":if mode == "cmyk" || mode == "space" {"cmyk"} else {"rgb"}}});
+        app.repo
+            .create_color(id, job.id, job.revision, ticket)
+            .await
+            .unwrap();
+        let url = format!("/api/v1/color/attempts/{id}/artifacts/page-000001.tiff/preview");
+        assert_eq!(
+            preview_get(&app, &url, None).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            preview_get(&app, &url, Some("reader")).await.status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            preview_get(&app, &url, Some("admin-token")).await.status(),
+            StatusCode::CONFLICT
+        );
+        let directory = app
+            .root
+            .join("jobs")
+            .join(job.id.to_string())
+            .join("color")
+            .join(id.to_string());
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut paths = Vec::new();
+        for page in 1..=2 {
+            let path = directory.join(format!("page-{page:06}.tiff"));
+            if mode == "rgb" {
+                let source = app
+                    .root
+                    .join("jobs")
+                    .join(job.id.to_string())
+                    .join("raster")
+                    .join(format!("page-{page:06}.tiff"));
+                let policy: rip_color::Policy = serde_json::from_value(json!({"schemaVersion":1,"inputColor":"rgb","outputColor":"rgb","intent":"relative_colorimetric","blackPointCompensation":false,"blackPreservation":"none","tacPercent":null})).unwrap();
+                rip_color::raster::convert_tiff(
+                    std::fs::File::open(source).unwrap(),
+                    std::fs::File::create(&path).unwrap(),
+                    &input_profile,
+                    Some(&profile),
+                    &policy,
+                    300,
+                )
+                .unwrap();
+                paths.push(path);
+                continue;
+            }
+            let mut encoder =
+                tiff::encoder::TiffEncoder::new(std::fs::File::create(&path).unwrap()).unwrap();
+            if mode == "cmyk" {
+                let mut image = encoder
+                    .new_image::<tiff::encoder::colortype::CMYK8>(2, 1)
+                    .unwrap();
+                image
+                    .encoder()
+                    .write_tag(tiff::tags::Tag::Unknown(34675), profile.as_slice())
+                    .unwrap();
+                image.write_data(&[0, 0, 0, 0, 0, 0, 0, 255]).unwrap();
+            } else {
+                let mut image = encoder
+                    .new_image::<tiff::encoder::colortype::RGB8>(2, 1)
+                    .unwrap();
+                if mode != "missing" {
+                    image
+                        .encoder()
+                        .write_tag(tiff::tags::Tag::Unknown(34675), profile.as_slice())
+                        .unwrap();
+                }
+                image.write_data(&[255, 0, 0, 0, 0, 255]).unwrap();
+            }
+            paths.push(path);
+        }
+        let artifacts = jrip_server::artifacts::hash_pages(&paths).await.unwrap();
+        app.repo
+            .update_color(id, 0, "RUNNING", 0, None, None)
+            .await
+            .unwrap();
+        app.repo
+            .update_color(id, 1, "RUNNING", 1, None, None)
+            .await
+            .unwrap();
+        app.repo
+            .update_color(id, 2, "RUNNING", 2, None, None)
+            .await
+            .unwrap();
+        app.repo
+            .update_color(
+                id,
+                3,
+                "COMPLETED",
+                2,
+                Some(json!({"artifacts":artifacts})),
+                None,
+            )
+            .await
+            .unwrap();
+        let response = preview_get(&app, &url, Some("admin-token")).await;
+        if mode != "rgb" && mode != "cmyk" {
+            assert_eq!(
+                response.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{mode}"
+            );
+            let value: Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            assert!(value.to_string().contains("preview_unsupported"));
+            continue;
+        }
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "image/bmp");
+        assert_eq!(
+            response.headers()["x-jrip-source-sha256"],
+            artifacts[0].sha256
+        );
+        assert_eq!(response.headers()["x-jrip-input-profile-sha256"], digest);
+        assert_eq!(
+            response.headers()["x-jrip-color-attempt-id"],
+            id.to_string()
+        );
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        if mode == "rgb" {
+            assert_eq!(&bytes[54..60], &[0, 0, 255, 255, 0, 0]);
+        } else {
+            assert!(bytes[54..57].iter().all(|v| *v > 245));
+            assert!(bytes[57..60].iter().all(|v| *v < 10));
+        }
+        let reopened = jrip_server::open(dir.path().into(), "admin-token".into())
+            .await
+            .unwrap();
+        let repeated = preview_get(&reopened, &url, Some("admin-token")).await;
+        assert_eq!(repeated.status(), StatusCode::OK);
+        assert_eq!(
+            repeated.into_body().collect().await.unwrap().to_bytes(),
+            bytes
+        );
+        let missing = url.replace("page-000001", "page-000003");
+        assert_eq!(
+            preview_get(&app, &missing, Some("admin-token"))
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        std::fs::write(&paths[0], b"tampered").unwrap();
+        assert_eq!(
+            preview_get(&app, &url, Some("admin-token")).await.status(),
+            StatusCode::CONFLICT
+        );
+    }
+    assert_eq!(app.repo.artifacts(job.id).await.unwrap(), originals);
+}

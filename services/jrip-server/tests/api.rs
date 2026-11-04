@@ -1434,3 +1434,105 @@ async fn settings_preflight_owner_scope_rotation_and_receipt_survive_restart() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn page_preview_authenticates_verifies_and_returns_bounded_bitmap() {
+    check_profiled_preview(false).await;
+    check_profiled_preview(true).await;
+}
+async fn check_profiled_preview(cmyk: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = jrip_server::open(dir.path().into(), TOKEN.into())
+        .await
+        .unwrap();
+    let manifest: rip_core::Manifest =
+        serde_json::from_value(serde_json::json!({"name":"proof","format":"application/pdf"}))
+            .unwrap();
+    let job = rip_jobs::submit_bytes(&state.repo, &state.root, manifest, b"%PDF-1.4\n")
+        .await
+        .unwrap();
+    let raster = state
+        .root
+        .join("jobs")
+        .join(job.id.to_string())
+        .join("raster");
+    tokio::fs::create_dir(&raster).await.unwrap();
+    let path = raster.join("page-000001.tiff");
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    {
+        let mut encoder = tiff::encoder::TiffEncoder::new(&mut encoded).unwrap();
+        if cmyk {
+            let mut image = encoder
+                .new_image::<tiff::encoder::colortype::CMYK8>(1, 1)
+                .unwrap();
+            image
+                .encoder()
+                .write_tag(
+                    tiff::tags::Tag::Unknown(34675),
+                    include_bytes!("../../../crates/rip-raster/tests/fixtures/synthetic-cmyk.icc")
+                        .as_slice(),
+                )
+                .unwrap();
+            image.write_data(&[0, 0, 0, 255]).unwrap();
+        } else {
+            let profile = lcms2::Profile::new_srgb().icc().unwrap();
+            let mut image = encoder
+                .new_image::<tiff::encoder::colortype::RGB8>(1, 1)
+                .unwrap();
+            image
+                .encoder()
+                .write_tag(tiff::tags::Tag::Unknown(34675), profile.as_slice())
+                .unwrap();
+            image.write_data(&[255, 0, 0]).unwrap();
+        }
+    }
+    let data = encoded.into_inner();
+    tokio::fs::write(&path, &data).await.unwrap();
+    let artifacts = jrip_server::artifacts::hash_pages(std::slice::from_ref(&path))
+        .await
+        .unwrap();
+    let ripping = state
+        .repo
+        .transition(job, rip_core::JobState::Ripping, None)
+        .await
+        .unwrap();
+    let spooling = state
+        .repo
+        .transition(ripping, rip_core::JobState::Spooling, None)
+        .await
+        .unwrap();
+    let completed = state
+        .repo
+        .complete_with_artifacts(spooling, &artifacts)
+        .await
+        .unwrap();
+
+    let app = jrip_server::router(state);
+    let url = format!("/api/v1/jobs/{}/artifacts/page-000001.tiff", completed.id);
+    let url = format!("{url}/preview");
+
+    let unauthenticated = app
+        .clone()
+        .oneshot(Request::get(&url).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+    let response = app.clone().oneshot(request("GET", &url)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "image/bmp");
+    assert_eq!(response.headers()["cache-control"], "private, no-store");
+    assert_eq!(
+        response.headers()["x-jrip-source-sha256"],
+        artifacts[0].sha256
+    );
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..2], b"BM");
+    if cmyk {
+        assert!(body[54..57].iter().all(|v| *v < 10));
+    } else {
+        assert_eq!(&body[54..57], &[0, 0, 255]);
+    }
+    tokio::fs::write(path, b"tampered").await.unwrap();
+    let response = app.oneshot(request("GET", &url)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+}

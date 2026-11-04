@@ -12,7 +12,9 @@
 1. 🟢 [Done] 明示Delivery／後続pipelineの部数指定。機器能力照合・永続ticket・承認・送信直前再検査・MCP転送・再起動／再送試験。[PRINT-COPIES.md](PRINT-COPIES.md)。 / Explicit device copies / 显式设备输出份数。
 2. 🟢 [Done] RIP後の明示Delivery／後続pipelineでページ範囲を指定。選択ページだけの検証・変換、承認・契約・再起動・再送を検証。[PRINT-PAGE-RANGES.md](PRINT-PAGE-RANGES.md)。 / Rendered-page selection for delivery / 投递时选择已渲染页。
 3. 🟠 [Next] 両面・用紙指定、原稿投入時のページ指定とPrintIntent／IPP受付への統合。未対応設定は拒否し、対応済みの範囲から公開する。 / Duplex, media and source-time page selection / 双面、介质及原稿投入时页码选择。
-4. 🟠 [Next] 基本プレビューと、投入・設定・状態・取消を扱う操作画面。 / Basic preview and job controls / 基础预览及任务操作界面。
+4. 🟢 [Done] RGB／グレー成果物の整合性検証付き縮小プレビューAPIと、埋め込みICC対応RGB／CMYK／グレー→sRGB変換。[PAGE-PREVIEW.md](PAGE-PREVIEW.md)。 / Verified page preview with embedded ICC to sRGB conversion / 验证完整性并将嵌入ICC转换为sRGB的页面预览。
+   🟢 [Done] 色変換工程の成果物プレビュー。出力ICC／色空間とticketの照合、整合性・認証・再起動を検証。 / Ticket-bound color-stage artifact preview / 与ticket绑定的色彩管理阶段产物预览。
+   🟢 [Done] 投入・設定・状態・保留／再開・取消・ページプレビューを扱う3言語操作画面。実APIによるブラウザー回帰試験。[OPERATOR-CONSOLE.md](OPERATOR-CONSOLE.md)。 / Trilingual operator console with real API browser tests / 三语言操作界面及真实API浏览器回归测试。
 5. 🟠 [Next] 日本語フォント・透明効果・オーバープリント等の描画比較、実用原稿による品質回帰試験。 / Practical-document rendering regressions / 实用原稿渲染回归。
 6. ⭕️ [Pending] 実機1台で複数部、両面、色、取消、障害復旧、Mac／Windowsアプリ投入を通して受入確認。実機を使える検証環境が必要。 / Real-printer acceptance / 实体打印机验收。
 

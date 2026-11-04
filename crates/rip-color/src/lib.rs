@@ -1,5 +1,6 @@
 //! Explicit, bounded ICC transforms independent of the RIP interpreter.
 pub mod gamut;
+pub mod preview;
 pub mod raster;
 pub mod registry;
 use lcms2::{ColorSpaceSignature, Flags, PixelFormat, Profile, ThreadContext, Transform};

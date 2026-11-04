@@ -30,4 +30,8 @@ jobs:
         run: |
           /tmp/jrip-acx-validator/bin/pip install -r adapters/source_profiles/requirements.txt
           python3 -m unittest discover -s adapters/source_profiles -p 'test_*.py' -v
+      - name: Install operator-console browser test dependencies
+        run: |
+          npm ci --prefix tests/ui --ignore-scripts --no-audit --no-fund
+          tests/ui/node_modules/.bin/playwright install --with-deps chromium
       - run: cargo test --workspace --locked -- --ignored
