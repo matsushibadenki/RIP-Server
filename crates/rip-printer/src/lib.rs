@@ -21,6 +21,8 @@ pub enum Error {
     UnsupportedFormat,
     #[error("unsupported_copies")]
     UnsupportedCopies,
+    #[error("unsupported_sides_or_sheet_back")]
+    UnsupportedSides,
     #[error("printer_not_accepting_jobs")]
     NotAccepting,
     #[error("printer_transport_failure")]
@@ -43,8 +45,39 @@ pub struct Capabilities {
     pub pwg_types: Vec<String>,
     pub media: Vec<String>,
     pub copies_supported: Option<[u32; 2]>,
+    pub sides: Vec<String>,
+    pub sheet_back: Option<String>,
 }
 impl Capabilities {
+    pub fn check_sides(&self, sides: rip_core::print::Sides) -> Result<(), Error> {
+        if self.sides.iter().any(|s| s == sides.as_str())
+            && (sides.is_simplex()
+                || self
+                    .sheet_back
+                    .as_deref()
+                    .and_then(|v| v.parse::<rip_core::print::SheetBack>().ok())
+                    .is_some())
+        {
+            Ok(())
+        } else {
+            Err(Error::UnsupportedSides)
+        }
+    }
+
+    pub fn check_layout(
+        &self,
+        sides: rip_core::print::Sides,
+        back: rip_core::print::SheetBack,
+    ) -> Result<(), Error> {
+        self.check_sides(sides)?;
+        if (sides.is_simplex() && back.is_normal())
+            || (!sides.is_simplex() && self.sheet_back.as_deref() == Some(back.as_str()))
+        {
+            Ok(())
+        } else {
+            Err(Error::UnsupportedSides)
+        }
+    }
     pub fn check_copies(&self, copies: u32) -> Result<(), Error> {
         if !(1..=rip_core::print::MAX_DELIVERY_COPIES).contains(&copies) {
             return Err(Error::InvalidInput);
@@ -71,6 +104,21 @@ impl Capabilities {
             return Err(Error::UnsupportedFormat);
         }
         Ok(())
+    }
+}
+#[derive(Debug, Clone, Copy)]
+pub struct PwgSettings {
+    pub copies: u32,
+    pub sides: rip_core::print::Sides,
+    pub sheet_back: rip_core::print::SheetBack,
+}
+impl Default for PwgSettings {
+    fn default() -> Self {
+        Self {
+            copies: 1,
+            sides: Default::default(),
+            sheet_back: Default::default(),
+        }
     }
 }
 #[derive(Debug, Serialize)]
@@ -361,6 +409,33 @@ impl NativeIpp {
         media: &str,
         copies: u32,
     ) -> Result<AcceptedJob, Error> {
+        self.submit_pwg_with_settings(
+            name,
+            document,
+            dpi,
+            document_type,
+            media,
+            PwgSettings {
+                copies,
+                ..Default::default()
+            },
+        )
+        .await
+    }
+    pub async fn submit_pwg_with_settings(
+        &self,
+        name: &str,
+        document: Vec<u8>,
+        dpi: u32,
+        document_type: &str,
+        media: &str,
+        settings: PwgSettings,
+    ) -> Result<AcceptedJob, Error> {
+        let PwgSettings {
+            copies,
+            sides,
+            sheet_back,
+        } = settings;
         if !(1..=rip_core::print::MAX_DELIVERY_COPIES).contains(&copies) {
             return Err(Error::InvalidInput);
         }
@@ -372,7 +447,24 @@ impl NativeIpp {
         {
             return Err(Error::InvalidInput);
         }
-        let pages = rip_raster::inspect(&document).map_err(|_| Error::InvalidInput)?;
+        let pages = match sides {
+            rip_core::print::Sides::OneSided => rip_raster::inspect(&document),
+            rip_core::print::Sides::TwoSidedLongEdge => rip_raster::inspect_duplex(
+                &document,
+                rip_raster::DuplexLayout {
+                    binding: rip_raster::DuplexBinding::LongEdge,
+                    sheet_back,
+                },
+            ),
+            rip_core::print::Sides::TwoSidedShortEdge => rip_raster::inspect_duplex(
+                &document,
+                rip_raster::DuplexLayout {
+                    binding: rip_raster::DuplexBinding::ShortEdge,
+                    sheet_back,
+                },
+            ),
+        }
+        .map_err(|_| Error::InvalidInput)?;
         for page in pages {
             let media_name = &document[page.offset + 1732..page.offset + 1796];
             let end = media_name
@@ -389,8 +481,16 @@ impl NativeIpp {
         let capabilities = self.capabilities().await?;
         capabilities.check_pwg(dpi, document_type, media)?;
         capabilities.check_copies(copies)?;
-        self.send_document(name, "image/pwg-raster", document, Some(media), copies)
-            .await
+        capabilities.check_layout(sides, sheet_back)?;
+        self.send_document(
+            name,
+            "image/pwg-raster",
+            document,
+            Some(media),
+            copies,
+            Some(sides),
+        )
+        .await
     }
     async fn send_document(
         &self,
@@ -399,6 +499,7 @@ impl NativeIpp {
         document: Vec<u8>,
         media: Option<&str>,
         copies: u32,
+        sides: Option<rip_core::print::Sides>,
     ) -> Result<AcceptedJob, Error> {
         let (id, mut message) = self.message(ipp::PRINT_JOB);
         message.text(0x49, "document-format", mime);
@@ -406,6 +507,9 @@ impl NativeIpp {
         message.attribute(0x22, "ipp-attribute-fidelity", &[1]);
         message.group(2);
         message.integer("copies", copies as i32);
+        if let Some(sides) = sides {
+            message.text(0x44, "sides", sides.as_str());
+        }
         if let Some(media) = media {
             message.text(0x44, "media", media);
         }
@@ -465,6 +569,8 @@ impl PrinterBackend for NativeIpp {
             "pwg-raster-document-type-supported",
             "media-supported",
             "copies-supported",
+            "sides-supported",
+            "pwg-raster-document-sheet-back",
         ] {
             message.additional(0x44, name.as_bytes());
         }
@@ -519,7 +625,28 @@ impl PrinterBackend for NativeIpp {
             }
             _ => return Err(Error::InvalidResponse),
         };
+        let mut sides = values(&message, 4, "sides-supported", 0x44)?;
+        if sides.is_empty() {
+            sides.push("one-sided".into());
+        }
+        let backs: Vec<_> = message
+            .attributes
+            .iter()
+            .filter(|a| a.group == 4 && a.name == "pwg-raster-document-sheet-back")
+            .collect();
+        let sheet_back = match backs.as_slice() {
+            [] => None,
+            [_] => Some(
+                message
+                    .text(4, "pwg-raster-document-sheet-back", 0x44)
+                    .ok_or(Error::InvalidResponse)?
+                    .to_owned(),
+            ),
+            _ => return Err(Error::InvalidResponse),
+        };
         Ok(Capabilities {
+            sides,
+            sheet_back,
             copies_supported,
             document_formats: formats,
             accepting_jobs: accepting.value == [1],
@@ -556,7 +683,8 @@ impl PrinterBackend for NativeIpp {
             return Err(Error::UnsupportedFormat);
         }
         capabilities.check_copies(1)?;
-        self.send_document(name, mime, document, None, 1).await
+        self.send_document(name, mime, document, None, 1, None)
+            .await
     }
     async fn job_status(&self, job_id: i32) -> Result<JobStatus, Error> {
         if job_id <= 0 {

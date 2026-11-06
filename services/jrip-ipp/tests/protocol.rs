@@ -629,3 +629,110 @@ async fn ipp_hold_release_persists_and_blocks_worker_claims() {
     .await;
     assert_eq!(status(&response), ipp::NOT_FOUND);
 }
+
+fn with_ranges(operation: u16, document: &[u8], values: &[(u8, Vec<u8>)], group: u8) -> Vec<u8> {
+    let mut bytes = message(operation, document, Some("application/pdf"), None, false);
+    let end = bytes.len() - document.len() - 1;
+    let mut attrs = vec![group];
+    for (index, (tag, value)) in values.iter().enumerate() {
+        attribute(
+            &mut attrs,
+            *tag,
+            if index == 0 { "page-ranges" } else { "" },
+            value,
+        );
+    }
+    bytes.splice(end..end, attrs);
+    bytes
+}
+fn range(first: i32, last: i32) -> (u8, Vec<u8>) {
+    (0x33, [first.to_be_bytes(), last.to_be_bytes()].concat())
+}
+#[tokio::test]
+async fn ipp_ranges_are_typed_canonical_persistent_and_requested_selectively() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = jrip_ipp::open(dir.path().into(), URI.into()).await.unwrap();
+    let app = jrip_ipp::router(state.clone());
+    let (_, bytes) = send(
+        &app,
+        message(ipp::GET_PRINTER_ATTRIBUTES, &[], None, None, false),
+    )
+    .await;
+    let attrs = IppRequest::parse(&bytes).unwrap();
+    assert_eq!(attrs.one(4, "page-ranges-supported").unwrap().tag, 0x22);
+    assert_eq!(attrs.one(4, "page-ranges-supported").unwrap().value, [1]);
+    assert!(attrs.one(4, "page-ranges-default").is_none());
+    let values = [range(2, 2), range(3, 3), range(5, i32::MAX)];
+    let (_, bytes) = send(&app, with_ranges(ipp::VALIDATE_JOB, &[], &values, 2)).await;
+    assert_eq!(status(&bytes), ipp::OK);
+    assert!(state.repo.list_ipp_jobs().await.unwrap().is_empty());
+    let pdf = include_bytes!("../../../tests/corpus/colors.pdf");
+    let (_, bytes) = send(&app, with_ranges(ipp::PRINT_JOB, pdf, &values, 2)).await;
+    assert_eq!(status(&bytes), ipp::OK);
+    let attrs = IppRequest::parse(&bytes).unwrap();
+    assert_eq!(attrs.page_ranges().unwrap().label(), "2-3,5-2147483647");
+    let id = attrs.integer(2, "job-id").unwrap();
+    let reopened = jrip_ipp::open(dir.path().into(), URI.into()).await.unwrap();
+    let job = reopened.repo.get_ipp_job(id).await.unwrap();
+    assert!(job.manifest.page_ranges.is_ipp());
+    assert_eq!(job.manifest.page_ranges.label(), "2-3,5-2147483647");
+    let app = jrip_ipp::router(reopened);
+    let mut query = message(ipp::GET_JOB_ATTRIBUTES, &[], None, Some(id), false);
+    query.pop();
+    attribute(&mut query, 0x44, "requested-attributes", b"page-ranges");
+    query.push(3);
+    let (_, bytes) = send(&app, query).await;
+    let attrs = IppRequest::parse(&bytes).unwrap();
+    assert_eq!(
+        attrs.page_ranges().unwrap().label(),
+        job.manifest.page_ranges.label()
+    );
+    assert!(attrs.one(2, "copies").is_none());
+    let mut query = message(ipp::GET_JOB_ATTRIBUTES, &[], None, Some(id), false);
+    query.pop();
+    attribute(&mut query, 0x44, "requested-attributes", b"job-id");
+    query.push(3);
+    let (_, bytes) = send(&app, query).await;
+    assert!(
+        IppRequest::parse(&bytes)
+            .unwrap()
+            .attributes
+            .iter()
+            .all(|a| a.name != "page-ranges")
+    );
+}
+#[tokio::test]
+async fn malformed_ipp_ranges_are_rejected_before_spooling() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = jrip_ipp::open(dir.path().into(), URI.into()).await.unwrap();
+    let app = jrip_ipp::router(state.clone());
+    for (values, group) in [
+        (vec![range(0, 1)], 2),
+        (vec![range(-1, 1)], 2),
+        (vec![range(3, 2)], 2),
+        (vec![range(2, 3), range(1, 1)], 2),
+        (vec![range(1, 3), range(3, 4)], 2),
+        (vec![(0x33, vec![0; 7])], 2),
+        (vec![(0x21, 2i32.to_be_bytes().to_vec())], 2),
+        (vec![range(1, 2)], 1),
+    ] {
+        for operation in [ipp::VALIDATE_JOB, ipp::PRINT_JOB] {
+            let document = if operation == ipp::PRINT_JOB {
+                b"%PDF-1.4".as_slice()
+            } else {
+                b""
+            };
+            let (_, bytes) = send(&app, with_ranges(operation, document, &values, group)).await;
+            assert_eq!(
+                status(&bytes),
+                ipp::BAD_REQUEST,
+                "{values:?}, group={group}"
+            );
+        }
+    }
+    assert!(state.repo.list_ipp_jobs().await.unwrap().is_empty());
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("jobs")).unwrap().count(),
+        0
+    );
+}

@@ -100,7 +100,22 @@ pub async fn models(app: &App, printer_id: Option<&str>) -> Result<Value, ApiErr
             })
             .collect();
         model.media.sort_by(|a, b| a.name.cmp(&b.name));
-        model.sides = vec!["one-sided".into()];
+        model.sides = device
+            .sides
+            .iter()
+            .filter(|s| {
+                s.as_str() == "one-sided"
+                    || (device
+                        .sheet_back
+                        .as_deref()
+                        .and_then(|v| v.parse::<rip_core::print::SheetBack>().ok())
+                        .is_some()
+                        && matches!(s.as_str(), "two-sided-long-edge" | "two-sided-short-edge"))
+            })
+            .cloned()
+            .collect();
+        model.sides.sort();
+        model.sides.dedup();
         model.copies = match device.copies_supported {
             Some([min, max]) if min <= rip_core::print::MAX_DELIVERY_COPIES => {
                 Some([min, max.min(rip_core::print::MAX_DELIVERY_COPIES)])
@@ -113,6 +128,7 @@ pub async fn models(app: &App, printer_id: Option<&str>) -> Result<Value, ApiErr
             && !model.input_media_types.is_empty()
             && !model.color_spaces.is_empty()
             && !model.media.is_empty()
+            && !model.sides.is_empty()
             && model.copies.is_some()
             && model.dpi.as_ref().is_some_and(|dpi| dpi.minimum > 0)
         {
@@ -125,7 +141,7 @@ pub async fn models(app: &App, printer_id: Option<&str>) -> Result<Value, ApiErr
             "configured_media_and_exact_raster_geometry_required".into(),
             "explicit_color_attempt_required_when_color_target_configured".into(),
         ];
-        model.extensions = json!({"org.jrip.printer":{"printerId":id,"completionMeaning":"device-confirmed","deliveryPageRanges":true,"renderAllPages":true,"configuredColorTarget":printer.color_target,"state":device.state,"reasons":device.reasons}});
+        model.extensions = json!({"org.jrip.printer":{"printerId":id,"completionMeaning":"device-confirmed","deliveryPageRanges":true,"renderAllPages":false,"renderSelectionFormats":["application/pdf"],"sheetBack":device.sheet_back,"configuredColorTarget":printer.color_target,"state":device.state,"reasons":device.reasons}});
         models.push(model);
     }
     let value = serde_json::to_value(&models).map_err(internal)?;

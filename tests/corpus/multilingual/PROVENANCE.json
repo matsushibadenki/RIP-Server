@@ -1,0 +1,23 @@
+{
+  "source": "Debian bookworm fonts-noto-cjk / NotoSansCJK-Regular.ttc",
+  "sourceSha256": "b76b0433203017ca80401b2ee0dd69350349871c4b19d504c34dbdd80541690a",
+  "license": "SIL Open Font License 1.1",
+  "subsets": {
+    "jp": {
+      "collectionIndex": 0,
+      "sha256": "a37433381483e70bc26448284b37dbd0040995f26e068a178ad6505b619331a8",
+      "postscriptName": "JRIPCorpusCJKJP",
+      "version": "Version 2.004;hotconv 1.0.118;makeotfexe 2.5.65603",
+      "glyphs": 213,
+      "fontDicts": 8
+    },
+    "sc": {
+      "collectionIndex": 2,
+      "sha256": "64198d8b32cad97a2d197b7fcc79f4c6945fdeb486be68e57c834470b8ab7c36",
+      "postscriptName": "JRIPCorpusCJKSC",
+      "version": "Version 2.004;hotconv 1.0.118;makeotfexe 2.5.65603",
+      "glyphs": 183,
+      "fontDicts": 6
+    }
+  }
+}

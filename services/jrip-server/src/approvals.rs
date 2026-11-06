@@ -17,6 +17,8 @@ pub(crate) struct Request {
     identity: String,
     #[serde(default = "rip_core::print::default_copies")]
     copies: u32,
+    #[serde(default, skip_serializing_if = "rip_core::print::Sides::is_simplex")]
+    sides: rip_core::print::Sides,
     #[serde(default)]
     page_ranges: rip_core::pages::PageRanges,
     job_id: Uuid,
@@ -70,7 +72,7 @@ pub(crate) async fn create(
     let id = Uuid::new_v4();
     let expires = rip_storage::now() + 300;
     let payload = serde_json::json!({"id":id,"identity":req.identity,"jobId":req.job_id,
-        "copies":req.copies,"pageRanges":req.page_ranges,"expectedRevision":req.expected_revision,"requestId":req.request_id,"printerId":req.printer_id,
+        "copies":req.copies,"sides":req.sides,"pageRanges":req.page_ranges,"expectedRevision":req.expected_revision,"requestId":req.request_id,"printerId":req.printer_id,
         "profileHash":profile_hash(&app,&req.printer_id)?,"media":req.media,"colorAttemptId":req.color_attempt_id,"expiresAt":expires,"issuer":actor(&app,&headers)?,"reason":req.reason});
     app.repo.save_approval(id, &payload, expires).await?;
     Ok((StatusCode::CREATED, Json(payload)))
@@ -109,6 +111,7 @@ pub(crate) async fn check_delivery(
         .cloned()
         .unwrap_or(serde_json::json!([]))
         != serde_json::json!(ticket.page_ranges)
+        || approval["sides"].as_str().unwrap_or("one-sided") != ticket.sides.as_str()
         || approval["copies"].as_u64().unwrap_or(1) != u64::from(ticket.copies)
         || approval["identity"] != actor(app, headers)?
         || approval["jobId"] != ticket.source_job.to_string()

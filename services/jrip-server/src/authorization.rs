@@ -96,6 +96,30 @@ impl App {
             })
     }
 }
+/// Read the current credential context; this never grants an operation.
+pub(crate) async fn context(
+    State(app): State<App>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let token = headers
+        .get("authorization")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .unwrap_or("");
+    let (identity, scopes, expires_at) = app
+        .access_with_expiry(token)
+        .ok_or(ApiError(StatusCode::UNAUTHORIZED, "unauthorized"))?;
+    Ok((
+        [
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+            (axum::http::header::VARY, "Authorization"),
+        ],
+        Json(
+            serde_json::json!({"schemaVersion":1,"profile":"org.jrip.auth-context-v1","identity":identity,"scopes":scopes,"expiresAt":expires_at,"credentialSource":if app.credentials.is_empty(){"legacy-local"}else{"configured"},
+            "observedAt":rip_storage::now(),"printApprovalRequired":app.require_print_approval}),
+        ),
+    ))
+}
 pub(super) fn authorize(app: &App, headers: &HeaderMap, scope: &str) -> Result<(), ApiError> {
     let token = headers
         .get("authorization")

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+pub mod font_usage;
 pub mod pages;
 pub mod print;
 
@@ -110,6 +111,8 @@ impl EnginePreference {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
+    #[serde(default, skip_serializing_if = "pages::RenderPages::is_all")]
+    pub page_ranges: pages::RenderPages,
     pub name: String,
     pub format: DocumentFormat,
     #[serde(default = "default_dpi")]
@@ -133,6 +136,9 @@ fn default_priority() -> u8 {
 impl Manifest {
     pub fn validate(&self) -> Result<(), ValidationError> {
         self.engine.resolve(self.format)?;
+        if !self.page_ranges.is_all() && self.format != DocumentFormat::Pdf {
+            return Err(ValidationError("page_selection_requires_pdf"));
+        }
         if self.name.trim().is_empty()
             || self.name.len() > 255
             || self.name.chars().any(char::is_control)
@@ -167,6 +173,10 @@ pub struct Job {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Artifact {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_page: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_page_count: Option<u32>,
     pub page: u32,
     pub name: String,
     pub media_type: String,

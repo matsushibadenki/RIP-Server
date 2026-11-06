@@ -7,6 +7,8 @@ COPY adapters/source_profiles/analyze.py /usr/local/lib/jrip/source_profiles.py
 COPY adapters/mupdf/render.py /usr/local/lib/jrip/render.py
 COPY adapters/mupdf/inspect.py /usr/local/lib/jrip/inspect.py
 COPY adapters/mupdf/inspect.js /usr/local/lib/jrip/inspect.js
+COPY adapters/font_policy.py /usr/local/lib/jrip/font_policy.py
+COPY adapters/page_selection.py /usr/local/lib/jrip/page_selection.py
 COPY adapters/stream_pages.py /usr/local/lib/jrip/stream_pages.py
 USER 1000:1000
 ENTRYPOINT ["python3", "-I", "/usr/local/lib/jrip/render.py"]

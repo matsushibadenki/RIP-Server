@@ -255,20 +255,39 @@ pub fn resolve(intent: PrintIntent) -> Value {
             json!(["auto", "ghostscript"])
         },
     );
-    if intent.page_ranges.as_ref().is_some_and(|r| {
-        r.value.len() > 100 || r.value.iter().any(|v| v.first == 0 || v.last < v.first)
-    }) {
+    let requirement = intent.page_ranges.map(|r| Requirement {
+        mode: r.mode,
+        value: r
+            .value
+            .into_iter()
+            .map(|p| rip_core::pages::PageRange {
+                first: p.first,
+                last: p.last,
+            })
+            .collect::<Vec<_>>(),
+    });
+    if requirement
+        .as_ref()
+        .is_some_and(|r| rip_core::pages::PageRanges::new(r.value.clone()).is_err())
+    {
         n.conflicts.push(conflict(
             "pageRanges",
             "invalid_page_ranges",
-            json!(intent.page_ranges),
+            json!(requirement),
             json!([]),
         ));
     }
-    n.unavailable(
+    let ranges = n.select(
         "pageRanges",
-        intent.page_ranges.filter(|r| !r.value.is_empty()),
+        requirement,
+        vec![],
+        |ranges| {
+            rip_core::pages::PageRanges::new(ranges.clone()).is_ok()
+                && (ranges.is_empty() || format == DocumentFormat::Pdf)
+        },
+        json!([[]]),
     );
+    let page_ranges = rip_core::pages::PageRanges::new(ranges).unwrap_or_default();
     n.select("numberUp", intent.number_up, 1, |v| *v == 1, json!([1]));
     n.select(
         "imposition",
@@ -297,6 +316,7 @@ pub fn resolve(intent: PrintIntent) -> Value {
         ));
     }
     let manifest = Manifest {
+        page_ranges: page_ranges.into(),
         name: "Agent RIP export".into(),
         format,
         dpi,
@@ -331,4 +351,41 @@ pub fn resolve(intent: PrintIntent) -> Value {
         None
     };
     json!({"executable":ticket.is_some(),"ticket":ticket,"conflicts":n.conflicts,"adjustments":n.adjustments,"authorizationGranted":false,"messages":{"en":"Settings negotiation only; source verification and authorization are required before execution.","ja":"設定の能力照合結果です。実行には原稿検証と認可が必要です。","zh-CN":"仅为设置协商结果；执行前需要验证原稿并授权。"}})
+}
+
+#[cfg(test)]
+mod page_tests {
+    use super::*;
+    #[test]
+    fn pdf_page_selection_is_canonical_and_requirements_are_explicit() {
+        let base = json!({"document":{"uri":"https://example.org/test.pdf","mediaType":"application/pdf","sha256":"a".repeat(64)},"copies":{"mode":"required","value":1},"output":{"destination":"artifact"}});
+        for (format, mode, executable, selected) in [
+            ("application/pdf", "required", true, "2-3"),
+            ("application/pdf", "preferred", true, "2-3"),
+            ("application/pdf", "automatic", true, "all"),
+            ("application/postscript", "required", false, "all"),
+            ("application/postscript", "preferred", true, "all"),
+        ] {
+            let mut value = base.clone();
+            value["document"]["mediaType"] = json!(format);
+            value["pageRanges"] =
+                json!({"mode":mode,"value":[{"first":2,"last":2},{"first":3,"last":3}]});
+            let result = resolve(serde_json::from_value(value).unwrap());
+            assert_eq!(result["executable"], executable, "{result}");
+            if executable {
+                assert_eq!(result["ticket"]["pageSelection"], selected);
+            }
+            if mode != "required" && selected == "all" {
+                assert_eq!(result["adjustments"].as_array().unwrap().len(), 1);
+            }
+        }
+        for mode in ["required", "preferred", "automatic"] {
+            let mut value = base.clone();
+            value["pageRanges"] = json!({"mode":mode,"value":[{"first":2,"last":101}]});
+            assert_eq!(
+                resolve(serde_json::from_value(value).unwrap())["executable"],
+                false
+            );
+        }
+    }
 }

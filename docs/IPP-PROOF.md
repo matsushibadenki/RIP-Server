@@ -1,5 +1,7 @@
 # PDF IPP proof printer / PDF IPP仮想プリンター / PDF IPP虚拟打印机
 
+🟢 [Done] 原稿ページ範囲の指定 / Source page selection / 原稿页选择: [IPP-PAGE-RANGES.md](IPP-PAGE-RANGES.md)。
+
 ## 日本語
 
 このサービスはPDFをTIFFへ変換するファイル出力用仮想プリンターです。IPPの完了状態はTIFF出力完了を示します。紙への印刷やAirPrint / IPP Everywhere適合を意味しません。

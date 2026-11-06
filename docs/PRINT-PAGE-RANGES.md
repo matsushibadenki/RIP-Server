@@ -2,9 +2,10 @@
 
 🟢 [Done] Selection of already-rendered pages for explicit Delivery and follow-on pipelines.
 
+
 ## 日本語
 
-RIP済みのページから必要な範囲だけを選択して印刷できます。対象は明示的な実機Delivery、Deliveryプレビュー、後続pipelineです。原稿投入前にMuPDF／Ghostscriptの描画対象を絞る機能ではありません。
+RIP済みのページから必要な範囲だけを選択して印刷できます。対象は明示的な実機Delivery、Deliveryプレビュー、後続pipelineです。原稿投入前のPDF選択描画は[RENDER-PAGE-SELECTION.md](RENDER-PAGE-SELECTION.md)を参照してください。
 
 ```json
 {
@@ -39,26 +40,30 @@ MCPでは `print_preview_delivery`、`print_deliver_job`、`print_create_pipelin
 
 ⭕️ [Pending] 実機での選択ページ・紙枚数・丁合・取消の受入確認。開発環境ではページごとに異なる画素を持つTIFFと模擬IPPを使い、送信データの順序と内容、範囲変更拒否、承認、再起動、再送を確認しています。
 
-🟠 [Next] 原稿投入時のページ指定による描画量削減、PrintIntent／IPP仮想プリンター受付への統合、両面・用紙指定、基本プレビューUI。現在のPDF限定IPP受付と原稿投入前PrintIntentは全ページのままです。
+🟢 [Done] PDFの描画量削減とPrintIntent統合は[RENDER-PAGE-SELECTION.md](RENDER-PAGE-SELECTION.md)を参照。
+
+🟢 [Done] [操作画面への範囲入力](OPERATOR-CONSOLE.md)。
+
+🟠 [Next] 用紙指定・実機配信の画面拡充。
 
 ## English
 
-Explicit delivery preview, delivery and follow-on pipeline requests, plus their MCP tools, accept `pageRanges: [{first,last}]`. Numbers are one-based rendered page positions, not PDF page labels. Endpoints are inclusive, sorted and non-overlapping, bounded to 1–100 with at most 100 ranges. Adjacent ranges merge canonically. Omitted/empty arrays select all; null, invalid types, reversed/overlapping ranges and unknown fields fail. Ranges beyond the actual raster page count fail without clipping or sending.
+Explicit delivery preview, delivery and follow-on pipeline requests, plus their MCP tools, accept `pageRanges: [{first,last}]`. Numbers are one-based physical source positions, not PDF page labels. Selected-render artifacts retain original source mapping; unrendered requests fail with page_not_rendered. Endpoints are inclusive, sorted and non-overlapping, bounded to 1–100 with at most 100 ranges. Adjacent ranges merge canonically. Omitted/empty arrays select all; null, invalid types, reversed/overlapping ranges and unknown fields fail. Ranges beyond the actual raster page count fail without clipping or sending.
 
 Only selected TIFFs are read as hash-verified snapshots and converted in original order into one PWG Raster document; the 32MiB input budget applies to selected TIFFs. Unselected file contents are not reverified. Preview `verificationScope=selected-raster-pages` states this limit. Source/color artifacts remain unchanged. Device copies apply to the selected document. No IPP page-ranges attribute is sent, avoiding double selection.
 
 Persistent tickets, normalized pipeline requests, physical-contract hashes, receipts and approvals bind the selection. Physical contracts include `pageSelection` and, for explicit selections, `sourcePageCount`, `selectedSourcePages`, `selectedPageCount`. Queue admission atomically rechecks approval ranges; existing child matching and unified ticket reads check consistency. Identical adjacent-range representations converge; a changed selection under an existing request ID conflicts. Legacy absent fields remain all-pages and are omitted during default serialization. Before sending, the spool page count must match an explicit selection, alongside existing hash/media/color/DPI/capability checks.
 
-Pipeline requests may be stored before RIP completion; actual page bounds are checked when preparing delivery. This feature filters after rendering, not MuPDF/Ghostscript input processing. Source PrintIntent and the PDF-only IPP virtual printer still process all pages. Render-time selection, duplex/media improvements and basic preview UI remain Next; real printer sheet/order/collation/cancellation acceptance is Pending.
+Pipeline requests may be stored before RIP completion; actual page bounds are checked when preparing delivery. Delivery filters existing artifacts; PDF source PrintIntent now supports [render-time selection](RENDER-PAGE-SELECTION.md). Console range controls are implemented; media improvements remain Next; real printer sheet/order/collation/cancellation acceptance is Pending.
 
 ## 简体中文
 
-显式投递预览、投递、后续pipeline及对应MCP工具接受 `pageRanges: [{first,last}]`。页码从1开始，表示RIP输出页的位置，不是PDF页标签。范围包含两端，须升序且不重叠，页码限1至100，最多100个范围。相邻范围合并；省略或空数组表示全部。null、错误类型、倒置、重叠及未知字段会拒绝，超出实际页数时不会裁剪或发送。
+显式投递预览、投递、后续pipeline及对应MCP工具接受 `pageRanges: [{first,last}]`。页码从1开始，表示原稿物理页，不是PDF页标签。选择渲染产物保留原稿映射，未渲染页请求返回page_not_rendered。范围包含两端，须升序且不重叠，页码限1至100，最多100个范围。相邻范围合并；省略或空数组表示全部。null、错误类型、倒置、重叠及未知字段会拒绝，超出实际页数时不会裁剪或发送。
 
 仅对选中的TIFF建立hash验证snapshot，按原稿顺序转换为一个PWG Raster文档。32MiB输入预算只计算所选TIFF；未选择文件内容不再次验证。预览的 `verificationScope=selected-raster-pages` 明确此范围。原RIP／Color产物保持不变，设备份数应用于选择后的文档。不再发送IPP page-ranges属性，避免重复筛选。
 
 持久ticket、正规化pipeline请求、物理契约hash、Receipt及审批均绑定范围。物理契约包含 `pageSelection`；显式选择另含 `sourcePageCount`、`selectedSourcePages`、`selectedPageCount`。队列事务再次核对审批范围，pipeline子任务及统一ticket读取也验证一致性。同一requestId改变选择会冲突；仅相邻范围分组不同的等价表示可复用。旧数据缺省仍为全部，默认序列化省略新增属性。发送前核对光栅页数与显式选择数，并保留hash、介质、颜色、DPI及设备能力验证。
 
-pipeline可在RIP完成前保存请求，实际页数在投递准备时检查。此功能在渲染之后筛选，不减少MuPDF／Ghostscript的原稿渲染量。原稿PrintIntent及PDF虚拟打印机仍处理全部页面。渲染时选择、双面／介质扩展及基础预览UI为Next；真实设备页码、纸张数量、整理顺序及取消验收为Pending。
+pipeline可在RIP完成前保存请求，实际页数在投递准备时检查。投递筛选已有产物；PDF原稿PrintIntent已支持[选择渲染](RENDER-PAGE-SELECTION.md)。界面范围输入已实现，介质扩展为Next；真实设备页码、纸张数量、整理顺序及取消验收为Pending。
 
-🟢 [Done] Pre-source physical PrintIntent selection / 原稿投入前の実機PrintIntent指定 / 原稿接收前的实体PrintIntent选择: [PRINT-INTENT-PAGES.md](PRINT-INTENT-PAGES.md). Rendering remains all-page / 描画は全ページのまま / 仍渲染全部页。
+🟢 [Done] Pre-source physical PrintIntent selection / 原稿投入前の実機PrintIntent指定 / 原稿接收前的实体PrintIntent选择: [PRINT-INTENT-PAGES.md](PRINT-INTENT-PAGES.md). PDF render selection / PDF選択描画 / PDF选择渲染: [RENDER-PAGE-SELECTION.md](RENDER-PAGE-SELECTION.md)。

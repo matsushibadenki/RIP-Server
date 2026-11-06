@@ -100,6 +100,7 @@ impl Repository {
         sqlx::query("CREATE INDEX IF NOT EXISTS delivery_queue ON deliveries(state,created_at,id)")
             .execute(&pool)
             .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS delivery_source_order ON deliveries(json_extract(payload,'$.ticket.sourceJob'),created_at DESC,id DESC)").execute(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS delivery_events (sequence INTEGER PRIMARY KEY AUTOINCREMENT,delivery_id TEXT NOT NULL,state TEXT NOT NULL,created_at INTEGER NOT NULL)").execute(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS job_event_details (sequence INTEGER PRIMARY KEY,payload TEXT NOT NULL)").execute(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS audit_remote_prunes(archive_id TEXT NOT NULL,target TEXT NOT NULL,state TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(archive_id,target))").execute(&pool).await?;
@@ -116,6 +117,8 @@ impl Repository {
         sqlx::query("CREATE TABLE IF NOT EXISTS execution_approvals(id TEXT PRIMARY KEY,payload TEXT NOT NULL,expires_at INTEGER NOT NULL,revoked INTEGER NOT NULL)").execute(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS retention_tombstones(job_id TEXT PRIMARY KEY,created_at INTEGER NOT NULL,finished_at INTEGER)").execute(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS color_attempts(id TEXT PRIMARY KEY,source_job TEXT NOT NULL,ticket TEXT NOT NULL,payload TEXT NOT NULL,state TEXT NOT NULL,revision INTEGER NOT NULL,lease_until INTEGER,created_at INTEGER NOT NULL)").execute(&pool).await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS color_source_order ON color_attempts(source_job,created_at DESC,id DESC)").execute(&pool).await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS color_source_state_order ON color_attempts(source_job,state,created_at DESC,id DESC)").execute(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS color_events(sequence INTEGER PRIMARY KEY AUTOINCREMENT,attempt_id TEXT NOT NULL,payload TEXT NOT NULL)").execute(&pool).await?;
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS color_queue ON color_attempts(state,created_at,id)",
@@ -566,8 +569,7 @@ impl Repository {
         job: Job,
         artifacts: &[Artifact],
     ) -> Result<Job, StorageError> {
-        if artifacts.is_empty()
-            || artifacts.len() > 100
+        if artifacts.len() > 100
             || artifacts.iter().enumerate().any(|(i, a)| {
                 a.page != i as u32 + 1
                     || a.name != format!("page-{:06}.tiff", a.page)
@@ -581,6 +583,30 @@ impl Repository {
             })
         {
             return Err(StorageError::Conflict);
+        }
+        if artifacts.is_empty() {
+            let report = self.source_validation(job.id).await?;
+            let total = report["pageCount"]
+                .as_u64()
+                .filter(|n| (1..=100).contains(n))
+                .ok_or(StorageError::Conflict)? as u32;
+            if !job.manifest.page_ranges.is_ipp()
+                || report["sourceSha256"] != job.source_sha256
+                || report["strictPdfInspection"] != true
+                || report["pageSelectionSemantics"] != "ipp-input-pages"
+                || report["renderedPageCount"] != 0
+                || !job
+                    .manifest
+                    .page_ranges
+                    .indices(total)
+                    .map_err(|_| StorageError::Conflict)?
+                    .is_empty()
+            {
+                return Err(StorageError::Conflict);
+            }
+        } else {
+            rip_core::pages::source_mapping(&job.manifest, artifacts)
+                .map_err(|_| StorageError::Conflict)?;
         }
         self.transition_recorded(job, JobState::Completed, None, Some(artifacts))
             .await
@@ -764,6 +790,7 @@ mod tests {
         let j = Job {
             id: Uuid::new_v4(),
             manifest: Manifest {
+                page_ranges: Default::default(),
                 name: "日本語.ps".into(),
                 format: DocumentFormat::Postscript,
                 dpi: 600,
@@ -922,6 +949,7 @@ mod tests {
         let j = Job {
             id: Uuid::new_v4(),
             manifest: Manifest {
+                page_ranges: Default::default(),
                 name: "日本語.ps".into(),
                 format: DocumentFormat::Postscript,
                 dpi: 600,
@@ -972,6 +1000,7 @@ mod tests {
         let make = |priority, state| Job {
             id: Uuid::new_v4(),
             manifest: Manifest {
+                page_ranges: Default::default(),
                 name: "queued.pdf".into(),
                 format: DocumentFormat::Pdf,
                 dpi: 600,
@@ -1008,6 +1037,7 @@ mod tests {
         let job = Job {
             id: Uuid::new_v4(),
             manifest: Manifest {
+                page_ranges: Default::default(),
                 name: "leased.pdf".into(),
                 format: DocumentFormat::Pdf,
                 dpi: 600,

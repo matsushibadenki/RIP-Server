@@ -1,4 +1,4 @@
-//! Canonical, one-based selection of already-rendered pages.
+//! Canonical, bounded one-based source page selection and artifact mapping.
 use crate::ValidationError;
 use serde::{Deserialize, Deserializer, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -12,12 +12,15 @@ pub struct PageRange {
 pub struct PageRanges(Vec<PageRange>);
 impl PageRanges {
     pub fn new(ranges: Vec<PageRange>) -> Result<Self, ValidationError> {
+        Self::bounded(ranges, 100)
+    }
+    fn bounded(ranges: Vec<PageRange>, maximum: u32) -> Result<Self, ValidationError> {
         if ranges.len() > 100 {
             return Err(ValidationError("invalid_page_ranges"));
         }
         let mut canonical: Vec<PageRange> = Vec::new();
         for range in ranges {
-            if range.first == 0 || range.last < range.first || range.last > 100 {
+            if range.first == 0 || range.last < range.first || range.last > maximum {
                 return Err(ValidationError("invalid_page_ranges"));
             }
             if let Some(previous) = canonical.last_mut() {
@@ -32,6 +35,9 @@ impl PageRanges {
             canonical.push(range);
         }
         Ok(Self(canonical))
+    }
+    pub fn ranges(&self) -> &[PageRange] {
+        &self.0
     }
     pub fn is_all(&self) -> bool {
         self.0.is_empty()
@@ -69,6 +75,148 @@ impl PageRanges {
             .collect::<Vec<_>>()
             .join(",")
     }
+}
+/// IPP uses input pages and ignores positions outside the source (RFC 8011 §5.2.7).
+/// The explicit wrapper preserves strict array semantics for existing REST manifests.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum RenderPages {
+    Strict(PageRanges),
+    Ipp { ipp: IppPageRanges },
+}
+impl Default for RenderPages {
+    fn default() -> Self {
+        Self::Strict(PageRanges::default())
+    }
+}
+impl From<PageRanges> for RenderPages {
+    fn from(value: PageRanges) -> Self {
+        Self::Strict(value)
+    }
+}
+impl RenderPages {
+    pub fn is_all(&self) -> bool {
+        matches!(self,Self::Strict(ranges) if ranges.is_all())
+    }
+    pub fn is_ipp(&self) -> bool {
+        matches!(self, Self::Ipp { .. })
+    }
+    pub fn label(&self) -> String {
+        match self {
+            Self::Strict(r) => r.label(),
+            Self::Ipp { ipp } => ipp.0.label(),
+        }
+    }
+    pub fn ranges(&self) -> &[PageRange] {
+        match self {
+            Self::Strict(r) => r.ranges(),
+            Self::Ipp { ipp } => ipp.0.ranges(),
+        }
+    }
+    pub fn indices(&self, total: u32) -> Result<Vec<usize>, ValidationError> {
+        match self {
+            Self::Strict(r) => r.indices(total),
+            Self::Ipp { ipp } => ipp.indices(total),
+        }
+    }
+    pub fn argument(&self) -> String {
+        format!(
+            "--jrip-{}pages={}",
+            if self.is_ipp() { "ipp-" } else { "" },
+            self.label()
+        )
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct IppPageRanges(PageRanges);
+impl IppPageRanges {
+    pub fn new(ranges: Vec<PageRange>) -> Result<Self, ValidationError> {
+        if ranges.is_empty() {
+            return Err(ValidationError("invalid_page_ranges"));
+        }
+        Ok(Self(PageRanges::bounded(ranges, i32::MAX as u32)?))
+    }
+    pub fn indices(&self, total: u32) -> Result<Vec<usize>, ValidationError> {
+        if !(1..=100).contains(&total) {
+            return Err(ValidationError("page_range_out_of_bounds"));
+        }
+        Ok(self
+            .0
+            .ranges()
+            .iter()
+            .flat_map(|r| r.first..=r.last.min(total))
+            .map(|n| n as usize - 1)
+            .collect())
+    }
+}
+impl<'de> Deserialize<'de> for IppPageRanges {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Self::new(Vec::<PageRange>::deserialize(d)?).map_err(serde::de::Error::custom)
+    }
+}
+/// Validate the source-to-raster map before selecting pages for delivery.
+pub fn source_mapping(
+    manifest: &crate::Manifest,
+    artifacts: &[crate::Artifact],
+) -> Result<(Vec<u32>, u32), ValidationError> {
+    if artifacts.is_empty()
+        || artifacts.len() > 100
+        || artifacts
+            .iter()
+            .enumerate()
+            .any(|(i, a)| a.page != i as u32 + 1)
+    {
+        return Err(ValidationError("invalid_page_mapping"));
+    }
+    if manifest.page_ranges.is_all() {
+        if artifacts
+            .iter()
+            .any(|a| a.source_page.is_some() || a.source_page_count.is_some())
+        {
+            return Err(ValidationError("invalid_page_mapping"));
+        }
+        return Ok((
+            (1..=artifacts.len() as u32).collect(),
+            artifacts.len() as u32,
+        ));
+    }
+    let total = artifacts[0]
+        .source_page_count
+        .ok_or(ValidationError("invalid_page_mapping"))?;
+    let expected: Vec<u32> = manifest
+        .page_ranges
+        .indices(total)?
+        .into_iter()
+        .map(|i| i as u32 + 1)
+        .collect();
+    if expected.len() != artifacts.len()
+        || artifacts
+            .iter()
+            .zip(&expected)
+            .any(|(a, n)| a.source_page != Some(*n) || a.source_page_count != Some(total))
+    {
+        return Err(ValidationError("invalid_page_mapping"));
+    }
+    Ok((expected, total))
+}
+pub fn delivery_indices(
+    request: &PageRanges,
+    mapping: &[u32],
+    source_total: u32,
+) -> Result<Vec<usize>, ValidationError> {
+    if request.is_all() {
+        return Ok((0..mapping.len()).collect());
+    }
+    request
+        .indices(source_total)?
+        .into_iter()
+        .map(|i| {
+            mapping
+                .binary_search(&(i as u32 + 1))
+                .map_err(|_| ValidationError("page_not_rendered"))
+        })
+        .collect()
 }
 impl<'de> Deserialize<'de> for PageRanges {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -119,5 +267,101 @@ mod tests {
         let selection: PageRanges = serde_json::from_value(json!([{"first":2,"last":3}])).unwrap();
         assert!(selection.indices(2).is_err());
         assert_eq!(selection.indices(3).unwrap(), vec![1, 2]);
+    }
+}
+
+#[cfg(test)]
+mod mapping_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn selection_mapping_binds_source_positions_and_rejects_unrendered_pages() {
+        let mut manifest: crate::Manifest=serde_json::from_value(json!({"name":"test.pdf","format":"application/pdf","dpi":72,"color_mode":"rgb","priority":50,"page_ranges":[{"first":2,"last":2},{"first":5,"last":5}]})).unwrap();
+        manifest.validate().unwrap();
+        let mut artifacts: Vec<crate::Artifact> = (1..=2)
+            .map(|page| crate::Artifact {
+                page,
+                name: format!("page-{page:06}.tiff"),
+                media_type: "image/tiff".into(),
+                bytes: 8,
+                sha256: "a".repeat(64),
+                source_page: Some(if page == 1 { 2 } else { 5 }),
+                source_page_count: Some(6),
+            })
+            .collect();
+        let (map, total) = source_mapping(&manifest, &artifacts).unwrap();
+        assert_eq!(map, vec![2, 5]);
+        assert_eq!(total, 6);
+        let selection = PageRanges::new(vec![PageRange { first: 5, last: 5 }]).unwrap();
+        assert_eq!(delivery_indices(&selection, &map, total).unwrap(), vec![1]);
+        let missing = PageRanges::new(vec![PageRange { first: 3, last: 3 }]).unwrap();
+        assert_eq!(
+            delivery_indices(&missing, &map, total).unwrap_err().0,
+            "page_not_rendered"
+        );
+        artifacts[1].source_page = Some(3);
+        assert!(source_mapping(&manifest, &artifacts).is_err());
+        artifacts[1].source_page = Some(5);
+        artifacts[1].source_page_count = Some(5);
+        assert!(source_mapping(&manifest, &artifacts).is_err());
+        manifest.page_ranges = PageRanges::default().into();
+        assert!(source_mapping(&manifest, &artifacts).is_err());
+        for artifact in &mut artifacts {
+            artifact.source_page = None;
+            artifact.source_page_count = None;
+        }
+        assert_eq!(
+            source_mapping(&manifest, &artifacts).unwrap(),
+            (vec![1, 2], 2)
+        );
+        let json = serde_json::to_value(&manifest).unwrap();
+        assert!(json.get("page_ranges").is_none());
+        assert!(
+            serde_json::to_value(&artifacts[0])
+                .unwrap()
+                .get("sourcePage")
+                .is_none()
+        );
+        manifest.page_ranges = selection.into();
+        manifest.format = crate::DocumentFormat::Postscript;
+        assert!(manifest.validate().is_err());
+    }
+}
+
+#[cfg(test)]
+mod ipp_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn ipp_ranges_clip_without_expanding_large_values_or_changing_strict_defaults() {
+        for (input, expected) in [
+            (json!({"ipp":[{"first":2,"last":2147483647}]}), vec![1, 2]),
+            (json!({"ipp":[{"first":4,"last":2147483647}]}), vec![]),
+            (
+                json!({"ipp":[{"first":1,"last":1},{"first":3,"last":5}]}),
+                vec![0, 2],
+            ),
+        ] {
+            let selection: RenderPages = serde_json::from_value(input.clone()).unwrap();
+            assert!(selection.is_ipp());
+            assert!(!selection.is_all());
+            assert_eq!(selection.indices(3).unwrap(), expected);
+            assert_eq!(serde_json::to_value(selection).unwrap(), input);
+        }
+        for invalid in [
+            json!({"ipp":[]}),
+            json!({"ipp":[{"first":1,"last":2147483648_u64}]}),
+            json!({"ipp":[{"first":1,"last":2}],"extra":true}),
+            json!([{"first":1,"last":101}]),
+        ] {
+            assert!(serde_json::from_value::<RenderPages>(invalid).is_err());
+        }
+        let strict: RenderPages = serde_json::from_value(json!([{"first":2,"last":3}])).unwrap();
+        assert!(strict.indices(2).is_err());
+        assert!(!strict.is_ipp());
+        assert_eq!(
+            serde_json::to_value(RenderPages::default()).unwrap(),
+            json!([])
+        );
     }
 }

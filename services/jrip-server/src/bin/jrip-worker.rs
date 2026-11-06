@@ -67,25 +67,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(validated) => {
             let rendered = validated.rendered;
             let result = async {
-                let artifacts = jrip_server::artifacts::hash_pages_with_progress(
-                    &rendered.pages,
-                    |completed, total| {
-                        let repo = repo.clone();
-                        async move {
-                            repo.record_page_progress(id, run_id, completed, total)
-                                .await
-                                .map_err(std::io::Error::other)
-                        }
-                    },
-                )
-                .await?;
-                repo.record_source_validation(
+                let mut artifacts =
+                    if rendered.pages.is_empty() && job.manifest.page_ranges.is_ipp() {
+                        Vec::new()
+                    } else {
+                        jrip_server::artifacts::hash_pages_with_progress(
+                            &rendered.pages,
+                            |completed, total| {
+                                let repo = repo.clone();
+                                async move {
+                                    repo.record_page_progress(id, run_id, completed, total)
+                                        .await
+                                        .map_err(std::io::Error::other)
+                                }
+                            },
+                        )
+                        .await?
+                    };
+                if let Some(total) = rendered.source_page_count {
+                    let indices = job
+                        .manifest
+                        .page_ranges
+                        .indices(total)
+                        .map_err(std::io::Error::other)?;
+                    for (artifact, source) in artifacts.iter_mut().zip(indices) {
+                        artifact.source_page = Some(source as u32 + 1);
+                        artifact.source_page_count = Some(total);
+                    }
+                }
+                if !artifacts.is_empty() {
+                    rip_core::pages::source_mapping(&job.manifest, &artifacts)
+                        .map_err(std::io::Error::other)?;
+                } else if !job.manifest.page_ranges.is_ipp()
+                    || !job
+                        .manifest
+                        .page_ranges
+                        .indices(rendered.source_page_count.unwrap_or(0))
+                        .map_err(std::io::Error::other)?
+                        .is_empty()
+                {
+                    return Err(std::io::Error::other("invalid_empty_selection"));
+                }
+                repo.record_source_validation_with_fonts(
                     id,
                     run_id,
                     &job.source_sha256,
                     validated.source_bytes,
-                    rendered.pages.len() as u32,
+                    rendered
+                        .source_page_count
+                        .unwrap_or(rendered.pages.len() as u32),
                     validated.strict_pdf,
+                    validated.font_policy,
                 )
                 .await
                 .map_err(std::io::Error::other)?;

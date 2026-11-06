@@ -381,6 +381,10 @@ async fn printer_attributes(
         "printer-state-reasons",
         response.text(0x44, "printer-state-reasons", "none")
     );
+    template_attr!(
+        "page-ranges-supported",
+        response.attribute(0x22, "page-ranges-supported", &[1])
+    );
     template_attr!("copies-default", response.integer("copies-default", 1));
     template_attr!(
         "copies-supported",
@@ -436,7 +440,7 @@ async fn print_job(app: &App, req: &Request<'_>, response: &mut Response) -> Res
     if req.document.len() as u64 > rip_jobs::MAX_DOCUMENT_BYTES {
         return Err(0x0408);
     }
-    let manifest = manifest_for(req);
+    let manifest = manifest_for(req)?;
     manifest.validate().map_err(|_| ipp::BAD_REQUEST)?;
     let job = rip_jobs::submit_bytes(&app.repo, &app.root, manifest, req.document)
         .await
@@ -457,10 +461,11 @@ async fn print_job(app: &App, req: &Request<'_>, response: &mut Response) -> Res
     Ok(())
 }
 fn validate_job(req: &Request<'_>) -> Result<(), u16> {
-    manifest_for(req).validate().map_err(|_| ipp::BAD_REQUEST)
+    manifest_for(req)?.validate().map_err(|_| ipp::BAD_REQUEST)
 }
-fn manifest_for(req: &Request<'_>) -> Manifest {
-    Manifest {
+fn manifest_for(req: &Request<'_>) -> Result<Manifest, u16> {
+    Ok(Manifest {
+        page_ranges: req.page_ranges()?,
         name: req
             .text(1, "job-name", 0x42)
             .unwrap_or("document.pdf")
@@ -474,7 +479,7 @@ fn manifest_for(req: &Request<'_>) -> Manifest {
         },
         priority: 50,
         engine: EnginePreference::Auto,
-    }
+    })
 }
 async fn job_info(
     app: &App,
@@ -632,6 +637,18 @@ fn job_attributes(
         )
     );
     if !minimal {
+        if !job.manifest.page_ranges.is_all()
+            && req.is_none_or(|request| request.wants("page-ranges", "job-template"))
+        {
+            for (index, range) in job.manifest.page_ranges.ranges().iter().enumerate() {
+                let value = [range.first.to_be_bytes(), range.last.to_be_bytes()].concat();
+                if index == 0 {
+                    response.attribute(0x33, "page-ranges", &value);
+                } else {
+                    response.additional(0x33, &value);
+                }
+            }
+        }
         for (name, value) in [("copies", 1), ("number-up", 1)] {
             if req.is_none_or(|request| request.wants(name, "job-template")) {
                 response.integer(name, value);

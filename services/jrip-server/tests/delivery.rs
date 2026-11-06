@@ -19,7 +19,8 @@ use uuid::Uuid;
 #[tokio::test]
 #[ignore = "requires locally built jrip-color:local Docker image"]
 async fn color_managed_delivery_requires_matching_target_and_binds_attempt() {
-    let (_dir, mut app, job, fake, task) = fixture(false).await;
+    let ranges = serde_json::from_value(serde_json::json!([{"first":2,"last":2}])).unwrap();
+    let (_dir, mut app, job, fake, task) = fixture_mapped_pages(false, 1, Some((ranges, 2))).await;
     let icc = lcms2::Profile::new_srgb().icc().unwrap();
     let record = rip_color::registry::Registry::open(app.root.join("color-profiles"))
         .unwrap()
@@ -47,6 +48,9 @@ async fn color_managed_delivery_requires_matching_target_and_binds_attempt() {
         app.repo.color_attempt(color_id).await.unwrap()["result"]["reports"][0]["warnings"][0]["code"],
         "SOURCE_PROFILE_UNEMBEDDED"
     );
+    let result = app.repo.color_attempt(color_id).await.unwrap();
+    assert_eq!(result["result"]["artifacts"][0]["sourcePage"], 2);
+    assert_eq!(result["result"]["artifacts"][0]["sourcePageCount"], 2);
     let delivery_id = Uuid::new_v4();
     let body = serde_json::json!({"requestId":delivery_id,"expectedRevision":job.revision,"printerId":"test","media":"custom_square_25.4x25.4mm","colorAttemptId":color_id});
     async fn send(app: &jrip_server::App, job: &Job, body: &serde_json::Value) -> StatusCode {
@@ -196,10 +200,20 @@ struct Fake {
     document: Arc<std::sync::Mutex<Vec<u8>>>,
     copies: Arc<AtomicUsize>,
     copies_max: Arc<AtomicUsize>,
+    duplex: Arc<AtomicUsize>,
     prints: Arc<AtomicUsize>,
     state: Arc<AtomicUsize>,
     malformed: bool,
     job_name: Arc<std::sync::Mutex<String>>,
+}
+fn fake_back(mode: usize) -> &'static str {
+    match mode {
+        1 => "normal",
+        2 => "rotated",
+        4 => "flipped",
+        5 => "manual-tumble",
+        _ => "unknown",
+    }
 }
 async fn handle(
     State(f): State<Fake>,
@@ -215,6 +229,16 @@ async fn handle(
             let mut range = 1i32.to_be_bytes().to_vec();
             range.extend_from_slice(&(f.copies_max.load(Ordering::SeqCst) as i32).to_be_bytes());
             r.attribute(0x33, "copies-supported", &range);
+            if f.duplex.load(Ordering::SeqCst) > 0 {
+                r.text(0x44, "sides-supported", "one-sided");
+                r.additional(0x44, b"two-sided-long-edge");
+                r.additional(0x44, b"two-sided-short-edge");
+                r.text(
+                    0x44,
+                    "pwg-raster-document-sheet-back",
+                    fake_back(f.duplex.load(Ordering::SeqCst)),
+                );
+            }
             r.text(0x49, "document-format-supported", "image/pwg-raster");
             r.attribute(0x22, "printer-is-accepting-jobs", &[1]);
             r.attribute(0x23, "printer-state", &3i32.to_be_bytes());
@@ -229,7 +253,30 @@ async fn handle(
             assert_eq!(q.one(1, "ipp-attribute-fidelity").unwrap().value, [1]);
             assert_eq!(q.text(1, "document-format", 0x49), Some("image/pwg-raster"));
             assert_eq!(q.text(2, "media", 0x44), Some("custom_square_25.4x25.4mm"));
-            assert!(!rip_raster::inspect(q.document).unwrap().is_empty());
+            let sides = q.text(2, "sides", 0x44).unwrap_or("one-sided");
+            let pages = match sides {
+                "one-sided" => rip_raster::inspect(q.document),
+                "two-sided-long-edge" => rip_raster::inspect_duplex(
+                    q.document,
+                    rip_raster::DuplexLayout {
+                        binding: rip_raster::DuplexBinding::LongEdge,
+                        sheet_back: fake_back(f.duplex.load(Ordering::SeqCst)).parse().unwrap(),
+                    },
+                ),
+                "two-sided-short-edge" => rip_raster::inspect_duplex(
+                    q.document,
+                    rip_raster::DuplexLayout {
+                        binding: rip_raster::DuplexBinding::ShortEdge,
+                        sheet_back: fake_back(f.duplex.load(Ordering::SeqCst)).parse().unwrap(),
+                    },
+                ),
+                _ => panic!("unexpected sides"),
+            }
+            .unwrap();
+            if sides != "one-sided" {
+                assert!(matches!(f.duplex.load(Ordering::SeqCst), 1 | 2 | 4 | 5));
+            }
+            assert!(!pages.is_empty());
             *f.document.lock().unwrap() = q.document.to_vec();
             *f.job_name.lock().unwrap() = q.text(1, "job-name", 0x42).unwrap().to_string();
             f.prints.fetch_add(1, Ordering::SeqCst);
@@ -285,6 +332,19 @@ async fn fixture_pages(
     Fake,
     tokio::task::JoinHandle<()>,
 ) {
+    fixture_mapped_pages(malformed, count, None).await
+}
+async fn fixture_mapped_pages(
+    malformed: bool,
+    count: u32,
+    mapping: Option<(rip_core::pages::PageRanges, u32)>,
+) -> (
+    tempfile::TempDir,
+    jrip_server::App,
+    Job,
+    Fake,
+    tokio::task::JoinHandle<()>,
+) {
     let dir = tempfile::tempdir().unwrap();
     let mut app = jrip_server::open(dir.path().into(), "token".into())
         .await
@@ -293,6 +353,7 @@ async fn fixture_pages(
         document: Arc::new(std::sync::Mutex::new(Vec::new())),
         copies: Arc::new(AtomicUsize::new(0)),
         copies_max: Arc::new(AtomicUsize::new(5)),
+        duplex: Arc::new(AtomicUsize::new(0)),
         prints: Arc::new(AtomicUsize::new(0)),
         state: Arc::new(AtomicUsize::new(3)),
         malformed,
@@ -314,7 +375,7 @@ async fn fixture_pages(
             height_microns: 25400,
         }],
     }];
-    let job = Job {
+    let mut job = Job {
         id: Uuid::new_v4(),
         manifest: serde_json::from_value::<Manifest>(
             serde_json::json!({"name":"test.pdf","format":"application/pdf","dpi":72,"color_mode":"rgb"}),
@@ -329,6 +390,9 @@ async fn fixture_pages(
         selected_engine: None,
         worker_run_id: None,
     };
+    if let Some((ranges, _)) = &mapping {
+        job.manifest.page_ranges = ranges.clone().into();
+    }
     app.repo.insert(&job).await.unwrap();
     let path = app
         .root
@@ -351,12 +415,20 @@ async fn fixture_pages(
             .unwrap();
         let bytes = std::fs::read(file).unwrap();
         artifacts.push(Artifact {
+            source_page: None,
+            source_page_count: None,
             page,
             name,
             media_type: "image/tiff".into(),
             bytes: bytes.len() as u64,
             sha256: format!("{:x}", Sha256::digest(bytes)),
         });
+    }
+    if let Some((ranges, total)) = &mapping {
+        for (artifact, index) in artifacts.iter_mut().zip(ranges.indices(*total).unwrap()) {
+            artifact.source_page = Some(index as u32 + 1);
+            artifact.source_page_count = Some(*total);
+        }
     }
     app.repo
         .complete_with_artifacts(job.clone(), &artifacts)
@@ -1025,6 +1097,8 @@ async fn unified_ticket_rejects_unrelated_attempt_with_same_id() {
             id,
             rip_storage::delivery::DeliveryTicket {
                 page_ranges: Default::default(),
+                sides: Default::default(),
+                sheet_back: Default::default(),
                 copies: 1,
                 source_job: other.id,
                 color_attempt_id: None,
@@ -1322,6 +1396,8 @@ async fn pipeline_waits_for_rip_and_stops_on_terminal_source_failure() {
                 .complete_with_artifacts(
                     source,
                     &[Artifact {
+                        source_page: None,
+                        source_page_count: None,
                         page: 1,
                         name: "page-000001.tiff".into(),
                         media_type: "image/tiff".into(),
@@ -2525,10 +2601,14 @@ async fn physical_intent_pages_commit_canonical_ranges_and_send_selected_documen
         .join(original.id.to_string())
         .join("raster");
     let mut pages = Vec::new();
-    for page in 1..=3 {
+    for page in 1..=2 {
         let name = format!("page-{page:06}.tiff");
         let target = directory.join(&name);
-        std::fs::copy(original_directory.join(name), &target).unwrap();
+        std::fs::copy(
+            original_directory.join(format!("page-{:06}.tiff", page + 1)),
+            &target,
+        )
+        .unwrap();
         pages.push(target);
     }
     let job = app.repo.get(job_id).await.unwrap();
@@ -2542,11 +2622,13 @@ async fn physical_intent_pages_commit_canonical_ranges_and_send_selected_documen
         .transition(job, JobState::Spooling, None)
         .await
         .unwrap();
+    let mut artifacts = jrip_server::artifacts::hash_pages(&pages).await.unwrap();
+    for (i, a) in artifacts.iter_mut().enumerate() {
+        a.source_page = Some(i as u32 + 2);
+        a.source_page_count = Some(3);
+    }
     app.repo
-        .complete_with_artifacts(
-            job,
-            &jrip_server::artifacts::hash_pages(&pages).await.unwrap(),
-        )
+        .complete_with_artifacts(job, &artifacts)
         .await
         .unwrap();
     let mut reopened = jrip_server::open(app.root.clone(), "token".into())
@@ -2563,7 +2645,7 @@ async fn physical_intent_pages_commit_canonical_ranges_and_send_selected_documen
     jrip_server::delivery::tick(&reopened).await.unwrap();
     let mut expected = Vec::new();
     rip_raster::convert(
-        &pages[1..],
+        &pages,
         &rip_raster::Options {
             dpi: 72,
             color: rip_raster::Color::DeviceRgb,
@@ -2586,7 +2668,7 @@ async fn physical_intent_pages_commit_canonical_ranges_and_send_selected_documen
             .as_array()
             .unwrap()
             .len(),
-        3
+        2
     );
     task.abort();
 }
@@ -2691,4 +2773,502 @@ async fn physical_intent_inspection_bounds_ranges_and_checks_only_selected_media
     }
     assert_eq!(fake.prints.load(Ordering::SeqCst), 0);
     task.abort();
+}
+
+async fn duplex_request(
+    app: &jrip_server::App,
+    job: &Job,
+    id: Uuid,
+    sides: &str,
+    preview: bool,
+    approval: Option<Uuid>,
+) -> (StatusCode, serde_json::Value) {
+    let mut req = Request::post(format!(
+        "/api/v1/jobs/{}/{}",
+        job.id,
+        if preview {
+            "delivery-preview"
+        } else {
+            "deliveries"
+        }
+    ))
+    .header("authorization", "Bearer token")
+    .header("content-type", "application/json");
+    if let Some(approval) = approval {
+        req = req.header("x-jrip-approval-id", approval.to_string());
+    }
+    let response=jrip_server::router(app.clone()).oneshot(req.body(Body::from(serde_json::json!({"requestId":id,"expectedRevision":job.revision,"printerId":"test","media":"custom_square_25.4x25.4mm","sides":sides,"copies":2}).to_string())).unwrap()).await.unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    )
+}
+#[tokio::test]
+async fn normal_duplex_preview_ticket_restart_and_native_sides_agree() {
+    let (_dir, app, job, fake, task) = fixture_pages(false, 3).await;
+    fake.duplex.store(1, Ordering::SeqCst);
+    for (sides, binding) in [
+        ("two-sided-long-edge", rip_raster::DuplexBinding::LongEdge),
+        ("two-sided-short-edge", rip_raster::DuplexBinding::ShortEdge),
+    ] {
+        let id = Uuid::new_v4();
+        let (status, preview) = duplex_request(&app, &job, id, sides, true, None).await;
+        assert_eq!(status, StatusCode::OK, "{preview}");
+        assert_eq!(preview["contract"]["ticket"]["sides"], sides);
+        assert_eq!(preview["contract"]["ticket"]["sheetBack"], "normal");
+        assert_eq!(
+            duplex_request(&app, &job, id, sides, false, None).await.0,
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(
+            duplex_request(&app, &job, id, "one-sided", false, None)
+                .await
+                .0,
+            StatusCode::CONFLICT
+        );
+        let mut reopened = jrip_server::open(app.root.clone(), "token".into())
+            .await
+            .unwrap();
+        reopened.printers = app.printers.clone();
+        assert_eq!(
+            reopened
+                .repo
+                .delivery(id)
+                .await
+                .unwrap()
+                .ticket
+                .sides
+                .as_str(),
+            sides
+        );
+        jrip_server::delivery::tick(&reopened).await.unwrap();
+        assert_eq!(
+            rip_raster::inspect_normal_duplex(&fake.document.lock().unwrap(), binding)
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(fake.copies.load(Ordering::SeqCst), 2);
+    }
+    assert_eq!(fake.prints.load(Ordering::SeqCst), 2);
+    task.abort();
+}
+#[tokio::test]
+async fn duplex_never_sends_without_exact_capability_and_approval() {
+    let (_dir, mut app, job, fake, task) = fixture(false).await;
+    let id = Uuid::new_v4();
+    assert_eq!(
+        duplex_request(&app, &job, id, "two-sided-long-edge", false, None)
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    fake.duplex.store(3, Ordering::SeqCst);
+    assert_eq!(
+        duplex_request(&app, &job, id, "two-sided-long-edge", false, None)
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    fake.duplex.store(1, Ordering::SeqCst);
+    app.credentials = vec![jrip_server::Credential {
+        validity: None,
+        token: "token".into(),
+        identity: "operator".into(),
+        scopes: vec!["admin".into()],
+    }];
+    app.require_print_approval = true;
+    let (status,approval)=pipeline_request(&app,"/api/v1/approvals",serde_json::json!({"identity":"operator","jobId":job.id,"expectedRevision":job.revision,"requestId":id,"printerId":"test","media":"custom_square_25.4x25.4mm","copies":2,"sides":"two-sided-long-edge","reason":"duplex proof"})).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let approval = Uuid::parse_str(approval["id"].as_str().unwrap()).unwrap();
+    for wrong in ["one-sided", "two-sided-short-edge"] {
+        assert_eq!(
+            duplex_request(&app, &job, id, wrong, false, Some(approval))
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+    }
+    assert_eq!(
+        duplex_request(&app, &job, id, "two-sided-long-edge", false, Some(approval))
+            .await
+            .0,
+        StatusCode::ACCEPTED
+    );
+    fake.duplex.store(3, Ordering::SeqCst);
+    jrip_server::delivery::tick(&app).await.unwrap();
+    let rejected = app.repo.delivery(id).await.unwrap();
+    assert_eq!(rejected.state, DeliveryState::Rejected);
+    assert_eq!(
+        rejected.reason.as_deref(),
+        Some("unsupported_sides_or_sheet_back")
+    );
+    assert_eq!(fake.prints.load(Ordering::SeqCst), 0);
+    task.abort();
+}
+#[tokio::test]
+async fn physical_duplex_intent_and_follow_on_pipeline_preserve_binding() {
+    let (_dir, app, job, fake, task) = fixture_pages(false, 3).await;
+    fake.duplex.store(1, Ordering::SeqCst);
+    let mut intent = physical_intent("%PDF-1.7\nsource");
+    intent["sides"] = serde_json::json!({"mode":"required","value":"two-sided-short-edge"});
+    let (status, pf) = pipeline_request(
+        &app,
+        "/api/v1/print/pipeline-preflights",
+        serde_json::json!({"requestId":Uuid::new_v4(),"intent":intent}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{pf}");
+    assert_eq!(pf["workflowRequest"]["sides"], "two-sided-short-edge");
+    let (commit_status, committed) = commit_physical(&app, &pf, "%PDF-1.7\nsource", false).await;
+    assert!(commit_status.is_success(), "{committed}");
+    let workflow_id =
+        Uuid::parse_str(pf["workflowRequest"]["requestId"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        app.repo.pipeline(workflow_id).await.unwrap()["ticket"]["request"]["sides"],
+        "two-sided-short-edge"
+    );
+    fake.duplex.store(3, Ordering::SeqCst);
+    assert_eq!(
+        pipeline_request(
+            &app,
+            "/api/v1/print/pipeline-preflights",
+            serde_json::json!({"requestId":Uuid::new_v4(),"intent":intent})
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    fake.duplex.store(1, Ordering::SeqCst);
+    let id = Uuid::new_v4();
+    assert_eq!(pipeline_request(&app,&format!("/api/v1/jobs/{}/pipelines",job.id),serde_json::json!({"requestId":id,"expectedRevision":job.revision,"printerId":"test","media":"custom_square_25.4x25.4mm","sides":"two-sided-short-edge","pageRanges":[{"first":2,"last":3}]})).await.0,StatusCode::ACCEPTED);
+    let mut reopened = jrip_server::open(app.root.clone(), "token".into())
+        .await
+        .unwrap();
+    reopened.printers = app.printers.clone();
+    jrip_server::pipeline::tick(&reopened).await.unwrap();
+    let ticket = reopened.repo.pipeline_ticket(id).await.unwrap();
+    assert_eq!(
+        ticket["ticket"]["physical"]["ticket"]["sides"],
+        "two-sided-short-edge"
+    );
+    jrip_server::delivery::tick(&reopened).await.unwrap();
+    assert_eq!(
+        rip_raster::inspect_normal_duplex(
+            &fake.document.lock().unwrap(),
+            rip_raster::DuplexBinding::ShortEdge
+        )
+        .unwrap()
+        .len(),
+        2
+    );
+    assert_eq!(fake.prints.load(Ordering::SeqCst), 1);
+    task.abort();
+}
+
+#[tokio::test]
+async fn all_sheet_back_modes_are_persisted_encoded_and_sent_with_exact_live_binding() {
+    let (_dir, app, job, fake, task) = fixture_pages(false, 3).await;
+    let mut sent = 0;
+    for mode in [1, 2, 4, 5] {
+        for (sides, binding) in [
+            ("two-sided-long-edge", rip_raster::DuplexBinding::LongEdge),
+            ("two-sided-short-edge", rip_raster::DuplexBinding::ShortEdge),
+        ] {
+            fake.duplex.store(mode, Ordering::SeqCst);
+            let id = Uuid::new_v4();
+            let back: rip_core::print::SheetBack = fake_back(mode).parse().unwrap();
+            let (status, preview) = duplex_request(&app, &job, id, sides, true, None).await;
+            assert_eq!(status, StatusCode::OK, "{preview}");
+            assert_eq!(preview["contract"]["ticket"]["sheetBack"], back.as_str());
+            assert_eq!(
+                duplex_request(&app, &job, id, sides, false, None).await.0,
+                StatusCode::ACCEPTED
+            );
+            let mut reopened = jrip_server::open(app.root.clone(), "token".into())
+                .await
+                .unwrap();
+            reopened.printers = app.printers.clone();
+            assert_eq!(
+                reopened.repo.delivery(id).await.unwrap().ticket.sheet_back,
+                back
+            );
+            jrip_server::delivery::tick(&reopened).await.unwrap();
+            sent += 1;
+            assert_eq!(fake.prints.load(Ordering::SeqCst), sent);
+            assert_eq!(
+                rip_raster::inspect_duplex(
+                    &fake.document.lock().unwrap(),
+                    rip_raster::DuplexLayout {
+                        binding,
+                        sheet_back: back
+                    }
+                )
+                .unwrap()
+                .len(),
+                3
+            );
+        }
+    }
+    // Normal/long-edge and manual-tumble/long-edge have identical raster transforms;
+    // capability changes must still reject rather than infer mode from bytes.
+    fake.duplex.store(1, Ordering::SeqCst);
+    let id = Uuid::new_v4();
+    assert_eq!(
+        duplex_request(&app, &job, id, "two-sided-long-edge", false, None)
+            .await
+            .0,
+        StatusCode::ACCEPTED
+    );
+    fake.duplex.store(5, Ordering::SeqCst);
+    jrip_server::delivery::tick(&app).await.unwrap();
+    let rejected = app.repo.delivery(id).await.unwrap();
+    assert_eq!(rejected.state, DeliveryState::Rejected);
+    assert_eq!(
+        rejected.reason.as_deref(),
+        Some("unsupported_sides_or_sheet_back")
+    );
+    assert_eq!(fake.prints.load(Ordering::SeqCst), sent);
+    task.abort();
+}
+
+#[tokio::test]
+async fn rendered_subsets_keep_original_numbers_and_reject_missing_source_pages() {
+    let ranges =
+        serde_json::from_value(serde_json::json!([{"first":2,"last":2},{"first":5,"last":5}]))
+            .unwrap();
+    let (_dir, app, job, fake, task) = fixture_mapped_pages(false, 2, Some((ranges, 6))).await;
+    for (request, expected) in [
+        (serde_json::json!([]), serde_json::json!([2, 5])),
+        (
+            serde_json::json!([{"first":5,"last":5}]),
+            serde_json::json!([5]),
+        ),
+    ] {
+        let (status, value) = ranges_request(&app, &job, Uuid::new_v4(), request, true, None).await;
+        assert_eq!(status, StatusCode::OK, "{value}");
+        assert_eq!(value["contract"]["ticket"]["sourcePageCount"], 6);
+        assert_eq!(value["contract"]["ticket"]["renderedPageCount"], 2);
+        assert_eq!(value["contract"]["ticket"]["selectedSourcePages"], expected);
+    }
+    let (status, value) = ranges_request(
+        &app,
+        &job,
+        Uuid::new_v4(),
+        serde_json::json!([{"first":3,"last":3}]),
+        true,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{value}");
+    assert!(value.to_string().contains("page_not_rendered"));
+    let id = Uuid::new_v4();
+    assert_eq!(
+        ranges_request(&app, &job, id, serde_json::json!([]), false, None)
+            .await
+            .0,
+        StatusCode::ACCEPTED
+    );
+    jrip_server::delivery::tick(&app).await.unwrap();
+    assert_eq!(fake.prints.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        rip_raster::inspect(&fake.document.lock().unwrap())
+            .unwrap()
+            .len(),
+        2
+    );
+    task.abort();
+}
+
+#[tokio::test]
+async fn source_delivery_history_is_private_bounded_stable_and_survives_restart() {
+    let (dir, mut app, job, fake, task) = fixture(false).await;
+    for id in [Uuid::from_u128(1), Uuid::from_u128(2), Uuid::from_u128(3)] {
+        assert_eq!(prepare(&app, &job, id).await, StatusCode::ACCEPTED);
+    }
+    app.credentials = vec![
+        jrip_server::Credential {
+            token: "reader".into(),
+            identity: "reader".into(),
+            scopes: vec!["jobs:read".into()],
+            validity: None,
+        },
+        jrip_server::Credential {
+            token: "printer".into(),
+            identity: "printer".into(),
+            scopes: vec!["printers:print".into()],
+            validity: None,
+        },
+    ];
+    async fn get(
+        app: &jrip_server::App,
+        path: &str,
+        token: Option<&str>,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut req = Request::get(path);
+        if let Some(token) = token {
+            req = req.header("authorization", format!("Bearer {token}"));
+        }
+        let response = jrip_server::router(app.clone())
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        if status == StatusCode::OK {
+            assert_eq!(response.headers()["cache-control"], "no-store");
+        }
+        (
+            status,
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap(),
+        )
+    }
+    let path = format!("/api/v1/jobs/{}/deliveries", job.id);
+    assert_eq!(get(&app, &path, None).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        get(&app, &path, Some("printer")).await.0,
+        StatusCode::FORBIDDEN
+    );
+    let (status, first) = get(&app, &format!("{path}?limit=1"), Some("reader")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first["deliveries"][0]["id"], Uuid::from_u128(3).to_string());
+    assert_eq!(first["hasMore"], true);
+    let mut second_job = job.clone();
+    second_job.id = Uuid::new_v4();
+    app.repo.insert(&second_job).await.unwrap();
+    let original = app.repo.delivery(Uuid::from_u128(3)).await.unwrap().ticket;
+    let mut other_ticket = original.clone();
+    other_ticket.source_job = second_job.id;
+    app.repo
+        .enqueue_delivery(Uuid::from_u128(5), other_ticket)
+        .await
+        .unwrap();
+    app.repo
+        .enqueue_delivery(Uuid::from_u128(4), original)
+        .await
+        .unwrap();
+    let cursor = first["nextBefore"].as_str().unwrap();
+    let (_, rest) = get(&app, &format!("{path}?before={cursor}"), Some("reader")).await;
+    assert_eq!(rest["deliveries"].as_array().unwrap().len(), 2);
+    assert_eq!(rest["hasMore"], false);
+    assert!(rest["nextBefore"].is_null());
+    for query in [
+        "limit=0",
+        "limit=101",
+        "limit=bad",
+        "before=bad",
+        "before=-1:00000000-0000-0000-0000-000000000001",
+        "offset=1",
+    ] {
+        let (status, value) = get(&app, &format!("{path}?{query}"), Some("reader")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(value["error"]["code"], "invalid_delivery_query");
+    }
+    let mut reopened = jrip_server::open(dir.path().into(), "token".into())
+        .await
+        .unwrap();
+    reopened.credentials = app.credentials.clone();
+    assert_eq!(
+        get(
+            &reopened,
+            &format!("{path}?before={cursor}"),
+            Some("reader")
+        )
+        .await
+        .1,
+        rest
+    );
+    assert_eq!(
+        get(
+            &app,
+            &format!("/api/v1/jobs/{}/deliveries", Uuid::new_v4()),
+            Some("reader")
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(fake.prints.load(Ordering::SeqCst), 0);
+    task.abort();
+}
+
+#[tokio::test]
+#[ignore = "requires Playwright Chromium and jrip-color:local Docker image"]
+async fn operator_console_physical_delivery_is_reviewed_approved_recoverable_and_cancellable() {
+    let (dir, mut app, job, fake, fake_task) = fixture_pages(false, 3).await;
+    fake.duplex.store(1, Ordering::SeqCst);
+    let profile = lcms2::Profile::new_srgb().icc().unwrap();
+    let record = rip_color::registry::Registry::open(app.root.join("color-profiles"))
+        .unwrap()
+        .register(&profile)
+        .unwrap();
+    let color_id = Uuid::new_v4();
+    let request = serde_json::json!({"requestId":color_id,"expectedRevision":job.revision,"inputProfileSha256":record.sha256,"outputProfileSha256":record.sha256,"policy":{"schemaVersion":1,"inputColor":"rgb","outputColor":"rgb","intent":"relative_colorimetric","blackPointCompensation":false,"blackPreservation":"none","tacPercent":null}});
+    assert_eq!(
+        pipeline_request(
+            &app,
+            &format!("/api/v1/jobs/{}/color-attempts", job.id),
+            request
+        )
+        .await
+        .0,
+        StatusCode::ACCEPTED
+    );
+    jrip_server::color::tick(&app).await.unwrap();
+    assert_eq!(
+        app.repo.color_attempt(color_id).await.unwrap()["state"],
+        "COMPLETED"
+    );
+    app.printers[0].color_target = Some(jrip_server::delivery::ColorTarget {
+        output_profile_sha256: Some(record.sha256),
+        device_link_sha256: None,
+    });
+    app.require_print_approval = true;
+    app.credentials = vec![
+        jrip_server::Credential {
+            token: "token".into(),
+            identity: "operator".into(),
+            scopes: vec!["admin".into()],
+            validity: None,
+        },
+        jrip_server::Credential {
+            token: "reader".into(),
+            identity: "reader".into(),
+            scopes: vec!["jobs:read".into(), "artifacts:read".into()],
+            validity: None,
+        },
+    ];
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let worker_app = app.clone();
+    let worker = tokio::spawn(async move {
+        loop {
+            jrip_server::delivery::tick(&worker_app).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    });
+    let server = tokio::spawn(async move {
+        axum::serve(listener, jrip_server::router(app))
+            .await
+            .unwrap()
+    });
+    let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let status = tokio::process::Command::new("node")
+        .arg("tests/ui/delivery.mjs")
+        .current_dir(workspace)
+        .env("JRIP_UI_URL", format!("http://{address}/console"))
+        .env("JRIP_UI_TOKEN", "token")
+        .env("JRIP_UI_COLOR", color_id.to_string())
+        .status()
+        .await
+        .unwrap();
+    worker.abort();
+    server.abort();
+    fake_task.abort();
+    assert!(status.success(), "Delivery browser flow failed: {status}");
+    assert_eq!(fake.prints.load(Ordering::SeqCst), 3);
+    assert_eq!(fake.copies.load(Ordering::SeqCst), 1);
+    drop(dir);
 }

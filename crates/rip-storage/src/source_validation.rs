@@ -11,6 +11,45 @@ impl Repository {
         pages: u32,
         strict_pdf: bool,
     ) -> Result<Value, StorageError> {
+        self.record_source_validation_with_fonts(id, run, hash, bytes, pages, strict_pdf, None)
+            .await
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_source_validation_with_fonts(
+        &self,
+        id: Uuid,
+        run: Uuid,
+        hash: &str,
+        bytes: u64,
+        pages: u32,
+        strict_pdf: bool,
+        font_policy: Option<Value>,
+    ) -> Result<Value, StorageError> {
+        if let Some(policy) = &font_policy {
+            let fonts = policy["fonts"].as_array().ok_or(StorageError::Conflict)?;
+            if let Some(usage) = policy.get("runtimeEvidence") {
+                rip_core::font_usage::validate(usage, pages).map_err(|_| StorageError::Conflict)?;
+            }
+            if !strict_pdf
+                || policy["profile"] != "org.jrip.pdf-font-policy-v1"
+                || policy["accepted"] != true
+                || policy["scope"] != "declared-resources"
+                || fonts.len() > 128
+                || serde_json::to_vec(policy)?.len() > 65536
+                || fonts.iter().any(|font| {
+                    !matches!(
+                        font["state"].as_str(),
+                        Some("EMBEDDED" | "SELF_CONTAINED_TYPE3" | "STANDARD14_SUBSTITUTION")
+                    )
+                })
+                || policy["standard14Substitution"]
+                    != fonts
+                        .iter()
+                        .any(|font| font["state"] == "STANDARD14_SUBSTITUTION")
+            {
+                return Err(StorageError::Conflict);
+            }
+        }
         if !(1..=32 * 1024 * 1024).contains(&bytes) || !(1..=100).contains(&pages) {
             return Err(StorageError::Conflict);
         }
@@ -36,9 +75,23 @@ impl Repository {
         {
             return Err(StorageError::Conflict);
         }
-        let report = json!({"schemaVersion":1,"profile":"org.jrip.source-validation-v1","jobId":id,"runId":run,
+        let mut report = json!({"schemaVersion":1,"profile":"org.jrip.source-validation-v1","jobId":id,"runId":run,
             "sourceSha256":hash,"sourceBytes":bytes,"pageCount":pages,"format":job.manifest.format,"selectedEngine":job.selected_engine,
             "allPagesInterpreted":true,"strictPdfInspection":strict_pdf,"scope":"bounded-page-content-interpretation","validatedAt":now()});
+        if let Some(policy) = font_policy {
+            report["fontPolicy"] = policy;
+        }
+        if job.manifest.page_ranges.is_ipp() {
+            let selected = job
+                .manifest
+                .page_ranges
+                .indices(pages)
+                .map_err(|_| StorageError::Conflict)?;
+            report["pageSelectionSemantics"] = json!("ipp-input-pages");
+            report["requestedPageRanges"] =
+                serde_json::to_value(job.manifest.page_ranges.ranges())?;
+            report["renderedPageCount"] = json!(selected.len());
+        }
         sqlx::query("INSERT INTO source_validations(job_id,payload) VALUES(?,?)")
             .bind(id.to_string())
             .bind(serde_json::to_string(&report)?)
@@ -175,10 +228,44 @@ mod tests {
             .execute(&repo.pool)
             .await
             .unwrap();
+        let mut policy = json!({"profile":"org.jrip.pdf-font-policy-v1","accepted":true,"scope":"declared-resources","fonts":[{"baseFont":"Helvetica","subtype":"Type1","state":"STANDARD14_SUBSTITUTION"}],"standard14Substitution":true});
+        policy["runtimeEvidence"] = json!({"schemaVersion":1,"profile":"org.jrip.mupdf-font-usage-v1","engine":"mupdf","phase":"pdf-inspection","pageCount":2,"textOperations":0,"glyphCallbacks":0,"fonts":[]});
+        for (field, value) in [
+            ("runtimeEvidence", json!({"engine":"ghostscript"})),
+            ("accepted", json!(false)),
+            ("standard14Substitution", json!(false)),
+            ("fonts", json!([{"state":"MISSING"}])),
+            ("scope", json!("executed-glyphs")),
+        ] {
+            let mut invalid = policy.clone();
+            invalid[field] = value;
+            assert!(
+                repo.record_source_validation_with_fonts(
+                    job.id,
+                    run,
+                    &job.source_sha256,
+                    100,
+                    2,
+                    true,
+                    Some(invalid)
+                )
+                .await
+                .is_err()
+            );
+        }
         let mut report = repo
-            .record_source_validation(job.id, run, &job.source_sha256, 100, 2, true)
+            .record_source_validation_with_fonts(
+                job.id,
+                run,
+                &job.source_sha256,
+                100,
+                2,
+                true,
+                Some(policy.clone()),
+            )
             .await
             .unwrap();
+        assert_eq!(report["fontPolicy"], policy);
         assert_eq!(report["allPagesInterpreted"], true);
         assert!(
             repo.record_source_validation(job.id, run, &job.source_sha256, 100, 2, true)
@@ -241,5 +328,42 @@ mod tests {
                 .unwrap(),
             report
         );
+    }
+    #[tokio::test]
+    async fn empty_exports_require_ipp_ranges_and_matching_source_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        let repo = Repository::open_with_receipt_signer(&path, None)
+            .await
+            .unwrap();
+        for (selection, allowed) in [
+            (json!({"ipp":[{"first":3,"last":2147483647}]}), true),
+            (json!({"ipp":[{"first":2,"last":2147483647}]}), false),
+            (json!([{"first":3,"last":3}]), false),
+            (json!([]), false),
+        ] {
+            let job=Job {id:Uuid::new_v4(),manifest:serde_json::from_value(json!({"name":"empty.pdf","format":"application/pdf","dpi":72,"page_ranges":selection})).unwrap(),state:JobState::Queued,source_sha256:"a".repeat(64),created_at:now(),updated_at:now(),revision:0,error_code:None,selected_engine:Some(rip_core::EngineKind::MuPdf),worker_run_id:None};
+            repo.insert(&job).await.unwrap();
+            let run = Uuid::new_v4();
+            let job = repo.claim_queued(job, run, now() + 60).await.unwrap();
+            assert!(
+                repo.complete_with_artifacts(job.clone(), &[])
+                    .await
+                    .is_err()
+            );
+            repo.record_source_validation(job.id, run, &job.source_sha256, 100, 2, true)
+                .await
+                .unwrap();
+            let job = repo
+                .transition(job, JobState::Spooling, None)
+                .await
+                .unwrap();
+            let id = job.id;
+            let result = repo.complete_with_artifacts(job, &[]).await;
+            assert_eq!(result.is_ok(), allowed, "{selection}");
+            if allowed {
+                assert_eq!(repo.artifacts(id).await.unwrap(), json!([]));
+            }
+        }
     }
 }

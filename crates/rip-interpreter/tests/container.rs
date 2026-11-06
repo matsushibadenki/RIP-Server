@@ -7,6 +7,7 @@ async fn rejects_page_overflow_and_times_out() {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("document.ps");
     let manifest = Manifest {
+        page_ranges: Default::default(),
         name: "limits.ps".into(),
         format: DocumentFormat::Postscript,
         dpi: 72,
@@ -57,6 +58,7 @@ async fn hybrid_pdf_colors_order_and_explicit_ghostscript() {
         .enumerate()
     {
         let manifest = Manifest {
+            page_ranges: Default::default(),
             name: "colors.pdf".into(),
             format: DocumentFormat::Pdf,
             dpi: 72,
@@ -98,6 +100,7 @@ async fn hybrid_pdf_colors_order_and_explicit_ghostscript() {
         }
     }
     let manifest = Manifest {
+        page_ranges: Default::default(),
         name: "colors.pdf".into(),
         format: DocumentFormat::Pdf,
         dpi: 72,
@@ -119,6 +122,7 @@ async fn mupdf_rejects_overflow_and_broken_pdf_without_fallback() {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("document.pdf");
     let manifest = Manifest {
+        page_ranges: Default::default(),
         name: "test.pdf".into(),
         format: DocumentFormat::Pdf,
         dpi: 72,
@@ -190,6 +194,7 @@ async fn streamed_pages_precede_success_and_survive_late_failure_without_publica
     let source = directory.path().join("source");
     let mut engine = HybridInterpreter::default();
     let mut manifest = Manifest {
+        page_ranges: Default::default(),
         name: "progress".into(),
         format: DocumentFormat::Pdf,
         dpi: 72,
@@ -328,4 +333,342 @@ async fn adapter_waits_for_page_close_and_streams_before_next_page_exists() {
         .unwrap()
         .unwrap();
     assert!(status.success());
+}
+
+#[tokio::test]
+#[ignore = "requires Docker and both render images"]
+async fn selected_pdf_pages_are_skipped_and_source_count_is_bound() {
+    use rip_core::{
+        EnginePreference,
+        pages::{PageRange, PageRanges},
+    };
+    use rip_interpreter::HybridInterpreter;
+    use tiff::decoder::{Decoder, DecodingResult};
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("document.pdf");
+    std::fs::write(&source, include_bytes!("../../../tests/corpus/colors.pdf")).unwrap();
+    let engine = HybridInterpreter::default();
+    for preference in [EnginePreference::MuPdf, EnginePreference::Ghostscript] {
+        let mut manifest = Manifest {
+            name: "selected.pdf".into(),
+            format: DocumentFormat::Pdf,
+            dpi: 72,
+            color_mode: ColorMode::Rgb,
+            priority: 50,
+            engine: preference,
+            page_ranges: PageRanges::new(vec![PageRange { first: 2, last: 2 }])
+                .unwrap()
+                .into(),
+        };
+        let output = dir.path().join(format!("selected-{preference:?}"));
+        let result = engine.render(&source, &output, &manifest).await.unwrap();
+        assert_eq!(result.source_page_count, Some(2));
+        assert_eq!(result.pages.len(), 1);
+        assert_eq!(result.pages[0].file_name().unwrap(), "page-000001.tiff");
+        assert_eq!(std::fs::read_dir(&output).unwrap().count(), 1);
+        let mut decoder = Decoder::new(std::fs::File::open(&result.pages[0]).unwrap()).unwrap();
+        let DecodingResult::U8(pixels) = decoder.read_image().unwrap() else {
+            panic!("8-bit")
+        };
+        assert!(
+            pixels.as_chunks::<3>().0.iter().all(|p| *p == [0, 255, 0]),
+            "must render original page 2"
+        );
+        manifest.page_ranges = PageRanges::new(vec![PageRange { first: 3, last: 3 }])
+            .unwrap()
+            .into();
+        assert!(
+            engine
+                .render(
+                    &source,
+                    &dir.path().join(format!("bounds-{preference:?}")),
+                    &manifest
+                )
+                .await
+                .is_err()
+        );
+        for (first, expected) in [(2, 1), (3, 0)] {
+            manifest.page_ranges = rip_core::pages::RenderPages::Ipp {
+                ipp: rip_core::pages::IppPageRanges::new(vec![PageRange {
+                    first,
+                    last: i32::MAX as u32,
+                }])
+                .unwrap(),
+            };
+            let result = engine
+                .render(
+                    &source,
+                    &dir.path().join(format!("ipp-{preference:?}-{first}")),
+                    &manifest,
+                )
+                .await
+                .unwrap();
+            assert_eq!(result.source_page_count, Some(2));
+            assert_eq!(result.pages.len(), expected);
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Docker and both render images"]
+async fn noncontiguous_selection_matches_original_page_pixels_in_both_engines() {
+    use rip_core::{
+        EnginePreference,
+        pages::{PageRange, PageRanges},
+    };
+    use rip_interpreter::HybridInterpreter;
+    use tiff::decoder::{Decoder, DecodingResult};
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("document.pdf");
+    std::fs::write(
+        &source,
+        include_bytes!("../../../tests/corpus/fonts/font-quality.pdf"),
+    )
+    .unwrap();
+    let engine = HybridInterpreter::default();
+    for preference in [EnginePreference::MuPdf, EnginePreference::Ghostscript] {
+        let mut manifest = Manifest {
+            name: "font.pdf".into(),
+            format: DocumentFormat::Pdf,
+            dpi: 72,
+            color_mode: ColorMode::Gray,
+            priority: 50,
+            engine: preference,
+            page_ranges: Default::default(),
+        };
+        let all = engine
+            .render(
+                &source,
+                &dir.path().join(format!("all-{preference:?}")),
+                &manifest,
+            )
+            .await
+            .unwrap();
+        assert_eq!(all.pages.len(), 6);
+        assert_eq!(all.source_page_count, None);
+        manifest.page_ranges = PageRanges::new(vec![
+            PageRange { first: 2, last: 2 },
+            PageRange { first: 5, last: 5 },
+        ])
+        .unwrap()
+        .into();
+        let selected = engine
+            .render(
+                &source,
+                &dir.path().join(format!("subset-{preference:?}")),
+                &manifest,
+            )
+            .await
+            .unwrap();
+        assert_eq!(selected.source_page_count, Some(6));
+        assert_eq!(selected.pages.len(), 2);
+        for (output, original) in selected.pages.iter().zip([1, 4]) {
+            let mut actual = Decoder::new(std::fs::File::open(output).unwrap()).unwrap();
+            let mut expected =
+                Decoder::new(std::fs::File::open(&all.pages[original]).unwrap()).unwrap();
+            assert_eq!(actual.dimensions().unwrap(), expected.dimensions().unwrap());
+            let (DecodingResult::U8(a), DecodingResult::U8(b)) =
+                (actual.read_image().unwrap(), expected.read_image().unwrap())
+            else {
+                panic!("8-bit")
+            };
+            assert_eq!(a, b);
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Docker and rebuilt MuPDF font-policy inspection image"]
+async fn inspection_reports_embedded_fonts_and_rejects_removed_programs() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("fonts.pdf");
+    let original = include_bytes!("../../../tests/corpus/fonts/font-quality.pdf");
+    std::fs::write(&source, original).unwrap();
+    let report = rip_interpreter::inspect_pdf(&source).await.unwrap();
+    assert_eq!(
+        report["fontPolicy"]["profile"],
+        "org.jrip.pdf-font-policy-v1"
+    );
+    assert_eq!(report["fontPolicy"]["accepted"], true);
+    assert_eq!(report["fontPolicy"]["standard14Substitution"], false);
+    let fonts = report["fontPolicy"]["fonts"].as_array().unwrap();
+    assert!(!fonts.is_empty());
+    assert!(fonts.iter().all(|font| font["state"] == "EMBEDDED"));
+    // Same byte length keeps offsets/xref intact. Only remove the program link.
+    let mut missing = original.to_vec();
+    let mut replaced = 0;
+    for offset in 0..missing.len() - 10 {
+        if &missing[offset..offset + 10] == b"/FontFile2" {
+            missing[offset + 8] = b'o';
+            replaced += 1;
+        }
+    }
+    assert!(replaced > 0);
+    std::fs::write(&source, missing).unwrap();
+    assert_eq!(
+        rip_interpreter::inspect_pdf(&source)
+            .await
+            .unwrap_err()
+            .to_string(),
+        "pdf_inspection_failed"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker and jrip-ghostscript:local"]
+async fn postscript_missing_fonts_fail_instead_of_silent_courier_substitution() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.ps");
+    let engine = GhostscriptInterpreter::default();
+    let manifest = Manifest {
+        page_ranges: Default::default(),
+        name: "font policy".into(),
+        format: DocumentFormat::Postscript,
+        dpi: 72,
+        color_mode: ColorMode::Gray,
+        priority: 50,
+        engine: Default::default(),
+    };
+    for (index, (prefix, name, valid)) in [
+        ("", "Helvetica", true),
+        ("", "Courier", true),
+        ("", "JRIP_NoSuchFont_942", false),
+        ("showpage\n", "JRIP_NoSuchFont_942", false),
+        ("/JRIPOwned 8 dict dup begin /FontType 3 def /FontMatrix [.001 0 0 .001 0 0] def /FontBBox [0 0 1000 1000] def /Encoding StandardEncoding def /BuildChar { pop pop 1000 0 setcharwidth 0 0 600 600 rectfill } bind def end definefont pop\n", "JRIPOwned", true),
+    ].into_iter().enumerate() {
+        std::fs::write(&source, format!("%!PS\n{prefix}/{name} findfont 12 scalefont setfont 10 10 moveto (TEST) show showpage\n")).unwrap();
+        let result = engine.render(&source, &dir.path().join(format!("case-{index}")), &manifest).await;
+        assert_eq!(result.is_ok(), valid, "font={name}, error={:?}", result.as_ref().err());
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Docker and rebuilt Ghostscript CID policy image"]
+async fn ghostscript_rejects_missing_cid_programs_before_any_page_frame() {
+    let maps = tokio::time::timeout(Duration::from_secs(30), tokio::process::Command::new("docker")
+        .args(["run", "--rm", "--network=none", "--read-only", "--entrypoint", "gs", "jrip-ghostscript:local", "-q", "-dBATCH", "-dNOPAUSE", "-I/usr/local/lib/jrip/strict-resources", "-sDEVICE=nullpage", "-c", "(cidfmap) findlibfile { pop == } { 1 .quit } ifelse (FAPIcidfmap) findlibfile { pop == } { 1 .quit } ifelse"])
+        .kill_on_drop(true).output()).await.unwrap().unwrap();
+    assert!(maps.status.success(), "{:?}", maps);
+    let paths = String::from_utf8(maps.stdout).unwrap();
+    assert!(
+        paths.contains("/usr/local/lib/jrip/strict-resources/cidfmap"),
+        "{paths}"
+    );
+    assert!(
+        paths.contains("/usr/local/lib/jrip/strict-resources/FAPIcidfmap"),
+        "{paths}"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("cid.pdf");
+    let original = include_bytes!("../../../tests/corpus/fonts/punctuation-quality.pdf");
+    let mut data = original.to_vec();
+    let mut removed = 0;
+    for offset in 0..data.len() - 10 {
+        if matches!(&data[offset..offset + 10], b"/FontFile2" | b"/FontFile3") {
+            data[offset + 8] = b'o';
+            removed += 1;
+        }
+    }
+    assert_eq!(removed, 2);
+    std::fs::write(&source, data).unwrap();
+    let manifest = Manifest {
+        page_ranges: Default::default(),
+        name: "CID missing".into(),
+        format: DocumentFormat::Pdf,
+        dpi: 72,
+        color_mode: ColorMode::Gray,
+        priority: 50,
+        engine: rip_core::EnginePreference::Ghostscript,
+    };
+    let engine = rip_interpreter::HybridInterpreter::default();
+    for (index, preference) in [
+        rip_core::EnginePreference::MuPdf,
+        rip_core::EnginePreference::Ghostscript,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut selected = manifest.clone();
+        selected.engine = preference;
+        let output = dir.path().join(format!("output-{index}"));
+        let mut seen = vec![];
+        let result = engine
+            .render_with_progress(&source, &output, &selected, |page| {
+                seen.push(page);
+                async { Ok(()) }
+            })
+            .await;
+        assert!(result.is_err());
+        assert!(seen.is_empty());
+        assert!(!output.join("page-000001.tiff").exists());
+    }
+    // PS CID resources are not allowed to fall back to a made-up CJK name.
+    std::fs::write(
+        &source,
+        b"%!PS\n/JRIPMissingCID /CIDFont findresource pop showpage\n",
+    )
+    .unwrap();
+    let mut ps = manifest;
+    ps.format = DocumentFormat::Postscript;
+    assert!(
+        engine
+            .render(&source, &dir.path().join("ps"), &ps)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker and rebuilt MuPDF font-usage inspection image"]
+async fn inspection_records_executed_font_names_glyphs_and_vertical_modes() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("usage.pdf");
+    std::fs::write(
+        &source,
+        include_bytes!("../../../tests/corpus/fonts/punctuation-quality.pdf"),
+    )
+    .unwrap();
+    let report = rip_interpreter::inspect_pdf(&source).await.unwrap();
+    let usage = &report["fontPolicy"]["runtimeEvidence"];
+    rip_core::font_usage::validate(usage, 12).unwrap();
+    assert_eq!(usage["engine"], "mupdf");
+    assert_eq!(usage["phase"], "pdf-inspection");
+    assert_eq!(usage["glyphCallbacks"], 12);
+    let fonts = usage["fonts"].as_array().unwrap();
+    assert_eq!(fonts.len(), 2);
+    for (index, font) in fonts.iter().enumerate() {
+        assert!(font["name"].as_str().unwrap().ends_with("OwnedPunctuation"));
+        assert_eq!(font["glyphCallbacks"], 6);
+        assert_eq!(font["glyphInstances"], 6);
+        assert_eq!(font["negativeGlyphIds"], 0);
+        assert_eq!(font["zeroGlyphIds"], 0);
+        assert_eq!(font["horizontalGlyphs"], 3);
+        assert_eq!(font["verticalGlyphs"], 3);
+        assert_eq!(font["firstPage"], index * 6 + 1);
+        assert_eq!(font["lastPage"], index * 6 + 6);
+        assert_eq!(font["pageCount"], 6);
+        assert_eq!(font["operations"]["fill"], 6);
+        assert_eq!(font["glyphIdSample"].as_array().unwrap().len(), 6);
+        assert_eq!(font["sampleTruncated"], false);
+    }
+    // Keep all declared font resources, remove only the executed text operators.
+    let mut unused = include_bytes!("../../../tests/corpus/fonts/punctuation-quality.pdf").to_vec();
+    let mut removed = 0;
+    for pattern in [b"<3001> Tj".as_slice(), b"<3002> Tj", b"<300C> Tj"] {
+        for offset in 0..=unused.len() - pattern.len() {
+            if &unused[offset..offset + pattern.len()] == pattern {
+                unused[offset..offset + pattern.len()].fill(b' ');
+                removed += 1;
+            }
+        }
+    }
+    assert_eq!(removed, 12);
+    std::fs::write(&source, unused).unwrap();
+    let empty = rip_interpreter::inspect_pdf(&source).await.unwrap();
+    assert_eq!(empty["fontPolicy"]["fonts"], report["fontPolicy"]["fonts"]);
+    assert_eq!(empty["fontPolicy"]["runtimeEvidence"]["glyphCallbacks"], 0);
+    assert_eq!(
+        empty["fontPolicy"]["runtimeEvidence"]["fonts"],
+        serde_json::json!([])
+    );
 }

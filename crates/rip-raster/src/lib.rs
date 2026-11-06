@@ -35,6 +35,49 @@ impl Color {
         }
     }
 }
+/// Binding for devices advertising pwg-raster-document-sheet-back=normal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DuplexBinding {
+    LongEdge,
+    ShortEdge,
+}
+impl DuplexBinding {
+    fn tumble(self) -> u32 {
+        u32::from(self == Self::ShortEdge)
+    }
+}
+pub use rip_core::print::SheetBack;
+#[derive(Debug, Clone, Copy)]
+pub struct DuplexLayout {
+    pub binding: DuplexBinding,
+    pub sheet_back: SheetBack,
+}
+impl DuplexLayout {
+    /// Front pages are always identity; backside values are PWG 5102.4 Table 9.
+    fn transforms(self, backside: bool) -> (u32, u32) {
+        if !backside {
+            return (1, 1);
+        }
+        match (self.binding, self.sheet_back) {
+            (DuplexBinding::LongEdge, SheetBack::Flipped) => (1, u32::MAX),
+            (DuplexBinding::ShortEdge, SheetBack::Flipped) => (u32::MAX, 1),
+            (DuplexBinding::LongEdge, SheetBack::Rotated)
+            | (DuplexBinding::ShortEdge, SheetBack::ManualTumble) => (u32::MAX, u32::MAX),
+            _ => (1, 1),
+        }
+    }
+}
+#[derive(Clone, Copy)]
+struct PageLayout {
+    total: u32,
+    duplex: Option<DuplexLayout>,
+    backside: bool,
+}
+impl PageLayout {
+    fn transforms(self) -> (u32, u32) {
+        self.duplex.map_or((1, 1), |d| d.transforms(self.backside))
+    }
+}
 pub struct Options {
     pub dpi: u32,
     pub color: Color,
@@ -74,18 +117,63 @@ pub fn convert_registered<W: Write>(
     expected_icc: Option<&str>,
     writer: &mut W,
 ) -> Result<(), Error> {
+    convert_layout(pages, options, expected_icc, None, writer)
+}
+/// Encode duplex only in the native `normal` sheet-back coordinate system.
+/// The caller must verify the device's sheet-back mode before using this output.
+/// Pages remain in supplied order; no implicit blank back page or raster duplication.
+/// Write to private staging because an error may leave an incomplete prefix.
+pub fn convert_normal_duplex<W: Write>(
+    pages: &[impl AsRef<Path>],
+    options: &Options,
+    expected_icc: Option<&str>,
+    binding: DuplexBinding,
+    writer: &mut W,
+) -> Result<(), Error> {
+    convert_duplex(
+        pages,
+        options,
+        expected_icc,
+        DuplexLayout {
+            binding,
+            sheet_back: SheetBack::Normal,
+        },
+        writer,
+    )
+}
+/// Render all bitmaps in the device-native sheet-back coordinates.
+pub fn convert_duplex<W: Write>(
+    pages: &[impl AsRef<Path>],
+    options: &Options,
+    expected_icc: Option<&str>,
+    layout: DuplexLayout,
+    writer: &mut W,
+) -> Result<(), Error> {
+    convert_layout(pages, options, expected_icc, Some(layout), writer)
+}
+fn convert_layout<W: Write>(
+    pages: &[impl AsRef<Path>],
+    options: &Options,
+    expected_icc: Option<&str>,
+    duplex: Option<DuplexLayout>,
+    writer: &mut W,
+) -> Result<(), Error> {
     if pages.is_empty() || pages.len() > 100 || !(72..=2400).contains(&options.dpi) {
         return Err(Error::Limit);
     }
     let mut writer = Bounded { writer, bytes: 0 };
     writer.write_all(b"RaS2")?;
     let mut decoded = 0usize;
-    for path in pages {
+    for (index, path) in pages.iter().enumerate() {
         page(
             std::fs::File::open(path)?,
             options,
             expected_icc,
-            pages.len() as u32,
+            PageLayout {
+                total: pages.len() as u32,
+                duplex,
+                backside: index % 2 == 1,
+            },
             &mut decoded,
             &mut writer,
         )?;
@@ -97,7 +185,7 @@ fn page<R: Read + Seek, W: Write>(
     reader: R,
     options: &Options,
     expected_icc: Option<&str>,
-    total: u32,
+    layout: PageLayout,
     decoded: &mut usize,
     writer: &mut W,
 ) -> Result<(), Error> {
@@ -167,9 +255,28 @@ fn page<R: Read + Seek, W: Write>(
             *value = 255 - *value;
         }
     }
+    let (cross, feed) = layout.transforms();
+    if feed == u32::MAX {
+        for y in 0..height as usize / 2 {
+            for x in 0..line {
+                pixels.swap(y * line + x, (height as usize - 1 - y) * line + x);
+            }
+        }
+    }
+    if cross == u32::MAX {
+        for row in pixels.chunks_exact_mut(line) {
+            for x in 0..width as usize / 2 {
+                for c in 0..channels {
+                    row.swap(x * channels + c, (width as usize - 1 - x) * channels + c);
+                }
+            }
+        }
+    }
     let mut header = [0u8; 1796];
     header[..9].copy_from_slice(b"PwgRaster");
     for (offset, value) in [
+        (272, u32::from(layout.duplex.is_some())),
+        (368, layout.duplex.map_or(0, |d| d.binding.tumble())),
         (276, options.dpi),
         (280, options.dpi),
         (340, 1),
@@ -188,9 +295,9 @@ fn page<R: Read + Seek, W: Write>(
         (392, line as u32),
         (400, space),
         (420, channels as u32),
-        (452, total),
-        (456, 1),
-        (460, 1),
+        (452, layout.total),
+        (456, layout.transforms().0),
+        (460, layout.transforms().1),
         (472, width),
         (476, height),
     ] {
@@ -218,12 +325,49 @@ pub fn convert_file(
     options: &Options,
     output: &Path,
 ) -> Result<(), Error> {
+    publish_file(pages, options, None, None, output)
+}
+/// Atomic normal-sheet-back duplex publication, without overwriting an existing file.
+pub fn convert_normal_duplex_file(
+    pages: &[impl AsRef<Path>],
+    options: &Options,
+    expected_icc: Option<&str>,
+    binding: DuplexBinding,
+    output: &Path,
+) -> Result<(), Error> {
+    publish_file(
+        pages,
+        options,
+        expected_icc,
+        Some(DuplexLayout {
+            binding,
+            sheet_back: SheetBack::Normal,
+        }),
+        output,
+    )
+}
+pub fn convert_duplex_file(
+    pages: &[impl AsRef<Path>],
+    options: &Options,
+    expected_icc: Option<&str>,
+    layout: DuplexLayout,
+    output: &Path,
+) -> Result<(), Error> {
+    publish_file(pages, options, expected_icc, Some(layout), output)
+}
+fn publish_file(
+    pages: &[impl AsRef<Path>],
+    options: &Options,
+    expected_icc: Option<&str>,
+    duplex: Option<DuplexLayout>,
+    output: &Path,
+) -> Result<(), Error> {
     let parent = output
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     let mut staging = tempfile::NamedTempFile::new_in(parent)?;
-    convert(pages, options, staging.as_file_mut())?;
+    convert_layout(pages, options, expected_icc, duplex, staging.as_file_mut())?;
     staging.as_file().sync_all()?;
     staging
         .persist_noclobber(output)
@@ -241,6 +385,23 @@ pub struct PwgPage {
 }
 /// Validate all page headers and compressed scanlines without allocating decoded pixels.
 pub fn inspect(bytes: &[u8]) -> Result<Vec<PwgPage>, Error> {
+    inspect_layout(bytes, None)
+}
+/// Validate the complete stream against an explicit duplex binding and normal sheet-back.
+/// The default inspector deliberately continues rejecting duplex streams.
+pub fn inspect_normal_duplex(bytes: &[u8], binding: DuplexBinding) -> Result<Vec<PwgPage>, Error> {
+    inspect_duplex(
+        bytes,
+        DuplexLayout {
+            binding,
+            sheet_back: SheetBack::Normal,
+        },
+    )
+}
+pub fn inspect_duplex(bytes: &[u8], layout: DuplexLayout) -> Result<Vec<PwgPage>, Error> {
+    inspect_layout(bytes, Some(layout))
+}
+fn inspect_layout(bytes: &[u8], duplex: Option<DuplexLayout>) -> Result<Vec<PwgPage>, Error> {
     if bytes.len() > 32 * 1024 * 1024 || bytes.get(..4) != Some(b"RaS2") {
         return Err(Error::Unsupported);
     }
@@ -272,10 +433,16 @@ pub fn inspect(bytes: &[u8]) -> Result<Vec<PwgPage>, Error> {
             || u(392) as u64 != width as u64 * channels
             || u(396) != 0
             || u(420) as u64 != channels
-            || u(272) != 0
-            || u(368) != 0
-            || u(456) != 1
-            || u(460) != 1
+            || u(272) != u32::from(duplex.is_some())
+            || u(368) != duplex.map_or(0, |d| d.binding.tumble())
+            || u(456)
+                != duplex
+                    .map_or((1, 1), |d| d.transforms(pages.len() % 2 == 1))
+                    .0
+            || u(460)
+                != duplex
+                    .map_or((1, 1), |d| d.transforms(pages.len() % 2 == 1))
+                    .1
             || pages.len() >= 100
         {
             return Err(Error::Unsupported);

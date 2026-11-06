@@ -588,6 +588,8 @@ async fn commit_checks_source_and_digest_and_deduplicates() {
                 .complete_with_artifacts(
                     spool,
                     &[rip_core::Artifact {
+                        source_page: None,
+                        source_page_count: None,
                         page: 1,
                         name: "page-000001.tiff".into(),
                         media_type: "image/tiff".into(),
@@ -1535,4 +1537,114 @@ async fn check_profiled_preview(cmyk: bool) {
     tokio::fs::write(path, b"tampered").await.unwrap();
     let response = app.oneshot(request("GET", &url)).await.unwrap();
     assert_eq!(response.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn session_context_is_current_private_and_does_not_grant_job_access() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = jrip_server::open(dir.path().into(), TOKEN.into())
+        .await
+        .unwrap();
+    state.require_print_approval = true;
+    let now = rip_storage::now();
+    state.credentials = vec![
+        jrip_server::Credential {
+            token: "context-active-token".into(),
+            identity: "operator".into(),
+            scopes: vec!["printers:print".into()],
+            validity: Some(jrip_server::CredentialValidity {
+                not_before: now - 30,
+                expires_at: now + 300,
+            }),
+        },
+        jrip_server::Credential {
+            token: "context-expired-token".into(),
+            identity: "expired".into(),
+            scopes: vec!["admin".into()],
+            validity: Some(jrip_server::CredentialValidity {
+                not_before: now - 301,
+                expires_at: now - 1,
+            }),
+        },
+        jrip_server::Credential {
+            token: "context-future-token".into(),
+            identity: "future".into(),
+            scopes: vec!["admin".into()],
+            validity: Some(jrip_server::CredentialValidity {
+                not_before: now + 300,
+                expires_at: now + 600,
+            }),
+        },
+    ];
+    let router = jrip_server::router(state.clone());
+    for token in [
+        None,
+        Some(TOKEN),
+        Some("context-expired-token"),
+        Some("context-future-token"),
+        Some("invalid"),
+    ] {
+        let mut request = Request::get("/api/v1/session");
+        if let Some(token) = token {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        assert_eq!(
+            router
+                .clone()
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    let response = router
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/session")
+                .header("authorization", "Bearer context-active-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert_eq!(response.headers()["vary"], "Authorization");
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(!text.contains("context-active-token"));
+    assert!(!text.contains("context-expired-token"));
+    assert!(!text.contains("future"));
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["identity"], "operator");
+    assert_eq!(value["credentialSource"], "configured");
+    assert_eq!(value["scopes"], serde_json::json!(["printers:print"]));
+    assert_eq!(value["expiresAt"], now + 300);
+    assert_eq!(value["printApprovalRequired"], true);
+    assert_eq!(
+        router
+            .oneshot(
+                Request::get("/api/v1/jobs")
+                    .header("authorization", "Bearer context-active-token")
+                    .body(Body::empty())
+                    .unwrap()
+            )
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    state.credentials.clear();
+    state.require_print_approval = false;
+    let response = jrip_server::router(state)
+        .oneshot(request("GET", "/api/v1/session"))
+        .await
+        .unwrap();
+    let value: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(value["identity"], "legacy-local");
+    assert_eq!(value["credentialSource"], "legacy-local");
+    assert!(value["expiresAt"].is_null());
+    assert_eq!(value["printApprovalRequired"], false);
 }

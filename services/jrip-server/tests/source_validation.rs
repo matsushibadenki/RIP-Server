@@ -30,7 +30,16 @@ async fn default_worker_validates_all_supported_formats_and_rejects_late_errors(
     let bad_ps = b"%!PS-Adobe-3.0\nshowpage\nTHIS_OPERATOR_DOES_NOT_EXIST\n".as_slice();
     let repaired = &pdf[..pdf.len() - 30];
     let bad_eps=b"%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 72 72\nshowpage\nTHIS_OPERATOR_DOES_NOT_EXIST\n".as_slice();
+    let mut missing_font = include_bytes!("../../../tests/corpus/fonts/font-quality.pdf").to_vec();
+    for offset in 0..missing_font.len() - 10 {
+        if &missing_font[offset..offset + 10] == b"/FontFile2" {
+            missing_font[offset + 8] = b'o';
+        }
+    }
     let cases = [
+        ("application/pdf", missing_font.as_slice(), false),
+        ("application/postscript", b"%!PS\nshowpage\n/JRIP_NoSuchFont_942 findfont 12 scalefont setfont\n10 10 moveto (TEST) show showpage\n".as_slice(), false),
+        ("application/eps", b"%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 72 72\n/JRIP_NoSuchFont_942 findfont 12 scalefont setfont\n10 10 moveto (TEST) show showpage\n".as_slice(), false),
         ("application/pdf", pdf, true),
         ("application/postscript", ps, true),
         ("application/eps", eps, true),
@@ -134,6 +143,19 @@ async fn default_worker_validates_all_supported_formats_and_rejects_late_errors(
             let report: serde_json::Value =
                 serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
                     .unwrap();
+            if format == "application/pdf" {
+                assert_eq!(
+                    report["fontPolicy"]["profile"],
+                    "org.jrip.pdf-font-policy-v1"
+                );
+                assert_eq!(report["fontPolicy"]["accepted"], true);
+                let usage = &report["fontPolicy"]["runtimeEvidence"];
+                rip_core::font_usage::validate(usage, 2).unwrap();
+                assert_eq!(usage["glyphCallbacks"], 0);
+                assert_eq!(usage["fonts"], serde_json::json!([]));
+            } else {
+                assert!(report.get("fontPolicy").is_none());
+            }
             let profiles = &report["colorProfileAnalysis"];
             assert_eq!(profiles["analysis"]["sourceSha256"], current.source_sha256);
             assert_eq!(
@@ -490,5 +512,147 @@ async fn rendering_progress_is_live_resumable_and_cancellation_discards_output()
             .unwrap();
         assert!(containers.status.success());
         assert!(containers.stdout.is_empty(), "container not removed");
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Docker and both render images"]
+async fn selected_pdf_worker_publishes_source_mapping_and_measured_total() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let app = jrip_server::open(root.clone(), "token".into())
+        .await
+        .unwrap();
+    for engine in ["mupdf", "ghostscript"] {
+        let manifest:Manifest=serde_json::from_value(serde_json::json!({"name":"selected.pdf","format":"application/pdf","dpi":72,"color_mode":"rgb","engine":engine,"page_ranges":[{"first":2,"last":2}]})).unwrap();
+        let job = rip_jobs::submit_bytes(
+            &app.repo,
+            &root,
+            manifest,
+            include_bytes!("../../../tests/corpus/colors.pdf"),
+        )
+        .await
+        .unwrap();
+        let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_jrip-worker"))
+            .arg(job.id.to_string())
+            .env("JRIP_DATA_ROOT", &root)
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            app.repo.get(job.id).await.unwrap().state,
+            JobState::Completed
+        );
+        let artifacts = app.repo.artifacts(job.id).await.unwrap();
+        assert_eq!(artifacts.as_array().unwrap().len(), 1);
+        assert_eq!(artifacts[0]["page"], 1);
+        assert_eq!(artifacts[0]["sourcePage"], 2);
+        assert_eq!(artifacts[0]["sourcePageCount"], 2);
+        let response = jrip_server::router(app.clone())
+            .oneshot(
+                Request::get(format!("/api/v1/jobs/{}/source-validation", job.id))
+                    .header("authorization", "Bearer token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let report: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(report["pageCount"], 2);
+        let history = app.repo.events(job.id, 0, 100).await.unwrap();
+        let rendering: Vec<_> = history["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["progressPhase"] == "rendering")
+            .collect();
+        assert_eq!(rendering.len(), 1);
+        assert_eq!(rendering[0]["completedPages"], 1);
+        assert_eq!(rendering[0]["totalPages"], 1);
+        assert_eq!(rendering[0]["progressPercent"], 100);
+        let ticket = app.repo.job_ticket(job.id).await.unwrap();
+        assert_eq!(ticket.page_selection, "2");
+        let directory = root.join("jobs").join(job.id.to_string()).join("raster");
+        assert_eq!(std::fs::read_dir(directory).unwrap().count(), 1);
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Docker and rebuilt MuPDF/Ghostscript images"]
+async fn worker_persists_font_usage_with_inspection_provenance_for_both_engines() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let app = jrip_server::open(root.clone(), "token".into())
+        .await
+        .unwrap();
+    for preference in [
+        rip_core::EnginePreference::MuPdf,
+        rip_core::EnginePreference::Ghostscript,
+    ] {
+        let mut manifest: Manifest = serde_json::from_value(
+            serde_json::json!({"name":"font evidence","format":"application/pdf","dpi":72}),
+        )
+        .unwrap();
+        manifest.engine = preference;
+        let job = rip_jobs::submit_bytes(
+            &app.repo,
+            &root,
+            manifest,
+            include_bytes!("../../../tests/corpus/fonts/punctuation-quality.pdf"),
+        )
+        .await
+        .unwrap();
+        let status = tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            tokio::process::Command::new(env!("CARGO_BIN_EXE_jrip-worker"))
+                .arg(job.id.to_string())
+                .env("JRIP_DATA_ROOT", &root)
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            status.status.success(),
+            "{}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+        assert_eq!(
+            app.repo.get(job.id).await.unwrap().state,
+            JobState::Completed
+        );
+        let response = jrip_server::router(app.clone())
+            .oneshot(
+                Request::get(format!("/api/v1/jobs/{}/source-validation", job.id))
+                    .header("authorization", "Bearer token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let report: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(report["sourceSha256"], job.source_sha256);
+        let usage = &report["fontPolicy"]["runtimeEvidence"];
+        rip_core::font_usage::validate(usage, 12).unwrap();
+        assert_eq!(usage["glyphCallbacks"], 12);
+        assert_eq!(usage["fonts"].as_array().unwrap().len(), 2);
+        assert_eq!(usage["engine"], "mupdf");
+        assert_eq!(usage["phase"], "pdf-inspection");
+        let reopened = rip_storage::Repository::open(&root.join("jobs.sqlite3"))
+            .await
+            .unwrap();
+        assert_eq!(reopened.source_validation(job.id).await.unwrap(), report);
     }
 }

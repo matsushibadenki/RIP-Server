@@ -1506,6 +1506,7 @@ dependencies = [
 name = "rip-ipp"
 version = "0.1.0"
 dependencies = [
+ "rip-core",
  "thiserror",
 ]
 
@@ -1548,6 +1549,7 @@ version = "0.1.0"
 dependencies = [
  "lcms2",
  "rip-color",
+ "rip-core",
  "sha2",
  "tempfile",
  "thiserror",

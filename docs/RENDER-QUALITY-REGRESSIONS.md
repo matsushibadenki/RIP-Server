@@ -51,17 +51,74 @@ These are targeted regression checks, not whole-page perceptual diffs, PDF confo
 
 ## Embedded font programs / 埋め込みフォントプログラム / 嵌入字体程序
 
-🟢 [Done] Added a separate three-page [owned font corpus](../tests/corpus/fonts/README.md): simple Symbol-cmap TrueType, CIDFontType2 with an explicit non-identity CIDToGIDMap, and name-keyed CFF/Type1C. Both font programs are actually subset from four glyphs to three using pinned fontTools; no external font files are read. The CID values intentionally differ from both Unicode and glyph IDs. Each page is rendered by both engines in RGB and gray (12 font-page rasters); positive ink, two counters, background and a nonstandard sentinel detect blank output, swapped glyphs, missing glyph boxes and fallback substitution. Normal CI verifies that generator output exactly matches the checked-in PDF.
+🟢 [Done] Added a separate [owned font corpus](../tests/corpus/fonts/README.md): simple Symbol-cmap TrueType, CIDFontType2 with an explicit non-identity CIDToGIDMap, and name-keyed CFF/Type1C. The TrueType and CFF source programs are actually subset from four glyphs to three using pinned fontTools; no external font files are read. The CID values intentionally differ from both Unicode and glyph IDs. The six-page corpus is rendered by both engines in RGB and gray (24 font-page rasters); positive ink, two counters, background and a nonstandard sentinel detect blank output, swapped glyphs, missing glyph boxes and fallback substitution. Normal CI verifies that generator output exactly matches the checked-in PDF.
 
-日本語: 自作の3ページ原稿で、Symbol cmap付きTrueType、非恒等CIDToGIDMap付きCIDFontType2、名前ベースCFF／Type1Cを追加検証します。fontToolsで実際に4→3グリフへサブセット化し、外部フォントは読みません。両エンジンでRGB／グレーを描画し、白黒の検査点と固有形状で欠落・誤対応・代替フォント置換を検出します。CIで生成PDFの一致も検査します。
+日本語: 自作原稿で、Symbol cmap付きTrueType、非恒等CIDToGIDMap付きCIDFontType2、名前ベースCFF／Type1Cを検証し、下記のCID CFF・縦送りへ拡張しています。fontToolsで実際に4→3グリフへサブセット化し、外部フォントは読みません。両エンジンでRGB／グレーを描画し、白黒の検査点と固有形状で欠落・誤対応・代替フォント置換を検出します。CIで生成PDFの一致も検査します。
 
-简体中文: 新增自制三页原稿，验证带Symbol cmap的TrueType、非恒等CIDToGIDMap的CIDFontType2及名称型CFF／Type1C。fontTools实际将四个字形裁剪为三个，不读取外部字体。两个引擎分别渲染RGB／灰度，通过墨块、字腔、背景及特有形状检测缺失、错误映射与回退替换。CI同时验证生成PDF一致性。
+简体中文: 自制原稿验证带Symbol cmap的TrueType、非恒等CIDToGIDMap的CIDFontType2及名称型CFF／Type1C，并扩展至下述CID CFF及竖排度量。fontTools实际将四个字形裁剪为三个，不读取外部字体。两个引擎分别渲染RGB／灰度，通过墨块、字腔、背景及特有形状检测缺失、错误映射与回退替换。CI同时验证生成PDF一致性。
 
-This extends the earlier Type3-only coverage; it does not cover CID-keyed CFF,
-vertical text, OpenType shaping, arbitrary customer fonts, or deliberate missing-font
-fallback policies. The sentinel verifies use of these embedded programs; it does not
-certify a fallback font's suitability. Text extraction is not asserted.
+This extends the earlier Type3-only coverage. OpenType shaping, arbitrary customer
+fonts and deliberate missing-font fallback policies remain outside the corpus.
+The sentinel verifies use of these embedded programs; it does not certify a
+fallback font's suitability. Text extraction is not asserted.
 
-日本語: CIDベースCFF・縦書き・OpenType組版・任意の顧客書体・欠落フォントの代替方針・文字抽出は対象外です。
+日本語: OpenType組版・任意の顧客書体・欠落フォントの代替方針・文字抽出は対象外です。
 
-简体中文: 不覆盖CID型CFF、竖排、OpenType排版、任意客户字体、缺失字体回退策略及文本提取。
+简体中文: 不覆盖OpenType排版、任意客户字体、缺失字体回退策略及文本提取。
+
+
+## CID CFF and vertical metrics / CID CFFと縦送り / CID CFF及竖排度量
+
+🟢 [Done] The owned font corpus now has six pages. Added CID-keyed CFF with ROS,
+sparse CID charset (7/9 rather than GIDs 2/1), FDArray/FDSelect and FontFile3
+CIDFontType0C embedding. Added Identity-V for TrueType and CID CFF. The TrueType
+page uses explicit W2 with -1200 advance while DW2 differs; the CFF page uses
+DW2 with -1200 advance. Pixel probes test glyph origin offsets, advance and
+inter-glyph whitespace, as well as the existing owned sentinel. RGB and gray on
+both engines cover 24 font-page rasters. Regeneration remains deterministic and
+is checked by the existing CI fixture step.
+
+日本語: 自作フォント原稿を6ページへ拡張しました。CIDベースCFFの疎なCID対応・FDArray／FDSelectと、TrueType／CID CFFのIdentity-Vを実描画で検査します。W2明示とDW2既定の送り量を別々に扱い、原点・字間の空白・固有字形をRGB／グレーの両エンジンで確認します。
+
+简体中文: 自制字体原稿扩展为六页，实际检查CID型CFF的稀疏CID映射、FDArray／FDSelect及TrueType／CID CFF的Identity-V。分别验证显式W2及默认DW2的字距，并在两个引擎的RGB／灰度输出中检查原点、字形间空白及特有形状。
+
+This closes the synthetic CID-CFF/vertical-metrics coverage gap, not the broader
+vertical typography or customer-font acceptance work. vert/vrt2 substitution,
+automatic punctuation shaping, multiple Font DICTs and deliberate missing-font fallback
+remain outside this corpus.
+
+## Explicit punctuation selection / 句読点の明示的な字形選択 / 标点显式字形选择
+
+🟢 [Done] The separate 12-page `punctuation-quality.pdf` exercises embedded
+horizontal and vertical CMaps, sparse CID mappings, TrueType/CID CFF programs,
+vertical origins, comma/period placement and bracket rotation. Semantic probes
+check ink, counters, wrong-form whitespace and an asymmetric bracket sentinel
+in RGB/gray on MuPDF/Ghostscript (48 page rasters). No external fonts are used.
+See the [corpus documentation](../tests/corpus/fonts/README.md) for regeneration.
+
+日本語: 横／縦CMapによる句読点・括弧の明示的な字形選択を48ページの実描画で確認します。既存6ページ原稿は維持し、独立した12ページ原稿を追加しました。
+
+简体中文: 通过48页实际渲染验证横竖排CMap指定的标点及括号字形选择。保留原六页原稿，另增独立十二页原稿。
+
+🟠 [Next] OpenType vert/vrt2 shaping, deliberate missing-font policy and practical document comparison remain separate unfinished work.
+日本語: OpenType自動縦組み、欠落フォント方針、実用原稿の比較は未完了です。
+简体中文: OpenType自动竖排、缺失字体策略及实际原稿比较仍未完成。
+
+## Multilingual production-style corpus / 多言語業務原稿 / 多语言业务原稿
+
+🟢 [Done] Added a [three-page regional Noto CJK corpus](../tests/corpus/multilingual/README.md), with OFL notices, renamed JP/SC subsets and hash-pinned provenance. Font-outline containment generates independent ink/whitespace probes. Both engines render RGB/gray at 288dpi (12 positive page rasters); a wrong CID map must fail the same oracle. Actual page images are reviewed. This adds realistic multi-FD CID CFF coverage, not arbitrary-font or paper certification.
+
+日本語: 実書体による3言語原稿を12ページ分描画し、独立した輪郭検査点で照合します。多FD CFFと誤CIDを検証しますが、全書体・実機品質の保証ではありません。
+
+简体中文: 实际字体三语言原稿共渲染12页，以独立轮廓检查点比对，覆盖多FD CFF及错误CID。不保证任意字体或实体打印质量。
+
+The corpus exposed an ordinary-page limit bug: dividing the per-file RLIMIT_FSIZE
+by the maximum page count restricted the default 100-page worker to about 10 MiB
+per file, blocking the uncompressed RGB PAM for A4 near 300dpi. The per-file limit
+is now `min(job spool budget, 65 MiB)`, independent of page allowance. The existing
+512 MiB memory cap, output tmpfs size, page count and streamed aggregate byte budget
+remain in force. Downstream 64 MiB decoded sample limits are unchanged.
+
+日本語: 既定の100ページ設定で1ファイルが約10MiBに制限され、A4のRGB出力が失敗する問題を修正しました。ファイル上限は65MiBとジョブspool上限の小さい方とし、総量・メモリー・ページ数の上限を維持します。
+
+简体中文: 修复默认100页设置把单文件限制在约10MiB、导致A4 RGB输出失败的问题。单文件上限改为65MiB与作业spool上限中的较小值，并保留总量、内存及页数限制。

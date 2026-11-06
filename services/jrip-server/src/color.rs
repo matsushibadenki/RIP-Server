@@ -266,7 +266,11 @@ async fn process(app: &App, id: Uuid, attempt: &mut Value) -> Result<Value, Proc
         .iter()
         .map(|a| staging.path().join(&a.name))
         .collect();
-    let output_artifacts = artifacts::hash_pages(&paths).await?;
+    let mut output_artifacts = artifacts::hash_pages(&paths).await?;
+    for (output, source) in output_artifacts.iter_mut().zip(&artifacts) {
+        output.source_page = source.source_page;
+        output.source_page_count = source.source_page_count;
+    }
     for (report, artifact) in reports.iter_mut().zip(&output_artifacts) {
         report["outputArtifact"] = serde_json::to_value(artifact)?;
     }
@@ -448,6 +452,43 @@ pub(crate) async fn create_inner(
                 .create_color(req.request_id, id, req.expected_revision, ticket)
                 .await?,
         ),
+    ))
+}
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ListQuery {
+    limit: Option<u32>,
+    before: Option<String>,
+    state: Option<String>,
+}
+pub(crate) async fn list(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    query: Result<axum::extract::Query<ListQuery>, axum::extract::rejection::QueryRejection>,
+) -> Result<impl IntoResponse, ApiError> {
+    authorize(&app, &headers, "jobs:read")?;
+    let axum::extract::Query(query) = query.map_err(|_| bad("invalid_color_query"))?;
+    app.repo.get(id).await?;
+    let result = app
+        .repo
+        .color_attempts(
+            id,
+            query.limit.unwrap_or(50),
+            query.before.as_deref(),
+            query.state.as_deref(),
+        )
+        .await
+        .map_err(|error| match error {
+            StorageError::Conflict => bad("invalid_color_query"),
+            other => ApiError::from(other),
+        })?;
+    Ok((
+        [
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+            (axum::http::header::VARY, "Authorization"),
+        ],
+        Json(result),
     ))
 }
 pub(crate) async fn detail(

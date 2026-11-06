@@ -12,14 +12,29 @@
 1. 🟢 [Done] 明示Delivery／後続pipelineの部数指定。機器能力照合・永続ticket・承認・送信直前再検査・MCP転送・再起動／再送試験。[PRINT-COPIES.md](PRINT-COPIES.md)。 / Explicit device copies / 显式设备输出份数。
 2. 🟢 [Done] RIP後の明示Delivery／後続pipelineでページ範囲を指定。選択ページだけの検証・変換、承認・契約・再起動・再送を検証。[PRINT-PAGE-RANGES.md](PRINT-PAGE-RANGES.md)。 / Rendered-page selection for delivery / 投递时选择已渲染页。
    🟢 [Done] 原稿投入前の実機PrintIntentで部数を交渉し、必須／希望／自動、能力revision・commit・再起動・IPP送信を検証。[PRINT-INTENT-COPIES.md](PRINT-INTENT-COPIES.md)。 / Pre-source physical PrintIntent copies / 原稿接收前的实体PrintIntent份数协商。
-   🟢 [Done] 原稿投入前の実機PrintIntentページ指定をDeliveryへ統合。範囲正規化・検査済みページ数・選択ページ寸法・commit・再起動・送信を検証。全ページRIPは維持。[PRINT-INTENT-PAGES.md](PRINT-INTENT-PAGES.md)。 / Pre-source delivery page selection, all pages still rendered / 原稿接收前选择投递页，仍渲染全部页。
-3. 🟠 [Next] 両面・用紙指定、描画時のページ省略と仮想IPP／操作画面への統合。未対応設定は拒否し、対応済みの範囲から公開する。 / Duplex, media and source-time page selection / 双面、介质及原稿投入时页码选择。
+   🟢 [Done] 原稿投入前の実機PrintIntentページ指定をDeliveryへ統合。範囲正規化・検査済みページ数・選択ページ寸法・commit・再起動・送信を検証。PDF選択描画へ接続。[PRINT-INTENT-PAGES.md](PRINT-INTENT-PAGES.md)。 / Pre-source PDF rendering and delivery selection / 原稿接收前选择PDF渲染与投递页。
+   🟢 [Done] PDF指定ページだけのMuPDF／Ghostscript描画、原稿ページ対応の永続化・色変換・配送・実ワーカー試験。[RENDER-PAGE-SELECTION.md](RENDER-PAGE-SELECTION.md)。 / Source PDF render selection / PDF原稿选择渲染。
+   🟢 [Done] PDF仮想IPPのpage-ranges。型・順序・重複検査、要求範囲の永続化・取得、原稿外ページの無出力と空選択の正常完了、独立CUPSから実ワーカーまで検証。[IPP-PAGE-RANGES.md](IPP-PAGE-RANGES.md)。 / IPP source-page selection / IPP原稿页选择。
+3. 🟢 [Done] normal方式の長辺／短辺とじPWG生成・専用検査・CLI・原子的公開。独立CUPSリーダーで色空間と奇数／偶数ページを検証。[NORMAL-DUPLEX-RASTER.md](NORMAL-DUPLEX-RASTER.md)。 / Normal duplex raster engine / Normal双面光栅引擎。
+   🟢 [Done] normal実機両面を能力照合・永続ticket・承認・Native IPP・PrintIntent／MCPへ統合。送信直前の裏面方式変更を拒否。[DEVICE-DUPLEX.md](DEVICE-DUPLEX.md)。 / Bound normal duplex delivery / 绑定normal双面投递。
+   🟢 [Done] rotated／flipped／manual-tumbleの裏面画素・ヘッダー変換と永続方式拘束。独立CUPSで144組を検証し、送信前の対応方式間の変更も拒否。 / All sheet-back transforms and exact-mode binding / 全背面变换及精确模式绑定。
+   🟢 [Done] 操作画面のPDF範囲入力・原稿ページ番号プレビュー・0ページ完了表示を3言語で検証。実PDFの画面投入→実ワーカー→プレビュー画素まで確認。[OPERATOR-CONSOLE.md](OPERATOR-CONSOLE.md)。 / Console render selection and real-worker browser regression / 界面选择渲染及实际worker浏览器回归。
+   🟢 [Done] 出力操作の認証主体・権限・期限・承認条件の読取と、原稿別の色変換概要をREST／MCPで取得。容量制限・安定カーソル・再起動・権限を検証。[OUTPUT-CONTEXT.md](OUTPUT-CONTEXT.md)。 / Auth context and bounded color summaries / 认证上下文与有界色彩摘要。
+   🟢 [Done] 用紙・部数・両面・色結果・範囲の出力画面。未投入の確認、ticket固定、承認、配信履歴、状態・取消、応答消失／502時のGET復旧を模擬IPP・実ICC・ブラウザーで検証。[PHYSICAL-OUTPUT-CONSOLE.md](PHYSICAL-OUTPUT-CONSOLE.md)。 / Reviewed physical output controls and persistent history / 已确认的实体输出界面及持久历史。
 4. 🟢 [Done] RGB／グレー成果物の整合性検証付き縮小プレビューAPIと、埋め込みICC対応RGB／CMYK／グレー→sRGB変換。[PAGE-PREVIEW.md](PAGE-PREVIEW.md)。 / Verified page preview with embedded ICC to sRGB conversion / 验证完整性并将嵌入ICC转换为sRGB的页面预览。
    🟢 [Done] 色変換工程の成果物プレビュー。出力ICC／色空間とticketの照合、整合性・認証・再起動を検証。 / Ticket-bound color-stage artifact preview / 与ticket绑定的色彩管理阶段产物预览。
    🟢 [Done] 投入・設定・状態・保留／再開・取消・ページプレビューを扱う3言語操作画面。実APIによるブラウザー回帰試験。[OPERATOR-CONSOLE.md](OPERATOR-CONSOLE.md)。 / Trilingual operator console with real API browser tests / 三语言操作界面及真实API浏览器回归测试。
 5. 🟢 [Done] 自作4ページPDFで、MuPDF／GhostscriptのRGB・CMYK描画を実測。半透明・Multiply・プロセスオーバープリント／抜き・埋め込み日本語Type3字形を画素検証。[RENDER-QUALITY-REGRESSIONS.md](RENDER-QUALITY-REGRESSIONS.md)。 / Semantic rendering quality regressions / 语义渲染质量回归。
    🟢 [Done] 自作TrueType／CIDFontType2／CFFサブセットをRGB・グレーで実描画。非恒等CIDマップ・字形欠落・代替置換を検出し、生成PDFの再現性をCI検査。 / Owned subset font rendering regressions / 自制字体子集渲染回归。
-   🟠 [Next] CIDベースCFF・縦書き・代替フォント方針、実用原稿の品質比較を拡充。 / CID-keyed CFF, vertical text, fallback and practical documents / CID型CFF、竖排、字体回退及实际原稿扩展。
+   🟢 [Done] 自作CIDベースCFFとTrueType／CFFの縦送りを実描画。Identity-V・W2／DW2・原点・字間と、疎なCID対応をRGB／グレーで検証。 / CID CFF and vertical metric regressions / CID型CFF及竖排度量回归。
+   🟢 [Done] 自作12ページPDFで句読点・括弧の横／縦字形を検証。埋め込みCMap・非恒等CID対応・縦原点・括弧回転を両エンジンのRGB／グレー48ページで検査。 / Explicit PDF horizontal/vertical punctuation mapping / PDF显式横竖排标点映射。
+   🟢 [Done] PDFの欠落フォント方針を共通ワーカーで強制。埋め込み／Type3・標準14の明示的代替を扱い、その他の欠落を拒否。検査・永続結果に記録。[PDF-FONT-POLICY.md](PDF-FONT-POLICY.md)。 / Explicit PDF font fallback policy / 显式PDF字体回退策略。
+   🟢 [Done] Ghostscriptの単純フォント既定解決で、不明書体のCourier自動置換を拒否。標準・原稿内Type3・途中ページ後の欠落を検査。[POSTSCRIPT-FONT-POLICY.md](POSTSCRIPT-FONT-POLICY.md)。 / Reject default unknown simple-font substitution / 拒绝未知简单字体的默认替代。
+   🟢 [Done] Ghostscript直接描画でもPDFの欠落CIDプログラムをページ出力前に拒否。固定の空CID代替マップ・PS不明CID拒否・埋め込みCID描画を検証。[CID-FONT-POLICY.md](CID-FONT-POLICY.md)。 / Missing CID program rejection and fixed substitution maps / 缺失CID程序拒绝及固定替代映射。
+   🟢 [Done] PDF事前検査でMuPDFのテキスト操作から使用名・字形ID標本・縦横・ページ件数を実測し、原稿別検証結果へ永続保存。宣言のみの未使用書体を除外。[FONT-USAGE-EVIDENCE.md](FONT-USAGE-EVIDENCE.md)。 / MuPDF inspection text-operation evidence / MuPDF预检文本操作证据。
+   🟢 [Done] Noto CJK地域別サブセットの業務風3言語PDFを追加。複数FDのCID CFFを両エンジンのRGB／グレー・288dpiで独立輪郭検査し、誤CIDを検出。[多言語コーパス](../tests/corpus/multilingual/README.md)。 / Multilingual realistic font corpus / 多语言实际字体原稿回归。
+   🟢 [Done] 1ページのファイル上限を最大ページ数から独立させ、通常設定でA4 RGB高解像度ページを許容。65MiB／総spool上限の小さい方、tmpfs・フレーム総量制限を維持。 / Independent bounded page file limit / 独立有界页面文件上限。
+   🟠 [Next] 実ラスタライズ時・Ghostscript／PS／EPSの使用書体記録、書体プログラム識別、実用原稿の比較、OpenType縦字形置換を拡充。 / Raster-stage and Ghostscript/PS/EPS font evidence, program identity, practical documents and OpenType shaping / 栅格阶段及Ghostscript/PS/EPS字体证据、程序身份、实际原稿及OpenType排版扩展。
 6. ⭕️ [Pending] 実機1台で複数部、両面、色、取消、障害復旧、Mac／Windowsアプリ投入を通して受入確認。実機を使える検証環境が必要。 / Real-printer acceptance / 实体打印机验收。
 
 - 🟢 [Done] Agent向けジョブ状態履歴API：`GET /api/v1/jobs/{id}/events?after=0&limit=50`。Bearer認証、永続sequenceによる差分取得、最大100件、再起動・メタデータ削除後の履歴参照に対応。状態変更と実測したページ成果物検証進捗を記録する。 / Authenticated, persistent, resumable state history / 认证、持久化、可恢复的状态历史。

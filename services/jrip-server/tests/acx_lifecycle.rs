@@ -285,6 +285,8 @@ async fn independent_acx_schemas_and_signed_terminal_profiles_reject_tampering()
                 .complete_with_artifacts(
                     job,
                     &[rip_core::Artifact {
+                        source_page: None,
+                        source_page_count: None,
                         page: 1,
                         name: "page-000001.tiff".into(),
                         media_type: "image/tiff".into(),

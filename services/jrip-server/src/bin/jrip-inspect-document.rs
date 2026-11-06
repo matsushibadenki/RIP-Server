@@ -46,6 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("document_too_large".into());
     }
     let manifest = rip_core::Manifest {
+        page_ranges: Default::default(),
         name: "inspection".into(),
         format: rip_core::DocumentFormat::Pdf,
         dpi: 72,

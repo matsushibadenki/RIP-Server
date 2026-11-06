@@ -26,14 +26,16 @@ jobs:
           echo "/tmp/jrip-acx-validator/bin" >> "$GITHUB_PATH"
           /tmp/jrip-acx-validator/bin/python -m unittest discover -s tests/acx -p 'test_*.py' -v
           node --version
-      - name: Test source ICC declaration analyzer
+      - name: Test source ICC declarations and PDF font policy
         run: |
           /tmp/jrip-acx-validator/bin/pip install -r adapters/source_profiles/requirements.txt
           python3 -m unittest discover -s adapters/source_profiles -p 'test_*.py' -v
+          python3 -m unittest discover -s adapters -p 'test_font_policy.py' -v
       - name: Verify owned font fixture reproducibility
         run: |
           /tmp/jrip-acx-validator/bin/pip install -r tests/corpus/fonts/requirements.txt
           /tmp/jrip-acx-validator/bin/python tests/corpus/fonts/generate.py --check
+          /tmp/jrip-acx-validator/bin/python tests/corpus/multilingual/generate.py --check
       - name: Install operator-console browser test dependencies
         run: |
           npm ci --prefix tests/ui --ignore-scripts --no-audit --no-fund

@@ -2,7 +2,11 @@
 
 [開発仕様書](docs/RIP-Server開発仕様書.md)に基づく、ローカル／エッジ向けRIPサーバーの初期実装です。
 現在は **PDF / PS / EPSの受付 → 永続ジョブ管理 → 隔離MuPDF / Ghostscript → TIFFファイル出力** を提供します。
-仕様書全体のMVP 1はまだ完成していません。実機への印刷、PWG Raster、IPPS、独立したICC処理、Web UIは未実装です。PDF限定のIPP受付と任意のLAN広告は実験段階です。
+MVP 1全体の受入検証は継続中です。実装済み機能・テスト根拠・未完了項目は[ROADMAP](docs/ROADMAP.md)を参照してください。操作画面は `/console` で提供しています。
+
+MVP acceptance is ongoing; see the roadmap for implemented features, verification evidence and remaining work. The operator console is available at `/console`.
+
+MVP整体验收仍在进行，请参阅路线图中的已实现功能、验证依据及剩余工作。操作界面位于 `/console`。
 
 ## 起動
 

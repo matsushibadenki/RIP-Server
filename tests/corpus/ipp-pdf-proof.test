@@ -8,6 +8,7 @@
  ATTR uri printer-uri $uri
  STATUS successful-ok
  EXPECT document-format-supported WITH-VALUE application/pdf
+ EXPECT page-ranges-supported OF-TYPE boolean WITH-VALUE true
  EXPECT printer-name
 }
 {

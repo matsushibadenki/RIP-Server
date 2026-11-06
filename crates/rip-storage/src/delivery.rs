@@ -10,6 +10,10 @@ pub struct DeliveryTicket {
         skip_serializing_if = "rip_core::print::single_copy"
     )]
     pub copies: u32,
+    #[serde(default, skip_serializing_if = "rip_core::print::Sides::is_simplex")]
+    pub sides: rip_core::print::Sides,
+    #[serde(default, skip_serializing_if = "rip_core::print::SheetBack::is_normal")]
+    pub sheet_back: rip_core::print::SheetBack,
     #[serde(default, skip_serializing_if = "rip_core::pages::PageRanges::is_all")]
     pub page_ranges: rip_core::pages::PageRanges,
     #[serde(default)]
@@ -76,6 +80,61 @@ async fn event(
     Ok(())
 }
 impl Repository {
+    pub async fn source_deliveries(
+        &self,
+        source: Uuid,
+        limit: u32,
+        before: Option<&str>,
+    ) -> Result<serde_json::Value, StorageError> {
+        if !(1..=100).contains(&limit) {
+            return Err(StorageError::Conflict);
+        }
+        let cursor = before
+            .map(|s| {
+                if s.len() > 64 {
+                    return Err(StorageError::Conflict);
+                }
+                let (time, id) = s.split_once(':').ok_or(StorageError::Conflict)?;
+                let time = time
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|n| *n >= 0)
+                    .ok_or(StorageError::Conflict)?;
+                Ok((
+                    time,
+                    Uuid::parse_str(id)
+                        .map_err(|_| StorageError::Conflict)?
+                        .to_string(),
+                ))
+            })
+            .transpose()?;
+        let mut sql="SELECT payload,created_at FROM deliveries WHERE json_extract(payload,'$.ticket.sourceJob')=?".to_string();
+        if cursor.is_some() {
+            sql.push_str(" AND (created_at,id)<(?,?)");
+        }
+        sql.push_str(" ORDER BY created_at DESC,id DESC LIMIT ?");
+        let mut query = sqlx::query(&sql).bind(source.to_string());
+        if let Some((time, id)) = cursor {
+            query = query.bind(time).bind(id);
+        }
+        let rows = query.bind(limit + 1).fetch_all(&self.pool).await?;
+        let more = rows.len() > limit as usize;
+        let mut items = Vec::new();
+        let mut next = None;
+        for row in rows.into_iter().take(limit as usize) {
+            let mut value: serde_json::Value = serde_json::from_str(row.get("payload"))?;
+            let created: i64 = row.get("created_at");
+            value["createdAt"] = serde_json::json!(created);
+            next = Some(format!(
+                "{created}:{}",
+                value["id"].as_str().ok_or(StorageError::Conflict)?
+            ));
+            items.push(value);
+        }
+        Ok(
+            serde_json::json!({"schemaVersion":1,"deliveries":items,"limit":limit,"hasMore":more,"nextBefore":if more{next}else{None}}),
+        )
+    }
     pub async fn enqueue_delivery(
         &self,
         id: Uuid,
@@ -108,7 +167,8 @@ impl Repository {
         approval: Option<Uuid>,
         contract: Option<serde_json::Value>,
     ) -> Result<Delivery, StorageError> {
-        if !(1..=rip_core::print::MAX_DELIVERY_COPIES).contains(&ticket.copies)
+        if (ticket.sides.is_simplex() && !ticket.sheet_back.is_normal())
+            || !(1..=rip_core::print::MAX_DELIVERY_COPIES).contains(&ticket.copies)
             || ticket.printer_id.is_empty()
             || ticket.printer_id.len() > 128
             || !ticket
@@ -158,10 +218,17 @@ impl Repository {
             let revision = contract["ticket"]["sourceRevision"]
                 .as_i64()
                 .ok_or(StorageError::Conflict)?;
-            if contract["ticket"]["copies"] != delivery.ticket.copies
+            if contract["ticket"]["sides"].as_str().unwrap_or("one-sided")
+                != delivery.ticket.sides.as_str()
+                || contract["ticket"]["copies"] != delivery.ticket.copies
                 || contract["ticket"]["jobId"] != delivery.ticket.source_job.to_string()
                 || contract["ticket"]["attemptId"] != id.to_string()
                 || contract["ticket"]["delivery"] != serde_json::to_value(&delivery.ticket)?
+            {
+                return Err(StorageError::Conflict);
+            }
+            if !delivery.ticket.sides.is_simplex()
+                && contract["ticket"]["sheetBack"] != delivery.ticket.sheet_back.as_str()
             {
                 return Err(StorageError::Conflict);
             }
@@ -198,9 +265,9 @@ impl Repository {
             }
         }
         if let Some(approval) = approval {
-            let allowed:i64=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM execution_approvals WHERE id=? AND revoked=0 AND expires_at>? AND json_extract(payload,'$.requestId')=? AND json_extract(payload,'$.jobId')=? AND json_extract(payload,'$.printerId')=? AND json_extract(payload,'$.media')=? AND json_extract(payload,'$.colorAttemptId') IS ? AND coalesce(json_extract(payload,'$.copies'),1)=? AND json(coalesce(json_extract(payload,'$.pageRanges'),'[]'))=json(?))")
+            let allowed:i64=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM execution_approvals WHERE id=? AND revoked=0 AND expires_at>? AND json_extract(payload,'$.requestId')=? AND json_extract(payload,'$.jobId')=? AND json_extract(payload,'$.printerId')=? AND json_extract(payload,'$.media')=? AND json_extract(payload,'$.colorAttemptId') IS ? AND coalesce(json_extract(payload,'$.sides'),'one-sided')=? AND coalesce(json_extract(payload,'$.copies'),1)=? AND json(coalesce(json_extract(payload,'$.pageRanges'),'[]'))=json(?))")
                 .bind(approval.to_string()).bind(now()).bind(id.to_string()).bind(delivery.ticket.source_job.to_string())
-                .bind(&delivery.ticket.printer_id).bind(&delivery.ticket.media).bind(delivery.ticket.color_attempt_id.map(|id|id.to_string())).bind(delivery.ticket.copies).bind(serde_json::to_string(&delivery.ticket.page_ranges)?).fetch_one(&mut *tx).await?;
+                .bind(&delivery.ticket.printer_id).bind(&delivery.ticket.media).bind(delivery.ticket.color_attempt_id.map(|id|id.to_string())).bind(delivery.ticket.sides.as_str()).bind(delivery.ticket.copies).bind(serde_json::to_string(&delivery.ticket.page_ranges)?).fetch_one(&mut *tx).await?;
             if allowed != 1 {
                 return Err(StorageError::Conflict);
             }
@@ -464,6 +531,7 @@ mod tests {
         let source = Job {
             id: Uuid::new_v4(),
             manifest: Manifest {
+                page_ranges: Default::default(),
                 name: "proof.pdf".into(),
                 format: DocumentFormat::Pdf,
                 dpi: 300,
@@ -483,6 +551,8 @@ mod tests {
         repo.insert(&source).await.unwrap();
         let ticket = DeliveryTicket {
             page_ranges: Default::default(),
+            sides: Default::default(),
+            sheet_back: Default::default(),
             copies: 1,
             source_job: source.id,
             color_attempt_id: None,
@@ -537,6 +607,42 @@ mod tests {
         );
         ticket.page_ranges = Default::default();
         assert!(repo.enqueue_delivery(id, ticket).await.is_err());
+    }
+    #[tokio::test]
+    async fn sides_preserve_legacy_json_and_are_atomically_approval_bound() {
+        let (_dir, repo, mut ticket) = fixture().await;
+        let old = serde_json::to_value(&ticket).unwrap();
+        assert!(old.get("sides").is_none());
+        assert_eq!(
+            serde_json::from_value::<DeliveryTicket>(old).unwrap().sides,
+            rip_core::print::Sides::OneSided
+        );
+        let id = Uuid::new_v4();
+        let approval = Uuid::new_v4();
+        let mut payload = serde_json::json!({"requestId":id,"jobId":ticket.source_job,"printerId":ticket.printer_id,"media":ticket.media,"colorAttemptId":null});
+        repo.save_approval(approval, &payload, now() + 300)
+            .await
+            .unwrap();
+        ticket.sides = rip_core::print::Sides::TwoSidedLongEdge;
+        assert!(
+            repo.enqueue_approved_delivery(id, ticket.clone(), Some(approval))
+                .await
+                .is_err()
+        );
+        payload["sides"] = serde_json::json!(ticket.sides);
+        let exact = Uuid::new_v4();
+        repo.save_approval(exact, &payload, now() + 300)
+            .await
+            .unwrap();
+        repo.enqueue_approved_delivery(id, ticket.clone(), Some(exact))
+            .await
+            .unwrap();
+        ticket.sides = rip_core::print::Sides::TwoSidedShortEdge;
+        assert!(
+            repo.enqueue_approved_delivery(id, ticket, Some(exact))
+                .await
+                .is_err()
+        );
     }
     #[tokio::test]
     async fn copies_preserve_legacy_json_and_atomic_approval_and_replay_guards() {

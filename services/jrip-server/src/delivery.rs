@@ -188,6 +188,8 @@ pub(crate) struct Request {
     request_id: Uuid,
     #[serde(default = "rip_core::print::default_copies")]
     copies: u32,
+    #[serde(default, skip_serializing_if = "rip_core::print::Sides::is_simplex")]
+    sides: rip_core::print::Sides,
     #[serde(default)]
     page_ranges: rip_core::pages::PageRanges,
     printer_id: String,
@@ -218,13 +220,37 @@ fn profile<'a>(
         .ok_or(bad("media_not_configured"))?;
     Ok((p, m))
 }
+fn raster_pages(
+    bytes: &[u8],
+    sides: rip_core::print::Sides,
+    sheet_back: rip_core::print::SheetBack,
+) -> Result<Vec<rip_raster::PwgPage>, rip_raster::Error> {
+    match sides {
+        rip_core::print::Sides::OneSided => rip_raster::inspect(bytes),
+        rip_core::print::Sides::TwoSidedLongEdge => rip_raster::inspect_duplex(
+            bytes,
+            rip_raster::DuplexLayout {
+                binding: rip_raster::DuplexBinding::LongEdge,
+                sheet_back,
+            },
+        ),
+        rip_core::print::Sides::TwoSidedShortEdge => rip_raster::inspect_duplex(
+            bytes,
+            rip_raster::DuplexLayout {
+                binding: rip_raster::DuplexBinding::ShortEdge,
+                sheet_back,
+            },
+        ),
+    }
+}
 fn validate(bytes: &[u8], ticket: &DeliveryTicket, media: &Media) -> Result<(), ApiError> {
     if bytes.len() as u64 != ticket.artifact_bytes
         || format!("{:x}", Sha256::digest(bytes)) != ticket.artifact_sha256
     {
         return Err(bad("delivery_artifact_mismatch"));
     }
-    let pages = rip_raster::inspect(bytes).map_err(|_| bad("invalid_pwg_raster"))?;
+    let pages = raster_pages(bytes, ticket.sides, ticket.sheet_back)
+        .map_err(|_| bad("invalid_pwg_raster"))?;
     if ticket
         .page_ranges
         .selected_count()
@@ -342,6 +368,8 @@ async fn prepare_impl(
     let mut ticket = DeliveryTicket {
         page_ranges: req.page_ranges,
         copies: req.copies,
+        sides: req.sides,
+        sheet_back: Default::default(),
         source_job: id,
         color_attempt_id: req.color_attempt_id,
         printer_id: req.printer_id,
@@ -380,7 +408,8 @@ async fn prepare_impl(
         None
     };
     if !preview && let Ok(existing) = app.repo.delivery(req.request_id).await {
-        if existing.ticket.page_ranges == ticket.page_ranges
+        if existing.ticket.sides == ticket.sides
+            && existing.ticket.page_ranges == ticket.page_ranges
             && existing.ticket.copies == ticket.copies
             && existing.ticket.source_job == id
             && existing.ticket.printer_id == ticket.printer_id
@@ -423,6 +452,17 @@ async fn prepare_impl(
     capabilities
         .check_copies(ticket.copies)
         .map_err(|_| bad("unsupported_copies"))?;
+    capabilities
+        .check_sides(ticket.sides)
+        .map_err(|_| bad("unsupported_sides_or_sheet_back"))?;
+    if !ticket.sides.is_simplex() {
+        ticket.sheet_back = capabilities
+            .sheet_back
+            .as_deref()
+            .ok_or(bad("unsupported_sides_or_sheet_back"))?
+            .parse()
+            .map_err(|_| bad("unsupported_sides_or_sheet_back"))?;
+    }
     let artifacts: Vec<rip_core::Artifact> =
         serde_json::from_value(if let Some(result) = &color_result {
             result["artifacts"].clone()
@@ -440,10 +480,11 @@ async fn prepare_impl(
     {
         return Err(bad("invalid_artifacts"));
     }
-    let selected_indices = ticket
-        .page_ranges
-        .indices(artifacts.len() as u32)
-        .map_err(|_| bad("page_range_out_of_bounds"))?;
+    let (source_pages, source_total) =
+        rip_core::pages::source_mapping(&job.manifest, &artifacts).map_err(|error| bad(error.0))?;
+    let selected_indices =
+        rip_core::pages::delivery_indices(&ticket.page_ranges, &source_pages, source_total)
+            .map_err(|error| bad(error.0))?;
     if selected_indices
         .iter()
         .map(|&index| &artifacts[index])
@@ -467,6 +508,8 @@ async fn prepare_impl(
             artifacts::verified_snapshot(&app, id, &a.name).await?
         });
     }
+    let sides = ticket.sides;
+    let sheet_back = ticket.sheet_back;
     let dpi = ticket.dpi;
     let media_name = ticket.media.clone();
     let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
@@ -476,14 +519,37 @@ async fn prepare_impl(
             .map(|(_, tmp, _, _)| tmp.path().to_path_buf())
             .collect();
         let mut bytes = Vec::new();
-        rip_raster::convert_registered(
-            &paths,
-            &rip_raster::Options { dpi, color },
-            expected_icc.as_deref(),
-            &mut bytes,
-        )
+        let options = rip_raster::Options { dpi, color };
+        match sides {
+            rip_core::print::Sides::OneSided => rip_raster::convert_registered(
+                &paths,
+                &options,
+                expected_icc.as_deref(),
+                &mut bytes,
+            ),
+            rip_core::print::Sides::TwoSidedLongEdge => rip_raster::convert_duplex(
+                &paths,
+                &options,
+                expected_icc.as_deref(),
+                rip_raster::DuplexLayout {
+                    binding: rip_raster::DuplexBinding::LongEdge,
+                    sheet_back,
+                },
+                &mut bytes,
+            ),
+            rip_core::print::Sides::TwoSidedShortEdge => rip_raster::convert_duplex(
+                &paths,
+                &options,
+                expected_icc.as_deref(),
+                rip_raster::DuplexLayout {
+                    binding: rip_raster::DuplexBinding::ShortEdge,
+                    sheet_back,
+                },
+                &mut bytes,
+            ),
+        }
         .map_err(|e| e.to_string())?;
-        for p in rip_raster::inspect(&bytes).map_err(|e| e.to_string())? {
+        for p in raster_pages(&bytes, sides, sheet_back).map_err(|e| e.to_string())? {
             bytes[p.offset + 1732..p.offset + 1732 + media_name.len()]
                 .copy_from_slice(media_name.as_bytes());
         }
@@ -498,12 +564,20 @@ async fn prepare_impl(
     let mut physical = serde_json::json!({"schemaVersion":1,"version":"0.1","jobId":id,"attemptId":req.request_id,
         "sourceRevision":req.expected_revision,"sourceSha256":job.source_sha256,"manifest":job.manifest,"selectedEngine":job.selected_engine,
         "delivery":ticket,"printerConfigSha256":format!("{:x}",Sha256::digest(serde_json::to_vec(printer).map_err(internal)?)),
-        "copies":ticket.copies,"sides":"one-sided","pageSelection":ticket.page_ranges.label(),"numberUp":1,"imposition":"none",
+        "copies":ticket.copies,"sides":ticket.sides,"pageSelection":ticket.page_ranges.label(),"numberUp":1,"imposition":"none",
         "completionMeaning":"device-confirmed","approvalRequired":app.require_print_approval});
-    if !ticket.page_ranges.is_all() {
-        physical["sourcePageCount"] = serde_json::json!(artifacts.len());
-        physical["selectedSourcePages"] =
-            serde_json::json!(selected_indices.iter().map(|i| i + 1).collect::<Vec<_>>());
+    if !ticket.sides.is_simplex() {
+        physical["sheetBack"] = serde_json::json!(ticket.sheet_back);
+    }
+    if !ticket.page_ranges.is_all() || !job.manifest.page_ranges.is_all() {
+        physical["sourcePageCount"] = serde_json::json!(source_total);
+        physical["renderedPageCount"] = serde_json::json!(artifacts.len());
+        physical["selectedSourcePages"] = serde_json::json!(
+            selected_indices
+                .iter()
+                .map(|i| source_pages[*i])
+                .collect::<Vec<_>>()
+        );
         physical["selectedPageCount"] = serde_json::json!(selected_indices.len());
     }
     let contract = serde_json::json!({"ticket":physical,"ticketSha256":format!("{:x}",Sha256::digest(serde_json::to_vec(&physical).map_err(internal)?))});
@@ -556,6 +630,37 @@ pub(crate) async fn contract(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     authorize(&app, &headers, "jobs:read")?;
     Ok(Json(app.repo.delivery_contract(id).await?))
+}
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ListQuery {
+    limit: Option<u32>,
+    before: Option<String>,
+}
+pub(crate) async fn source_list(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    query: Result<Query<ListQuery>, axum::extract::rejection::QueryRejection>,
+) -> Result<impl IntoResponse, ApiError> {
+    authorize(&app, &headers, "jobs:read")?;
+    let Query(query) = query.map_err(|_| bad("invalid_delivery_query"))?;
+    app.repo.get(id).await?;
+    let result = app
+        .repo
+        .source_deliveries(id, query.limit.unwrap_or(50), query.before.as_deref())
+        .await
+        .map_err(|e| match e {
+            StorageError::Conflict => bad("invalid_delivery_query"),
+            e => ApiError::from(e),
+        })?;
+    Ok((
+        [
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+            (axum::http::header::VARY, "Authorization"),
+        ],
+        Json(result),
+    ))
 }
 pub(crate) async fn detail(
     State(app): State<App>,
@@ -682,13 +787,17 @@ pub async fn tick(app: &App) -> Result<(), StorageError> {
                 validate(&bytes, &d.ticket, &media)
                     .map_err(|_| rip_printer::Error::InvalidInput)?;
                 printer
-                    .submit_pwg_with_copies(
+                    .submit_pwg_with_settings(
                         &format!("J-RIP {}", d.id),
                         bytes,
                         d.ticket.dpi,
                         &d.ticket.document_type,
                         &d.ticket.media,
-                        d.ticket.copies,
+                        rip_printer::PwgSettings {
+                            copies: d.ticket.copies,
+                            sides: d.ticket.sides,
+                            sheet_back: d.ticket.sheet_back,
+                        },
                     )
                     .await
             }

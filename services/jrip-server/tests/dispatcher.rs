@@ -13,6 +13,7 @@ async fn dispatcher_only_starts_queued_jobs_and_stops_if_worker_does_not_claim()
     let job = Job {
         id: Uuid::new_v4(),
         manifest: Manifest {
+            page_ranges: Default::default(),
             name: "proof.pdf".into(),
             format: DocumentFormat::Pdf,
             dpi: 600,
@@ -65,6 +66,7 @@ async fn dispatcher_only_fails_its_own_exited_worker() {
     let job = Job {
         id: Uuid::new_v4(),
         manifest: Manifest {
+            page_ranges: Default::default(),
             name: "proof.pdf".into(),
             format: DocumentFormat::Pdf,
             dpi: 600,

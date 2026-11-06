@@ -169,7 +169,7 @@ impl Session {
                 )
             };
             let body = if name == "print_create_pipeline" {
-                json!({"requestId":args["requestId"],"expectedRevision":args["expectedRevision"],"printerId":args["printerId"],"media":args["media"],"copies":args["copies"].as_u64().unwrap_or(1),"pageRanges":args.get("pageRanges").cloned().unwrap_or(json!([])),"color":args["color"]})
+                json!({"requestId":args["requestId"],"expectedRevision":args["expectedRevision"],"printerId":args["printerId"],"media":args["media"],"copies":args["copies"].as_u64().unwrap_or(1),"sides":args["sides"].as_str().unwrap_or("one-sided"),"pageRanges":args.get("pageRanges").cloned().unwrap_or(json!([])),"color":args["color"]})
             } else if name == "print_resume_pipeline" {
                 json!({"expectedRevision":args["expectedRevision"],"approvalId":args["approvalId"]})
             } else {
@@ -227,7 +227,7 @@ impl Session {
                 )
             };
             let body = if name != "print_cancel_delivery" {
-                json!({"requestId":args["requestId"],"printerId":args["printerId"],"media":args["media"],"copies":args["copies"].as_u64().unwrap_or(1),"pageRanges":args.get("pageRanges").cloned().unwrap_or(json!([])),"expectedRevision":args["expectedRevision"],"colorAttemptId":args["colorAttemptId"],"expectedTicketSha256":args["expectedTicketSha256"]})
+                json!({"requestId":args["requestId"],"printerId":args["printerId"],"media":args["media"],"copies":args["copies"].as_u64().unwrap_or(1),"sides":args["sides"].as_str().unwrap_or("one-sided"),"pageRanges":args.get("pageRanges").cloned().unwrap_or(json!([])),"expectedRevision":args["expectedRevision"],"colorAttemptId":args["colorAttemptId"],"expectedTicketSha256":args["expectedTicketSha256"]})
             } else {
                 json!({"expectedRevision":args["expectedRevision"]})
             };
@@ -862,12 +862,14 @@ fn tools() -> Vec<Value> {
         ("print_validate_ticket","Validate raster ticket settings / ラスター契約設定を検証 / 验证栅格契约设置"),
         ("color_get_capabilities","Get explicit ICC capabilities / ICC処理能力取得 / 获取ICC处理能力"),
         ("color_apply","Queue explicit ICC processing / ICC色処理を予約 / 排队显式ICC处理"),
+        ("color_list_attempts","List bounded source-job color summaries / 原稿の色変換一覧 / 原稿色彩转换摘要列表"),
         ("color_get_attempt","Get color attempt and reports / 色処理とレポート照会 / 查询颜色尝试及报告"),
         ("color_get_events","Resume color page progress / 色処理のページ進捗 / 恢复颜色页进度"),
         ("color_cancel_attempt","Cancel queued color attempt / 待機中の色処理取消 / 取消待处理颜色尝试"),
         ("color_get_profile","Describe registered ICC / 登録ICC照会 / 查询已注册ICC"),
         ("print_get_printer","Get live printer capabilities / 実機能力照会 / 获取设备实时能力"),
         ("print_list_printers","List configured destinations / 出力先一覧 / 已配置目标"),
+        ("print_list_deliveries","List source-job output history / 原稿の出力履歴 / 原稿输出记录"),
         ("print_get_delivery","Get delivery state / 実機投递状態 / 获取投递状态"),
         ("print_deliver_job","Queue physical output / 実機出力を予約 / 排队实体输出"),
         ("print_cancel_delivery","Cancel delivery / 実機出力取消 / 取消投递"),
@@ -905,6 +907,7 @@ fn tools() -> Vec<Value> {
         if matches!(name,"print_get_pipeline_ticket"|"print_get_pipeline_timeline"|"print_get_pipeline_events"|"print_get_pipeline"|"print_resume_pipeline"|"print_cancel_pipeline") {properties["pipelineId"]=json!({"type":"string","format":"uuid"});required.push("pipelineId");}
         if matches!(name,"print_create_pipeline"|"print_resume_pipeline"|"print_cancel_pipeline") {properties["expectedRevision"]=json!({"type":"integer","minimum":0});required.push("expectedRevision");}
         if matches!(name,"rip_delete_job"|"print_revoke_receipt_key") {properties["approvalId"]=json!({"type":"string","format":"uuid","description":"One-use approval issued by a separate administrator / 別の管理者が発行した1回限りの承認 / 另一管理员签发的一次性审批"});}
+        if matches!(name,"print_deliver_job"|"print_preview_delivery"|"print_create_pipeline") {properties["sides"]=json!({"type":"string","enum":["one-sided","two-sided-long-edge","two-sided-short-edge"],"default":"one-sided","description":"Device binding; duplex requires a supported sheet-back mode / 実機とじ方向、両面は対応裏面方式が必要 / 设备装订，双面需支持的背面方式"});}
         if matches!(name,"print_deliver_job"|"print_preview_delivery"|"print_create_pipeline") {properties["copies"]=json!({"type":"integer","minimum":1,"maximum":999,"default":1,"description":"Device-side copies / 実機出力部数 / 实体输出份数"});}
         if matches!(name,"print_deliver_job"|"print_preview_delivery"|"print_create_pipeline") {properties["pageRanges"]=json!({"type":"array","maxItems":100,"items":{"type":"object","additionalProperties":false,"required":["first","last"],"properties":{"first":{"type":"integer","minimum":1,"maximum":100},"last":{"type":"integer","minimum":1,"maximum":100}}},"description":"Rendered page ranges, ascending and non-overlapping; empty means all / RIP済みページの昇順範囲、空は全ページ / 已渲染页码升序范围，空为全部"});}
         if name=="print_resume_pipeline" {properties["approvalId"]=json!({"type":"string","format":"uuid"});}
@@ -931,6 +934,12 @@ fn tools() -> Vec<Value> {
             properties["expectedRevision"]=json!({"type":"integer","minimum":0});required.push("expectedRevision");
             for key in ["inputProfileSha256","outputProfileSha256"] {properties[key]=json!({"type":"string","format":"sha256","pattern":"^[0-9a-f]{64}$"});}required.push("inputProfileSha256");
             properties["policy"]=json!({"type":"object","additionalProperties":false,"required":["schemaVersion","inputColor","outputColor","intent","blackPointCompensation","blackPreservation"],"properties":{"schemaVersion":{"type":"integer","const":1},"inputColor":{"type":"string","enum":["rgb","cmyk","gray"]},"outputColor":{"type":"string","enum":["rgb","cmyk","gray"]},"intent":{"type":"string","enum":["perceptual","relative_colorimetric","absolute_colorimetric","saturation"]},"blackPointCompensation":{"type":"boolean"},"blackPreservation":{"type":"string","enum":["none","k_only","k_plane"]},"tacPercent":{"type":["integer","null"],"minimum":100,"maximum":400}},"description":"CMYK preservation excludes absolute intent; DeviceLink uses header intent and no extra BPC / DeviceLinkはヘッダーの意図を使い追加BPCを禁止 / DeviceLink使用头部意图且禁止额外BPC"});required.push("policy");
+        }
+        if matches!(name,"color_list_attempts"|"print_list_deliveries") {
+            properties["jobId"]=json!({"type":"string","format":"uuid"});required.push("jobId");
+            properties["limit"]=json!({"type":"integer","minimum":1,"maximum":100,"default":50});
+            properties["before"]=json!({"type":"string","format":"creation-cursor","maxLength":64,"description":"Opaque nextBefore from a previous list response / 前ページのnextBefore / 上一页返回的nextBefore"});
+            if name=="color_list_attempts" { properties["state"]=json!({"type":"string","enum":["QUEUED","RUNNING","COMPLETED","FAILED","CANCELLED"]}); }
         }
         if matches!(name,"color_get_attempt"|"color_get_events"|"color_cancel_attempt") {properties["colorAttemptId"]=json!({"type":"string","format":"uuid"});required.push("colorAttemptId");}
         if name=="color_cancel_attempt" {properties["expectedRevision"]=json!({"type":"integer","minimum":0});required.push("expectedRevision");}
@@ -991,6 +1000,22 @@ fn validate(name: &str, args: &Value) -> Result<(), &'static str> {
                 {
                     return Err("Invalid receipt key cursor");
                 }
+                if matches!(
+                    property["format"].as_str(),
+                    Some("color-cursor" | "creation-cursor")
+                ) {
+                    let valid = s.len() <= 64
+                        && s.split_once(':').is_some_and(|(time, id)| {
+                            time.parse::<i64>()
+                                .ok()
+                                .filter(|n| *n >= 0)
+                                .zip(Uuid::parse_str(id).ok())
+                                .is_some_and(|(time, id)| format!("{time}:{id}") == s)
+                        });
+                    if !valid {
+                        return Err("Invalid color cursor");
+                    }
+                }
                 if key == "printerId"
                     && (s.len() > 128
                         || !s
@@ -1030,6 +1055,24 @@ fn tool_path(name: &str, args: &Value) -> String {
     let id = args["jobId"].as_str().unwrap_or("");
     match name {
         "color_get_capabilities" => "/api/v1/color/capabilities".into(),
+        "color_list_attempts" | "print_list_deliveries" => {
+            let mut path = format!(
+                "/api/v1/jobs/{id}/{}?limit={}",
+                if name == "color_list_attempts" {
+                    "color-attempts"
+                } else {
+                    "deliveries"
+                },
+                args["limit"].as_i64().unwrap_or(50)
+            );
+            if let Some(before) = args["before"].as_str() {
+                path.push_str(&format!("&before={before}"));
+            }
+            if let Some(state) = args["state"].as_str() {
+                path.push_str(&format!("&state={state}"));
+            }
+            path
+        }
         "color_get_attempt" => format!(
             "/api/v1/color/attempts/{}",
             args["colorAttemptId"].as_str().unwrap()

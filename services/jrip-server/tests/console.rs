@@ -21,6 +21,11 @@ async fn console_assets_are_same_origin_static_and_do_not_grant_api_access() {
             "x-jrip-expected-revision",
         ),
         ("/console/style.css", "text/css", "@media"),
+        (
+            "/console/delivery.js",
+            "text/javascript",
+            "expectedTicketSha256",
+        ),
     ] {
         let response = app
             .clone()

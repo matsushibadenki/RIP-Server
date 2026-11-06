@@ -66,6 +66,7 @@ pub struct ValidatedRender {
     pub rendered: RenderedDocument,
     pub source_bytes: u64,
     pub strict_pdf: bool,
+    pub font_policy: Option<serde_json::Value>,
     pub profile_analysis: serde_json::Value,
 }
 pub async fn render(
@@ -80,6 +81,7 @@ pub async fn render(
     let source = snapshot.directory.join("document");
     let strict_pdf = job.manifest.format == DocumentFormat::Pdf;
     let result = async {
+        let mut font_policy = None;
         let inspected = if strict_pdf {
             let report = rip_interpreter::inspect_pdf_attempt_with_image(
                 &source,
@@ -87,6 +89,7 @@ pub async fn render(
                 &engine.mupdf.sandbox.image,
             )
             .await?;
+            font_policy = Some(report["fontPolicy"].clone());
             Some(
                 report["pages"]
                     .as_array()
@@ -109,23 +112,38 @@ pub async fn render(
                 "source_profile_integrity_mismatch",
             ));
         }
+        let selected_count = if let Some(total) = inspected {
+            Some(
+                job.manifest
+                    .page_ranges
+                    .indices(total as u32)
+                    .map_err(|_| InterpreterError::Rejected("page_range_out_of_bounds"))?
+                    .len() as u32,
+            )
+        } else {
+            None
+        };
         let run = job
             .worker_run_id
             .ok_or(InterpreterError::Rejected("missing_worker_run"))?;
         let rendered = engine
             .render_with_progress(&source, output, &job.manifest, |completed| async move {
-                repo.record_render_progress(job.id, run, completed, inspected.map(|n| n as u32))
+                repo.record_render_progress(job.id, run, completed, selected_count)
                     .await
                     .map_err(|_| InterpreterError::Rejected("progress_record_failed"))
             })
             .await?;
-        if inspected.is_some_and(|count| count != rendered.pages.len()) {
+        if selected_count.is_some_and(|count| count as usize != rendered.pages.len())
+            || (!job.manifest.page_ranges.is_all()
+                && rendered.source_page_count != inspected.map(|n| n as u32))
+        {
             return Err(InterpreterError::Rejected("source_page_count_mismatch"));
         }
         Ok(ValidatedRender {
             rendered,
             source_bytes: snapshot.bytes,
             strict_pdf,
+            font_policy,
             profile_analysis,
         })
     }

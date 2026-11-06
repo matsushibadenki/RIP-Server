@@ -1,5 +1,5 @@
 mod page_stream;
-use page_stream::read_page_stream;
+use page_stream::read_selected_page_stream;
 use rip_core::{ColorMode, DocumentFormat, EngineKind, Manifest};
 use std::{
     path::{Path, PathBuf},
@@ -20,6 +20,7 @@ pub enum InterpreterError {
 }
 pub struct RenderedDocument {
     pub pages: Vec<PathBuf>,
+    pub source_page_count: Option<u32>,
 }
 pub trait DocumentInterpreter: Send + Sync {
     fn render(
@@ -102,7 +103,10 @@ impl SandboxConfig {
             "--ulimit".into(),
             format!(
                 "fsize={0}:{0}",
-                self.max_spool_bytes / u64::from(self.max_pages + 1)
+                // A full-size page must fit even when many pages are allowed.
+                // Keep an independent 64 MiB sample + 1 MiB container ceiling;
+                // tmpfs and the frame reader still enforce the whole-job budget.
+                self.max_spool_bytes.min(65 * 1024 * 1024)
             ),
             "--user".into(),
             user.into(),
@@ -123,6 +127,15 @@ impl SandboxConfig {
                 "-dBATCH".into(),
                 "-dNOPAUSE".into(),
                 "-dQUIET".into(),
+                // Unknown PostScript fonts must not silently become Courier.
+                // Keep the packaged Fontmap, but disable platform/path discovery.
+                "-dNOFONTPATH".into(),
+                "-dNOPLATFONTS".into(),
+                "-dNONATIVEFONTMAP".into(),
+                "-dPDFNOCIDFALLBACK".into(),
+                "-dPDFSTOPONERROR".into(),
+                "-I/usr/local/lib/jrip/strict-resources".into(),
+                "-sSUBSTFONT=JRIP-Missing-Font-Rejected".into(),
                 "-sstdout=%stderr".into(),
                 "-dNumRenderingThreads=1".into(),
                 "-dMaxBitmap=16777216".into(),
@@ -132,6 +145,12 @@ impl SandboxConfig {
                 format!("-r{}", manifest.dpi),
                 format!("-dLastPage={}", self.max_pages + 1),
                 "-sOutputFile=/output/page-%06d.tiff".into(),
+                match manifest.format {
+                    DocumentFormat::Pdf => "--jrip-format=pdf",
+                    DocumentFormat::Postscript => "--jrip-format=postscript",
+                    DocumentFormat::Eps => "--jrip-format=eps",
+                }
+                .into(),
                 "-f".into(),
                 "/input/document".into(),
             ]),
@@ -145,6 +164,9 @@ impl SandboxConfig {
                 .into(),
                 (self.max_pages + 1).to_string(),
             ]),
+        }
+        if !manifest.page_ranges.is_all() {
+            args.push(manifest.page_ranges.argument());
         }
         Ok(args)
     }
@@ -189,11 +211,12 @@ impl SandboxConfig {
                 .stdout
                 .take()
                 .ok_or(InterpreterError::Rejected("missing_output"))?;
-            let pages = read_page_stream(
+            let rendered = read_selected_page_stream(
                 &mut stdout,
                 &output,
                 self.max_pages,
                 self.max_spool_bytes,
+                &manifest.page_ranges,
                 &mut progress,
             )
             .await?;
@@ -201,7 +224,7 @@ impl SandboxConfig {
             if !status.success() {
                 return Err(InterpreterError::Rejected("interpreter_failed"));
             }
-            Ok::<_, InterpreterError>(RenderedDocument { pages })
+            Ok::<_, InterpreterError>(rendered)
         })
         .await;
         if !matches!(&result, Ok(Ok(_))) {
@@ -437,6 +460,7 @@ async fn inspect_script(
         max_spool_bytes: 1024 * 1024,
     };
     let manifest = Manifest {
+        page_ranges: Default::default(),
         name: "inspection".into(),
         format: DocumentFormat::Pdf,
         dpi: 72,
@@ -489,6 +513,8 @@ async fn inspect_script(
             .map_err(|_| InterpreterError::Rejected("invalid_inspection"))?;
         if strict_pdf {
             if value["schemaVersion"] != 1
+                || value["fontPolicy"]["profile"] != "org.jrip.pdf-font-policy-v1"
+                || value["fontPolicy"]["accepted"] != true
                 || value["contentParsed"] != true
                 || value["repaired"] != false
                 || value["encrypted"] != false
@@ -498,6 +524,11 @@ async fn inspect_script(
             {
                 return Err(InterpreterError::Rejected("invalid_inspection"));
             }
+            rip_core::font_usage::validate(
+                &value["fontPolicy"]["runtimeEvidence"],
+                value["pages"].as_array().unwrap().len() as u32,
+            )
+            .map_err(|_| InterpreterError::Rejected("invalid_font_usage"))?;
         } else if value["schemaVersion"] != 1
             || value["profile"] != "org.jrip.source-color-profiles-v1"
             || value["automaticSelection"] != false
@@ -580,8 +611,39 @@ pub async fn cleanup_inspection(id: uuid::Uuid) -> Result<(), InterpreterError> 
 mod tests {
     use super::*;
     #[test]
+    fn page_file_limit_is_independent_of_page_count_and_bounded_by_spool() {
+        let manifest: Manifest = serde_json::from_value(
+            serde_json::json!({"name":"limit","format":"application/pdf","dpi":288}),
+        )
+        .unwrap();
+        for pages in [1, 100] {
+            for (budget, expected) in [
+                (1024 * 1024, "fsize=1048576:1048576"),
+                (1024 * 1024 * 1024, "fsize=68157440:68157440"),
+            ] {
+                let config = SandboxConfig {
+                    max_pages: pages,
+                    max_spool_bytes: budget,
+                    ..Default::default()
+                };
+                let args = config
+                    .arguments(
+                        EngineKind::Ghostscript,
+                        Path::new("/source/doc"),
+                        Path::new("/spool/job"),
+                        &manifest,
+                        "test",
+                        "1000:1000",
+                    )
+                    .unwrap();
+                assert!(args.iter().any(|arg| arg == expected));
+            }
+        }
+    }
+    #[test]
     fn isolation_and_arguments() {
         let m = Manifest {
+            page_ranges: Default::default(),
             name: "-sOutputFile=evil.ps".into(),
             format: rip_core::DocumentFormat::Postscript,
             dpi: 600,
@@ -604,8 +666,17 @@ mod tests {
             "--network=none",
             "--read-only",
             "--cap-drop=ALL",
+            "fsize=68157440:68157440",
             "-dSAFER",
             "-sDEVICE=tiff32nc",
+            "-dNOFONTPATH",
+            "-dNOPLATFONTS",
+            "-dNONATIVEFONTMAP",
+            "-dPDFNOCIDFALLBACK",
+            "-dPDFSTOPONERROR",
+            "-I/usr/local/lib/jrip/strict-resources",
+            "--jrip-format=postscript",
+            "-sSUBSTFONT=JRIP-Missing-Font-Rejected",
             "-dLastPage=101",
         ] {
             assert!(args.iter().any(|arg| arg == option));

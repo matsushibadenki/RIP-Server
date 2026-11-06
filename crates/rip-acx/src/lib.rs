@@ -172,6 +172,7 @@ fn print_intent_schema() -> Value {
             "dpi": {"type": "integer", "minimum": 72, "maximum": 2400, "default": 600},
             "colorMode": {"enum": ["rgb", "cmyk", "gray"], "default": "cmyk"},
             "engine": {"enum": ["auto", "mupdf", "ghostscript"], "default": "auto"},
+            "page_ranges": {"type":"array","maxItems":100,"items":{"type":"object","required":["first","last"],"additionalProperties":false,"properties":{"first":{"type":"integer","minimum":1,"maximum":100},"last":{"type":"integer","minimum":1,"maximum":100}}}},
             "priority": {"type": "integer", "minimum": 0, "maximum": 100, "default": 50}
         },
         "additionalProperties": false

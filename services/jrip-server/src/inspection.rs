@@ -3,6 +3,7 @@ use super::*;
 use serde_json::{Value, json};
 fn manifest() -> Manifest {
     Manifest {
+        page_ranges: Default::default(),
         name: "inspection".into(),
         format: rip_core::DocumentFormat::Pdf,
         dpi: 72,

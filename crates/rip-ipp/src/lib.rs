@@ -164,6 +164,30 @@ impl<'a> Request<'a> {
         let y = u32::from_be_bytes(a.value[4..8].try_into().ok()?);
         (x == y).then_some(x)
     }
+    /// Typed, canonical source ranges shared with REST/PrintIntent rendering.
+    pub fn page_ranges(&self) -> Result<rip_core::pages::RenderPages, u16> {
+        let mut ranges = Vec::new();
+        for attr in self.attributes.iter().filter(|a| a.name == "page-ranges") {
+            if attr.group != 2 || attr.tag != 0x33 || attr.value.len() != 8 {
+                return Err(BAD_REQUEST);
+            }
+            let first = i32::from_be_bytes(attr.value[..4].try_into().unwrap());
+            let last = i32::from_be_bytes(attr.value[4..].try_into().unwrap());
+            if first < 1 || last < first {
+                return Err(BAD_REQUEST);
+            }
+            ranges.push(rip_core::pages::PageRange {
+                first: first as u32,
+                last: last as u32,
+            });
+        }
+        if ranges.is_empty() {
+            return Ok(Default::default());
+        }
+        Ok(rip_core::pages::RenderPages::Ipp {
+            ipp: rip_core::pages::IppPageRanges::new(ranges).map_err(|_| BAD_REQUEST)?,
+        })
+    }
     pub fn wants(&self, name: &str, group_name: &str) -> bool {
         let requested: Vec<_> = self
             .attributes
@@ -230,6 +254,7 @@ impl<'a> Request<'a> {
                 "finishings" => 0x23,
                 "number-up" | "copies" => 0x21,
                 "sides" => 0x44,
+                "page-ranges" => 0x33,
                 "document-format" => 0x49,
                 "job-id" => 0x21,
                 "requested-attributes" => 0x44,
@@ -243,12 +268,14 @@ impl<'a> Request<'a> {
             if a.tag != expected
                 || (matches!(expected, 0x21 | 0x23) && a.value.len() != 4)
                 || (expected == 0x32 && a.value.len() != 9)
+                || (expected == 0x33 && a.value.len() != 8)
                 || (expected == 0x22 && (a.value.len() != 1 || a.value[0] > 1))
             {
                 return Err(BAD_REQUEST);
             }
             if expected != 0x21
                 && expected != 0x23
+                && expected != 0x33
                 && expected != 0x32
                 && expected != 0x22
                 && (a.value.is_empty()
@@ -258,6 +285,7 @@ impl<'a> Request<'a> {
                 return Err(BAD_REQUEST);
             }
             if a.name != "requested-attributes"
+                && a.name != "page-ranges"
                 && self
                     .attributes
                     .iter()
@@ -270,6 +298,7 @@ impl<'a> Request<'a> {
         }
         match self.operation {
             PRINT_JOB | VALIDATE_JOB => {
+                self.page_ranges()?;
                 for (name, expected) in [("copies", 1), ("number-up", 1)] {
                     if self.one(2, name).is_some() && self.integer(2, name) != Some(expected) {
                         return Err(ATTRIBUTES_NOT_SUPPORTED);
@@ -304,6 +333,7 @@ impl<'a> Request<'a> {
                                 | "number-up"
                                 | "copies"
                                 | "sides"
+                                | "page-ranges"
                         ))
                         || (a.group == 1
                             && !matches!(

@@ -74,3 +74,7 @@ The executable loads the two environment settings at startup and rejects non-int
 超限返回HTTP 429，携带向上取整的秒数 `Retry-After` 及三语JSON `error`，包含 `code=rate_limited`、`retryable=true`、`retryAfterSeconds`、`requestsPerMinute`、`burst` 和上述profile。等待后使用同一session重试；并发调用者可能先消耗补充容量，因此等待后不保证立即受理。此错误发生于JSON-RPC派发前，不代表打印投入失败。现有SSE流上的通知不计数，重连GET计数。
 
 状态只分配给配置好的identity，重启后重置；不按token、session或转发IP头建立额外配额。该配额不跨进程共享，也不覆盖未认证流量的IP限制、REST、IPP及stdio。连接数限制继续独立生效。可执行程序启动时读取上表环境变量，拒绝非整数、0及越界值。嵌入式 `http::router` 使用默认值，`router_with_limits` 接受经过验证的 `RequestLimits`，通过 `RequestLimits::from_env` 显式加载环境配置。没有禁用值。[配置的有效期Bearer验证](EXPIRING-CREDENTIALS.md)已实现；自动签发、更新及TLS部署仍是独立的未完成工作。
+
+🟢 [Done] `color_list_attempts` provides bounded, cursor-based source-job color summaries with `jobs:read`. / 原稿別の色変換概要を件数制限・カーソル付きで取得。 / 有界、按游标获取原稿色彩转换摘要。 [Contract / 仕様 / 规范](OUTPUT-CONTEXT.md)
+
+🟢 [Done] `print_list_deliveries` exposes bounded persistent source-job output history with a creation-order cursor. / 原稿別の配信履歴を件数制限・カーソル付きで取得。 / 有界游标获取原稿投递历史。 [Contract / 仕様 / 规范](PHYSICAL-OUTPUT-CONSOLE.md)

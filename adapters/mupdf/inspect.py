@@ -3,6 +3,9 @@ import json
 import math
 import subprocess
 import tempfile
+import sys
+sys.path.append("/usr/local/lib/jrip")
+from font_policy import inspect_fonts
 
 
 def command(*args):
@@ -21,7 +24,10 @@ def command(*args):
 def main():
     if command("show", "/input/document", "trailer/Encrypt").strip() != b"null":
         raise ValueError("encrypted_pdf_unsupported")
+    fonts = inspect_fonts("/input/document")
     report = json.loads(command("run", "/usr/local/lib/jrip/inspect.js"))
+    fonts["runtimeEvidence"] = report.pop("fontUsage")
+    report["fontPolicy"] = fonts
     for page in report["pages"]:
         for key in ("widthPoints", "heightPoints"):
             value = page[key]

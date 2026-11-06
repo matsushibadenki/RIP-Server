@@ -182,6 +182,28 @@ async fn isolated_worker_publishes_two_pages_reports_and_preserves_original() {
     assert!(jrip_server::color::tick(&app).await.unwrap());
     let attempt = app.repo.color_attempt(id).await.unwrap();
     assert_eq!(attempt["state"], "COMPLETED", "{attempt}");
+    let response = jrip_server::router(app.clone())
+        .oneshot(
+            Request::get(format!(
+                "/api/v1/jobs/{}/color-attempts?state=COMPLETED",
+                job.id
+            ))
+            .header("authorization", "Bearer admin-token")
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    assert!(bytes.len() < 4096);
+    let summaries: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(summaries["attempts"].as_array().unwrap().len(), 1);
+    assert_eq!(summaries["attempts"][0]["id"], id.to_string());
+    assert_eq!(summaries["attempts"][0]["state"], "COMPLETED");
+    assert_eq!(summaries["attempts"][0]["outputProfileSha256"], digest);
+    assert_eq!(summaries["attempts"][0]["completedPages"], 2);
+    assert!(summaries["attempts"][0].get("result").is_none());
     assert_eq!(attempt["completedPages"], 2);
     assert_eq!(attempt["result"]["pageCount"], 2);
     assert_eq!(attempt["result"]["gamutSummary"]["coverageComplete"], true);
@@ -895,4 +917,168 @@ async fn color_stage_preview_pins_profile_authenticates_and_survives_restart() {
         );
     }
     assert_eq!(app.repo.artifacts(job.id).await.unwrap(), originals);
+}
+
+#[tokio::test]
+async fn color_attempt_summaries_are_scoped_bounded_cursor_stable_and_durable() {
+    let (dir, mut app, job, digest) = seed().await;
+    let path = format!("/api/v1/jobs/{}/color-attempts", job.id);
+    let ids = [Uuid::from_u128(1), Uuid::from_u128(2), Uuid::from_u128(3)];
+    for id in ids {
+        assert_eq!(
+            call(&app, &path, ticket(&job, id, &digest)).await.0,
+            StatusCode::ACCEPTED
+        );
+    }
+    app.repo
+        .update_color(ids[1], 0, "CANCELLED", 0, None, None)
+        .await
+        .unwrap();
+    let mut other = job.clone();
+    other.id = Uuid::new_v4();
+    app.repo.insert(&other).await.unwrap();
+    app.repo
+        .create_color(Uuid::new_v4(), other.id, other.revision, json!({"dpi":300}))
+        .await
+        .unwrap();
+    app.credentials = vec![
+        jrip_server::Credential {
+            token: "summary-reader-token".into(),
+            identity: "reader".into(),
+            scopes: vec!["jobs:read".into()],
+            validity: None,
+        },
+        jrip_server::Credential {
+            token: "summary-submit-token".into(),
+            identity: "submitter".into(),
+            scopes: vec!["jobs:submit".into()],
+            validity: None,
+        },
+    ];
+    async fn get(app: &jrip_server::App, path: &str, token: Option<&str>) -> (StatusCode, Value) {
+        let mut req = Request::get(path);
+        if let Some(token) = token {
+            req = req.header("authorization", format!("Bearer {token}"));
+        }
+        let response = jrip_server::router(app.clone())
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        if status == StatusCode::OK {
+            assert_eq!(response.headers()["cache-control"], "no-store");
+            assert_eq!(response.headers()["vary"], "Authorization");
+        }
+        (
+            status,
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap(),
+        )
+    }
+    assert_eq!(get(&app, &path, None).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        get(&app, &path, Some("summary-submit-token")).await.0,
+        StatusCode::FORBIDDEN
+    );
+    let (status, first) = get(
+        &app,
+        &format!("{path}?limit=1"),
+        Some("summary-reader-token"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first["attempts"][0]["id"], ids[2].to_string());
+    assert_eq!(first["hasMore"], true);
+    let summary = &first["attempts"][0];
+    assert_eq!(summary["pageCount"], 2);
+    assert_eq!(summary["inputProfileSha256"], digest);
+    assert_eq!(summary["outputProfileSha256"], digest);
+    assert_eq!(summary["outputColor"], "rgb");
+    for key in [
+        "ticket",
+        "result",
+        "sourceArtifacts",
+        "artifacts",
+        "reports",
+    ] {
+        assert!(summary.get(key).is_none());
+    }
+    // A newer insertion cannot shift or repeat already-consumed rows.
+    app.repo
+        .create_color(Uuid::from_u128(4), job.id, job.revision, json!({"dpi":300}))
+        .await
+        .unwrap();
+    let cursor = first["nextBefore"].as_str().unwrap();
+    let (_, rest) = get(
+        &app,
+        &format!("{path}?limit=100&before={cursor}"),
+        Some("summary-reader-token"),
+    )
+    .await;
+    assert_eq!(
+        rest["attempts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec![ids[1].to_string(), ids[0].to_string()]
+    );
+    assert_eq!(rest["hasMore"], false);
+    assert!(rest["nextBefore"].is_null());
+    let (_, cancelled) = get(
+        &app,
+        &format!("{path}?state=CANCELLED"),
+        Some("summary-reader-token"),
+    )
+    .await;
+    assert_eq!(cancelled["attempts"].as_array().unwrap().len(), 1);
+    assert_eq!(cancelled["attempts"][0]["id"], ids[1].to_string());
+    let (_, complete) = get(
+        &app,
+        &format!("{path}?state=COMPLETED"),
+        Some("summary-reader-token"),
+    )
+    .await;
+    assert_eq!(complete["attempts"], json!([]));
+    for query in [
+        "limit=0",
+        "limit=101",
+        "limit=-1",
+        "limit=abc",
+        "offset=1",
+        "before=invalid",
+        "before=-1:00000000-0000-0000-0000-000000000001",
+        "before=9223372036854775808:00000000-0000-0000-0000-000000000001",
+        "state=completed",
+        "state=UNKNOWN",
+    ] {
+        let (status, value) = get(
+            &app,
+            &format!("{path}?{query}"),
+            Some("summary-reader-token"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}: {value}");
+        assert_eq!(value["error"]["code"], "invalid_color_query");
+    }
+    let unknown = format!("/api/v1/jobs/{}/color-attempts", Uuid::new_v4());
+    assert_eq!(
+        get(&app, &unknown, Some("summary-reader-token")).await.0,
+        StatusCode::NOT_FOUND
+    );
+    let mut reopened = jrip_server::open(dir.path().into(), "admin-token".into())
+        .await
+        .unwrap();
+    reopened.credentials = app.credentials.clone();
+    assert_eq!(
+        get(
+            &reopened,
+            &format!("{path}?state=CANCELLED"),
+            Some("summary-reader-token")
+        )
+        .await
+        .1,
+        cancelled
+    );
 }

@@ -66,6 +66,26 @@ async fn handle(
                 _ => {}
             }
 
+            match fake.mode {
+                12..=15 => {
+                    response.text(0x44, "sides-supported", "one-sided");
+                    response.additional(0x44, b"two-sided-long-edge");
+                    if fake.mode == 14 {
+                        response.integer("pwg-raster-document-sheet-back", 1);
+                    } else {
+                        response.text(
+                            0x44,
+                            "pwg-raster-document-sheet-back",
+                            if fake.mode == 13 { "rotated" } else { "normal" },
+                        );
+                    }
+                    if fake.mode == 15 {
+                        response.additional(0x44, b"normal");
+                    }
+                }
+                16 => response.integer("sides-supported", 1),
+                _ => {}
+            }
             if fake.mode == 7 {
                 response.text(0x49, "document-format-supported", "image/pwg-raster");
                 response.resolution_dpi("pwg-raster-document-resolution-supported", 300);
@@ -299,6 +319,27 @@ async fn copies_capability_is_typed_bounded_and_conservative_when_missing() {
             Err(Error::InvalidResponse)
         ));
         assert_eq!(fake.prints.load(Ordering::SeqCst), 0);
+        task.abort();
+    }
+}
+
+#[tokio::test]
+async fn sides_and_sheet_back_capabilities_are_conservative_and_typed() {
+    use rip_core::print::Sides;
+    for mode in [0, 12, 13, 14, 15, 16] {
+        let (printer, _, task) = printer(mode).await;
+        let result = printer.capabilities().await;
+        if mode >= 14 {
+            assert!(matches!(result, Err(Error::InvalidResponse)));
+        } else {
+            let caps = result.unwrap();
+            assert!(caps.check_sides(Sides::OneSided).is_ok());
+            assert_eq!(
+                caps.check_sides(Sides::TwoSidedLongEdge).is_ok(),
+                matches!(mode, 12 | 13)
+            );
+            assert!(caps.check_sides(Sides::TwoSidedShortEdge).is_err());
+        }
         task.abort();
     }
 }

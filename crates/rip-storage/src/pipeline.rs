@@ -99,11 +99,15 @@ impl Repository {
             return Err(StorageError::Conflict);
         }
         if !contract.is_null()
-            && (contract["ticket"]["copies"]
-                != workflow["ticket"]["request"]
-                    .get("copies")
-                    .cloned()
-                    .unwrap_or(json!(1))
+            && (contract["ticket"]["sides"].as_str().unwrap_or("one-sided")
+                != workflow["ticket"]["request"]["sides"]
+                    .as_str()
+                    .unwrap_or("one-sided")
+                || contract["ticket"]["copies"]
+                    != workflow["ticket"]["request"]
+                        .get("copies")
+                        .cloned()
+                        .unwrap_or(json!(1))
                 || contract["ticket"]["jobId"] != source
                 || contract["ticket"]["attemptId"] != id.to_string()
                 || contract["ticket"]["sourceSha256"] != workflow["ticket"]["sourceSha256"]

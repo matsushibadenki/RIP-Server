@@ -4,6 +4,62 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 /// Device-side copy count is independent of the source raster page count.
 pub const MAX_DELIVERY_COPIES: u32 = 999;
+/// Explicit physical binding; missing legacy fields mean one-sided.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Sides {
+    #[default]
+    OneSided,
+    TwoSidedLongEdge,
+    TwoSidedShortEdge,
+}
+impl Sides {
+    pub fn is_simplex(&self) -> bool {
+        *self == Self::OneSided
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OneSided => "one-sided",
+            Self::TwoSidedLongEdge => "two-sided-long-edge",
+            Self::TwoSidedShortEdge => "two-sided-short-edge",
+        }
+    }
+}
+/// Device-native backside coordinates, as defined by PWG Raster Table 9.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SheetBack {
+    #[default]
+    Normal,
+    Rotated,
+    Flipped,
+    ManualTumble,
+}
+impl SheetBack {
+    pub fn is_normal(&self) -> bool {
+        *self == Self::Normal
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Rotated => "rotated",
+            Self::Flipped => "flipped",
+            Self::ManualTumble => "manual-tumble",
+        }
+    }
+}
+impl std::str::FromStr for SheetBack {
+    type Err = crate::ValidationError;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "normal" => Ok(Self::Normal),
+            "rotated" => Ok(Self::Rotated),
+            "flipped" => Ok(Self::Flipped),
+            "manual-tumble" => Ok(Self::ManualTumble),
+            _ => Err(crate::ValidationError("unsupported_sheet_back")),
+        }
+    }
+}
 pub fn default_copies() -> u32 {
     1
 }
@@ -70,6 +126,7 @@ impl JobTicket {
         job_id: Option<Uuid>,
     ) -> Result<Self, ValidationError> {
         let selected_engine = manifest.engine.resolve(manifest.format)?;
+        let page_selection = manifest.page_ranges.label();
         let ticket = Self {
             schema_version: 1,
             version: "0.1".into(),
@@ -83,7 +140,7 @@ impl JobTicket {
             sides: "one-sided".into(),
             media: None,
             finishings: vec![],
-            page_selection: "all".into(),
+            page_selection,
             number_up: 1,
             imposition: "none".into(),
             quality: "standard".into(),
@@ -160,7 +217,7 @@ impl JobTicket {
             || self.sides != "one-sided"
             || self.media.is_some()
             || !self.finishings.is_empty()
-            || self.page_selection != "all"
+            || self.page_selection != self.manifest.page_ranges.label()
             || self.number_up != 1
             || self.imposition != "none"
             || self.quality != "standard"
@@ -280,7 +337,7 @@ impl CapabilityModel {
                 "source_integrity_is_not_document_structure_preflight".into(),
                 "completion_is_tiff_export".into(),
             ],
-            extensions: json!({"org.jrip.engines":{"mupdf":["application/pdf"],"ghostscript":["application/pdf","application/postscript","application/eps"]}}),
+            extensions: json!({"org.jrip.pageSelection":{"formats":["application/pdf"],"stage":"render","minimum":1,"maximum":100,"sourcePageMapping":true},"org.jrip.engines":{"mupdf":["application/pdf"],"ghostscript":["application/pdf","application/postscript","application/eps"]}}),
         }
     }
     pub fn color() -> Self {
@@ -392,6 +449,9 @@ pub fn delivery_intersection(models: &[CapabilityModel]) -> Value {
     if delivery_copies.is_none() {
         conflicts.push(json!({"code":"pipeline_copies_mismatch","retryable":false}));
     }
+    if printer.sides.is_empty() {
+        conflicts.push(json!({"code":"pipeline_sides_mismatch","retryable":false}));
+    }
     if printer.media.is_empty() {
         conflicts.push(json!({"code":"pipeline_media_required","retryable":false}));
     }
@@ -424,7 +484,7 @@ pub fn delivery_intersection(models: &[CapabilityModel]) -> Value {
     }
     json!({"settingsCompatible":conflicts.is_empty(),"conflicts":conflicts,
         "dpi":dpi,"directColorSpaces":colors,"media":printer.media,"bitDepths":[8],
-        "artifactBytes":max_bytes,"copies":[1,1],"deliveryCopies":delivery_copies,"deliveryPageRanges":{"minimum":1,"maximum":100,"sorted":true,"nonOverlapping":true,"stage":"delivery","renderAllPages":true},"sides":["one-sided"],"finishings":["none"],
+        "artifactBytes":max_bytes,"copies":[1,1],"deliveryCopies":delivery_copies,"deliverySides":printer.sides,"deliveryPageRanges":{"minimum":1,"maximum":100,"sorted":true,"nonOverlapping":true,"stage":"delivery","renderAllPages":false,"renderSelectionFormats":["application/pdf"]},"sides":["one-sided"],"finishings":["none"],
         "bridge":{"inputMediaType":"image/tiff","outputMediaType":"image/pwg-raster","preservesGeometry":true},
         "explicitColorRequired":requires_color,"colorPathSupported":color_path,"colorOutputSpaces":color_outputs,
         "requiredProfiles":printer.profiles,"runtimeProbed":false,"documentVerified":false,
@@ -440,6 +500,7 @@ mod tests {
     fn intersection_checks_bridge_and_discrete_dpi_without_granting_authority() {
         let mut printer = CapabilityModel::rip();
         printer.stage = Stage::Printer;
+        printer.sides = vec!["one-sided".into()];
         printer.copies = Some([1, 1]);
         printer.input_media_types = vec!["image/pwg-raster".into()];
         printer.dpi = Some(DpiSupport {

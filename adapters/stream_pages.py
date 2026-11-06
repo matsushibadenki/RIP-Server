@@ -14,7 +14,7 @@ import subprocess
 import sys
 
 
-def stream_pages(command, suffix, max_pages, prepare):
+def stream_pages(command, suffix, max_pages, prepare, source_count=None, page_numbers=None):
     libc = ctypes.CDLL(None, use_errno=True)
     fd = libc.inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)
     if fd < 0:
@@ -27,7 +27,7 @@ def stream_pages(command, suffix, max_pages, prepare):
         child = subprocess.Popen(command, stdin=subprocess.DEVNULL,
                                  stdout=subprocess.DEVNULL, stderr=sys.stderr)
         output = sys.stdout.buffer
-        output.write(b"JRIP-PAGES-1\n")
+        output.write(b"JRIP-PAGES-1\n" if source_count is None else b"JRIP-PAGES-2\n" + struct.pack(">I", source_count))
         output.flush()
         pending, seen, completed = {}, set(), 0
         pattern = re.compile(r"page-([0-9]{6})\." + re.escape(suffix))
@@ -49,6 +49,10 @@ def stream_pages(command, suffix, max_pages, prepare):
                     if not mask & 0x8 or not match:
                         continue
                     number = int(match[1])
+                    if page_numbers is not None:
+                        if number not in page_numbers:
+                            raise ValueError("unexpected source page")
+                        number = page_numbers.index(number) + 1
                     if not 1 <= number <= max_pages or number in seen:
                         raise ValueError("page limit or duplicate output")
                     seen.add(number)
@@ -75,7 +79,7 @@ def stream_pages(command, suffix, max_pages, prepare):
                 drain()
                 if completed + 1 in pending:
                     continue
-                if child.returncode or not completed or pending:
+                if child.returncode or not completed or pending or (source_count is not None and completed != max_pages):
                     raise ValueError("interpreter failed or noncontiguous output")
                 output.write(struct.pack(">IQ", 0, 0))
                 output.flush()

@@ -96,6 +96,7 @@ pub fn router(app: App) -> Router {
         .route("/console", get(console::index))
         .route("/console/", get(console::index))
         .route("/console/app.js", get(console::script))
+        .route("/console/delivery.js", get(console::delivery_script))
         .route("/console/style.css", get(console::style))
         .route(
             "/health",
@@ -107,6 +108,7 @@ pub fn router(app: App) -> Router {
             "/.well-known/acx.json",
             get(|| async { Json(rip_acx::manifest()) }),
         )
+        .route("/api/v1/session", get(authorization::context))
         .route("/api/v1/approval-policy", get(operation_approvals::policy))
         .route(
             "/api/v1/operation-approvals",
@@ -159,7 +161,10 @@ pub fn router(app: App) -> Router {
             post(color::register).layer(DefaultBodyLimit::max(4 * 1024 * 1024)),
         )
         .route("/api/v1/color/profiles/{digest}", get(color::describe))
-        .route("/api/v1/jobs/{id}/color-attempts", post(color::create))
+        .route(
+            "/api/v1/jobs/{id}/color-attempts",
+            get(color::list).post(color::create),
+        )
         .route("/api/v1/color/attempts/{id}", get(color::detail))
         .route("/api/v1/color/attempts/{id}/events", get(color::events))
         .route("/api/v1/color/attempts/{id}/cancel", post(color::cancel))
@@ -237,7 +242,10 @@ pub fn router(app: App) -> Router {
         .route("/api/v1/jobs/{id}", get(detail).delete(delete))
         .route("/api/v1/jobs/{id}/events", get(events))
         .route("/api/v1/jobs/{id}/retry", post(retry::retry))
-        .route("/api/v1/jobs/{id}/deliveries", post(delivery::prepare))
+        .route(
+            "/api/v1/jobs/{id}/deliveries",
+            get(delivery::source_list).post(delivery::prepare),
+        )
         .route(
             "/api/v1/jobs/{id}/delivery-preview",
             post(delivery::preview),
@@ -379,14 +387,44 @@ fn messages(code: &str) -> serde_json::Value {
             "请按升序指定1至100内不重叠的页码范围",
         ),
         "page_range_out_of_bounds" => (
-            "The selected range exceeds the rendered page count",
-            "指定範囲がRIP済みページ数を超えています",
-            "所选范围超出已渲染页数",
+            "The selected range exceeds the source page count",
+            "指定範囲が原稿のページ数を超えています",
+            "所选范围超出原稿页数",
+        ),
+        "page_not_rendered" => (
+            "The requested source page was not rendered",
+            "指定された原稿ページは描画されていません",
+            "请求的原稿页尚未渲染",
+        ),
+        "invalid_page_mapping" => (
+            "The source page mapping is invalid",
+            "原稿ページと成果物の対応が不正です",
+            "原稿页与产物的映射无效",
+        ),
+        "page_selection_requires_pdf" => (
+            "Render-time page selection requires PDF",
+            "描画時のページ選択にはPDFが必要です",
+            "渲染时选择页面需要PDF",
+        ),
+        "invalid_delivery_query" => (
+            "Use a limit of 1–100 and a returned delivery cursor",
+            "件数は1〜100、返却された配信カーソルを指定してください",
+            "请指定1至100条和返回的投递游标",
+        ),
+        "invalid_color_query" => (
+            "Use a limit of 1–100, a returned cursor and a valid color-attempt state",
+            "件数は1〜100、返却されたカーソル、有効な色変換状態を指定してください",
+            "请指定1至100条、返回的游标以及有效的色彩转换状态",
         ),
         "invalid_copies" => (
             "Specify 1–999 copies",
             "部数は1〜999で指定してください",
             "请指定1至999份",
+        ),
+        "unsupported_sides_or_sheet_back" => (
+            "Requested sides or sheet-back mode is unsupported",
+            "指定の片面・両面または裏面方式に対応していません",
+            "不支持请求的单双面或背面方式",
         ),
         "unsupported_copies" => (
             "The printer does not advertise support for this copy count",

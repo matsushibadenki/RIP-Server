@@ -3,6 +3,7 @@ name = "rip-raster"
 version.workspace = true
 edition.workspace = true
 [dependencies]
+rip-core.workspace = true
 rip-color.workspace = true
 tiff = "0.10"
 thiserror.workspace = true

@@ -87,6 +87,32 @@ def font(is_ttf):
     return name, data, builder.font
 
 
+def cid_cff():
+    from fontTools.cffLib import FDArrayIndex, FDSelect, FontDict
+    _, _, program = font(False)
+    cff = program['CFF '].cff
+    top = cff.topDictIndex[0]
+    name = 'JRIPDD+OwnedCID'
+    cff.fontNames = [name]
+    top.ROS = ('Adobe', 'Identity', 0)
+    top.CIDCount = 10
+    old = top.CharStrings.charStrings
+    top.charset = ['.notdef', 'cid00009', 'cid00007']
+    top.CharStrings.charStrings = dict(zip(top.charset, [old['.notdef'], old['uni672C'], old['uni65E5']]))
+    fd = FontDict()
+    fd.Private = top.Private
+    top.FDArray = FDArrayIndex()
+    top.FDArray.append(fd)
+    top.FDSelect = FDSelect(format=0)
+    top.FDSelect.gidArray = [0, 0, 0]
+    top.CharStrings.fdArray = top.FDArray
+    top.CharStrings.fdSelect = top.FDSelect
+    del top.Private
+    if hasattr(top, 'Encoding'):
+        del top.Encoding
+    return name, program['CFF '].compile(program)
+
+
 def generate():
     objects = []
 
@@ -121,15 +147,22 @@ def generate():
         assert gid != cid
         mapping[cid*2:cid*2+2] = gid.to_bytes(2, 'big')
     cid_map = stream(bytes(mapping))
-    descendant = obj(f'<< /Type /Font /Subtype /CIDFontType2 /BaseFont /{tt_name} /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor {tt_desc} 0 R /DW 1000 /CIDToGIDMap {cid_map} 0 R >>')
+    descendant = obj(f'<< /Type /Font /Subtype /CIDFontType2 /BaseFont /{tt_name} /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor {tt_desc} 0 R /DW 1000 /DW2 [1000 -1000] /W2 [7 [-1200 500 1000] 9 [-1200 500 1000]] /CIDToGIDMap {cid_map} 0 R >>')
     cid_tt = obj(f'<< /Type /Font /Subtype /Type0 /BaseFont /{tt_name} /Encoding /Identity-H /DescendantFonts [{descendant} 0 R] /ToUnicode {unicode_map(True)} 0 R >>')
     simple_cff = obj(f'<< /Type /Font /Subtype /Type1 /BaseFont /{cff_name} {encoding} /FontDescriptor {cff_desc} 0 R /ToUnicode {unicode_map(False)} 0 R >>')
+    vertical_tt = obj(f'<< /Type /Font /Subtype /Type0 /BaseFont /{tt_name} /Encoding /Identity-V /DescendantFonts [{descendant} 0 R] /ToUnicode {unicode_map(True)} 0 R >>')
+    cid_name, cid_data = cid_cff()
+    cid_stream = stream(cid_data, '/Subtype /CIDFontType0C')
+    cid_desc = descriptor(cid_name, 'FontFile3', cid_stream)
+    cid_child = obj(f'<< /Type /Font /Subtype /CIDFontType0 /BaseFont /{cid_name} /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor {cid_desc} 0 R /DW 1000 /DW2 [1000 -1200] >>')
+    cid_horizontal = obj(f'<< /Type /Font /Subtype /Type0 /BaseFont /{cid_name} /Encoding /Identity-H /DescendantFonts [{cid_child} 0 R] /ToUnicode {unicode_map(True)} 0 R >>')
+    cid_vertical = obj(f'<< /Type /Font /Subtype /Type0 /BaseFont /{cid_name} /Encoding /Identity-V /DescendantFonts [{cid_child} 0 R] /ToUnicode {unicode_map(True)} 0 R >>')
     page_ids = []
-    for font_ref, chars in [(simple_tt, '4142'), (cid_tt, '00070009'), (simple_cff, '4142')]:
-        commands = stream(f'0 g BT /Japanese 24 Tf 12 24 Td <{chars}> Tj ET')
+    for font_ref, chars, position in [(simple_tt, '4142', '12 24'), (cid_tt, '00070009', '12 24'), (simple_cff, '4142', '12 24'), (vertical_tt, '00070009', '36 66'), (cid_horizontal, '00070009', '12 24'), (cid_vertical, '00070009', '36 66')]:
+        commands = stream(f'0 g BT /Japanese 24 Tf {position} Td <{chars}> Tj ET')
         page_ids.append(obj(f'<< /Type /Page /Parent {pages} 0 R /MediaBox [0 0 72 72] /Resources << /Font << /Japanese {font_ref} 0 R >> >> /Contents {commands} 0 R >>'))
     objects[0] = f'<< /Type /Catalog /Pages {pages} 0 R >>'.encode()
-    objects[1] = f'<< /Type /Pages /Count 3 /Kids [{" ".join(f"{n} 0 R" for n in page_ids)}] >>'.encode()
+    objects[1] = f'<< /Type /Pages /Count 6 /Kids [{" ".join(f"{n} 0 R" for n in page_ids)}] >>'.encode()
     output = bytearray(b'%PDF-1.4\n%JRIP owned subset font regression\n')
     offsets = []
     for number, value in enumerate(objects, 1):
@@ -145,12 +178,14 @@ def generate():
 
 if __name__ == '__main__':
     import sys
-    destination = Path(__file__).with_name('font-quality.pdf')
-    data = generate()
-    if sys.argv[1:] == ['--check']:
-        if destination.read_bytes() != data:
-            raise SystemExit('font-quality.pdf differs; regenerate with pinned requirements')
-    elif sys.argv[1:]:
+    from punctuation import generate as generate_punctuation
+    outputs = {'font-quality.pdf': generate(), 'punctuation-quality.pdf': generate_punctuation()}
+    if sys.argv[1:] not in ([], ['--check']):
         raise SystemExit('usage: generate.py [--check]')
-    else:
-        destination.write_bytes(data)
+    for name, data in outputs.items():
+        destination = Path(__file__).with_name(name)
+        if sys.argv[1:] == ['--check']:
+            if destination.read_bytes() != data:
+                raise SystemExit(f'{name} differs; regenerate with pinned requirements')
+        else:
+            destination.write_bytes(data)

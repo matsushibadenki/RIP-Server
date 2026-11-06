@@ -59,6 +59,75 @@ impl Repository {
             .ok_or(StorageError::NotFound)?;
         Ok(serde_json::from_str(&payload)?)
     }
+    /// Bounded summaries with a stable creation-order cursor, without per-page artifacts/reports.
+    pub async fn color_attempts(
+        &self,
+        source: Uuid,
+        limit: u32,
+        before: Option<&str>,
+        state: Option<&str>,
+    ) -> Result<Value, StorageError> {
+        if !(1..=100).contains(&limit)
+            || state.is_some_and(|s| {
+                !matches!(
+                    s,
+                    "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED"
+                )
+            })
+        {
+            return Err(StorageError::Conflict);
+        }
+        let cursor = before
+            .map(|value| {
+                if value.len() > 64 {
+                    return Err(StorageError::Conflict);
+                }
+                let (time, id) = value.split_once(':').ok_or(StorageError::Conflict)?;
+                let time = time
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|n| *n >= 0)
+                    .ok_or(StorageError::Conflict)?;
+                let id = Uuid::parse_str(id)
+                    .map_err(|_| StorageError::Conflict)?
+                    .to_string();
+                Ok((time, id))
+            })
+            .transpose()?;
+        let mut sql="SELECT json_object('schemaVersion',1,'id',id,'sourceJob',source_job,'state',state,'revision',revision,'createdAt',created_at,'updatedAt',json_extract(payload,'$.updatedAt'),'completedPages',json_extract(payload,'$.completedPages'),'reasonCode',json_extract(payload,'$.reasonCode'),'dpi',json_extract(ticket,'$.dpi'),'inputColor',json_extract(ticket,'$.policy.inputColor'),'outputColor',json_extract(ticket,'$.policy.outputColor'),'inputProfileSha256',json_extract(ticket,'$.inputProfileSha256'),'outputProfileSha256',json_extract(ticket,'$.outputProfileSha256'),'pageCount',json_array_length(ticket,'$.sourceArtifacts')) FROM color_attempts WHERE source_job=?".to_string();
+        if state.is_some() {
+            sql.push_str(" AND state=?");
+        }
+        if cursor.is_some() {
+            sql.push_str(" AND (created_at,id)<(?,?)");
+        }
+        sql.push_str(" ORDER BY created_at DESC,id DESC LIMIT ?");
+        let mut query = sqlx::query_scalar::<_, String>(&sql).bind(source.to_string());
+        if let Some(state) = state {
+            query = query.bind(state);
+        }
+        if let Some((time, id)) = &cursor {
+            query = query.bind(time).bind(id);
+        }
+        let rows = query.bind(limit + 1).fetch_all(&self.pool).await?;
+        let more = rows.len() > limit as usize;
+        let items: Vec<Value> = rows
+            .into_iter()
+            .take(limit as usize)
+            .map(|row| serde_json::from_str(&row))
+            .collect::<Result<_, _>>()?;
+        let next = more.then(|| {
+            let last = items.last().expect("positive page limit");
+            format!(
+                "{}:{}",
+                last["createdAt"],
+                last["id"].as_str().expect("stored UUID")
+            )
+        });
+        Ok(
+            json!({"schemaVersion":1,"attempts":items,"limit":limit,"before":before,"hasMore":more,"nextBefore":next}),
+        )
+    }
     pub async fn next_color(&self) -> Result<Option<Uuid>, StorageError> {
         let id: Option<String> = sqlx::query_scalar(
             "SELECT id FROM color_attempts WHERE state='QUEUED' ORDER BY created_at,id LIMIT 1",

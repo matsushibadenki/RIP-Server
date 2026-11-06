@@ -52,6 +52,8 @@ where
             return Err(io::Error::other("empty artifact"));
         }
         result.push(Artifact {
+            source_page: None,
+            source_page_count: None,
             page,
             name,
             media_type: "image/tiff".into(),

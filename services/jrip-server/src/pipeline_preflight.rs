@@ -65,7 +65,21 @@ pub async fn create(
         .cloned()
         .unwrap_or_default();
     let mut adjustments = vec![];
-    // Page numbers are selected at delivery; rasterization remains a single complete set.
+    let side_options: Vec<String> =
+        serde_json::from_value(intersection["deliverySides"].clone()).map_err(internal)?;
+    let sides: rip_core::print::Sides = serde_json::from_value(json!(select(
+        "sides",
+        Some(req.intent.sides.take().unwrap_or(Requirement {
+            mode: Mode::Required,
+            value: "one-sided".into()
+        })),
+        &side_options,
+        side_options.first().cloned().unwrap_or("one-sided".into()),
+        &mut conflicts,
+        &mut adjustments
+    )))
+    .map_err(internal)?;
+    // Preserve original page numbers through rendering and delivery.
     let page_ranges = if let Some(requirement) = req.intent.page_ranges.take() {
         match rip_core::pages::PageRanges::new(
             requirement
@@ -186,6 +200,13 @@ pub async fn create(
         mode: Mode::Required,
         value: color_mode,
     });
+    if req.intent.document.media_type == "application/pdf" {
+        req.intent.page_ranges = Some(Requirement {
+            mode: Mode::Required,
+            value: serde_json::from_value(serde_json::to_value(&page_ranges).map_err(internal)?)
+                .map_err(internal)?,
+        });
+    }
     let resolution = rip_acx::intent::resolve(req.intent);
     conflicts.extend(
         resolution["conflicts"]
@@ -227,6 +248,7 @@ pub async fn create(
     };
     let workflow = pipeline::Request {
         page_ranges,
+        sides,
         copies,
         request_id: req.request_id,
         expected_revision: 0,

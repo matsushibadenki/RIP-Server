@@ -33,7 +33,7 @@ async fn handshake_discovery_and_validated_api_calls() {
     );
     initialize(&mut s).await;
     let listing = s.handle(req(2, "tools/list", json!({}))).await.unwrap();
-    assert_eq!(listing["result"]["tools"].as_array().unwrap().len(), 45);
+    assert_eq!(listing["result"]["tools"].as_array().unwrap().len(), 47);
     let stages = s
         .handle(req(
             90,
@@ -491,7 +491,7 @@ async fn scoped_tools_hide_and_deny_mutations_and_subscriptions() {
     );
     initialize(&mut s).await;
     let tools = s.handle(req(1, "tools/list", json!({}))).await.unwrap();
-    assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 22);
+    assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 24);
     assert_eq!(s.handle(req(2,"tools/call",json!({"name":"rip_cancel_job","arguments":{"jobId":uuid::Uuid::new_v4(),"expectedRevision":0}}))).await.unwrap()["result"]["isError"],true);
     let app = jrip_server::open(dir.path().into(), TOKEN.into())
         .await
@@ -771,6 +771,8 @@ async fn color_tools_pin_policy_and_delegate_revision_checked_queue_control() {
         .complete_with_artifacts(
             job.clone(),
             &[rip_core::Artifact {
+                source_page: None,
+                source_page_count: None,
                 page: 1,
                 name: "page-000001.tiff".into(),
                 media_type: "image/tiff".into(),
@@ -1745,6 +1747,8 @@ async fn binary_resources_are_bounded_verified_and_scoped() {
         .complete_with_artifacts(
             job.clone(),
             &[rip_core::Artifact {
+                source_page: None,
+                source_page_count: None,
                 page: 1,
                 name: "page-000001.tiff".into(),
                 media_type: "image/tiff".into(),
@@ -2100,4 +2104,148 @@ async fn page_ranges_are_forwarded_and_invalid_selections_never_reach_the_api() 
             serde_json::from_str(result["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(payload["pageRanges"], json!([]));
     }
+}
+
+#[tokio::test]
+async fn duplex_sides_are_forwarded_and_invalid_bindings_never_reach_the_api() {
+    use axum::{Json, Router, routing::post};
+    async fn echo(Json(value): Json<Value>) -> Json<Value> {
+        Json(value)
+    }
+    let router = Router::new()
+        .route("/api/v1/jobs/{id}/deliveries", post(echo))
+        .route("/api/v1/jobs/{id}/delivery-preview", post(echo))
+        .route("/api/v1/jobs/{id}/pipelines", post(echo));
+    let mut session = Session::new(router, TOKEN.into());
+    initialize(&mut session).await;
+    for name in [
+        "print_deliver_job",
+        "print_preview_delivery",
+        "print_create_pipeline",
+    ] {
+        let mut args = json!({"jobId":uuid::Uuid::new_v4(),"requestId":uuid::Uuid::new_v4(),"expectedRevision":0,"printerId":"proof","media":"iso_a4_210x297mm"});
+        for sides in ["one-sided", "two-sided-long-edge", "two-sided-short-edge"] {
+            args["sides"] = json!(sides);
+            let reply = session
+                .handle(req(2, "tools/call", json!({"name":name,"arguments":args})))
+                .await
+                .unwrap();
+            let payload: Value =
+                serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap())
+                    .unwrap();
+            assert_eq!(payload["sides"], sides);
+        }
+        for invalid in [json!(null), json!(1), json!("rotated"), json!("two-sided")] {
+            args["sides"] = invalid;
+            let reply = session
+                .handle(req(3, "tools/call", json!({"name":name,"arguments":args})))
+                .await
+                .unwrap();
+            assert_eq!(reply["error"]["code"], -32602);
+        }
+        args.as_object_mut().unwrap().remove("sides");
+        let reply = session
+            .handle(req(4, "tools/call", json!({"name":name,"arguments":args})))
+            .await
+            .unwrap();
+        let payload: Value =
+            serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(payload["sides"], "one-sided");
+    }
+}
+
+#[tokio::test]
+async fn color_summary_tool_is_read_only_and_validates_cursor_and_filter() {
+    use axum::{
+        Json, Router,
+        extract::{Path, Query},
+        routing::get,
+    };
+    async fn echo(
+        Path(id): Path<String>,
+        Query(query): Query<std::collections::BTreeMap<String, String>>,
+    ) -> Json<Value> {
+        Json(json!({"jobId":id,"query":query}))
+    }
+    let router = Router::new()
+        .route("/api/v1/jobs/{id}/color-attempts", get(echo))
+        .route("/api/v1/jobs/{id}/deliveries", get(echo));
+    let mut denied = Session::new(router.clone(), TOKEN.into()).with_access(
+        "submitter".into(),
+        vec!["jobs:submit".into()],
+        None,
+    );
+    initialize(&mut denied).await;
+    let reply = denied
+        .handle(req(
+            2,
+            "tools/call",
+            json!({"name":"color_list_attempts","arguments":{"jobId":uuid::Uuid::new_v4()}}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(reply["result"]["isError"], true);
+    let denied_value: Value =
+        serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(denied_value["code"], "forbidden");
+    let mut session = Session::new(router, TOKEN.into()).with_access(
+        "reader".into(),
+        vec!["jobs:read".into()],
+        None,
+    );
+    initialize(&mut session).await;
+    let job = uuid::Uuid::new_v4();
+    let cursor = format!("123:{}", uuid::Uuid::new_v4());
+    let value=tool_value(session.handle(req(2,"tools/call",json!({"name":"color_list_attempts","arguments":{"jobId":job,"limit":1,"before":cursor,"state":"COMPLETED"}}))).await.unwrap());
+    assert_eq!(value["jobId"], job.to_string());
+    assert_eq!(value["query"]["before"], cursor);
+    assert_eq!(value["query"]["limit"], "1");
+    assert_eq!(value["query"]["state"], "COMPLETED");
+    let value = tool_value(
+        session
+            .handle(req(
+                3,
+                "tools/call",
+                json!({"name":"color_list_attempts","arguments":{"jobId":job}}),
+            ))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(value["query"]["limit"], "50");
+    for extra in [
+        json!({"limit":0}),
+        json!({"limit":101}),
+        json!({"state":"UNKNOWN"}),
+        json!({"before":"invalid"}),
+        json!({"before":format!("{cursor}&state=FAILED")}),
+        json!({"before":"9223372036854775808:00000000-0000-0000-0000-000000000000"}),
+    ] {
+        let mut args = json!({"jobId":job});
+        args.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let value = session
+            .handle(req(
+                4,
+                "tools/call",
+                json!({"name":"color_list_attempts","arguments":args}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(value["error"]["code"], -32602);
+    }
+    let history=tool_value(session.handle(req(6,"tools/call",json!({"name":"print_list_deliveries","arguments":{"jobId":job,"limit":10,"before":cursor}}))).await.unwrap());
+    assert_eq!(history["query"]["limit"], "10");
+    assert_eq!(history["query"]["before"], cursor);
+    let tools = session
+        .handle(req(5, "tools/list", json!({})))
+        .await
+        .unwrap();
+    let tool = tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "color_list_attempts")
+        .unwrap();
+    assert_eq!(tool["annotations"]["readOnlyHint"], true);
 }

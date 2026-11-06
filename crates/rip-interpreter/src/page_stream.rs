@@ -15,6 +15,7 @@ async fn exact<R: tokio::io::AsyncRead + Unpin>(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) async fn read_page_stream<R, F, Fut>(
     reader: &mut R,
     output: &Path,
@@ -27,12 +28,52 @@ where
     F: FnMut(u32) -> Fut + Send,
     Fut: std::future::Future<Output = Result<(), InterpreterError>> + Send,
 {
+    Ok(read_selected_page_stream(
+        reader,
+        output,
+        max_pages,
+        max_bytes,
+        &rip_core::pages::RenderPages::default(),
+        progress,
+    )
+    .await?
+    .pages)
+}
+
+pub(super) async fn read_selected_page_stream<R, F, Fut>(
+    reader: &mut R,
+    output: &Path,
+    max_pages: u32,
+    max_bytes: u64,
+    selection: &rip_core::pages::RenderPages,
+    progress: &mut F,
+) -> Result<RenderedDocument, InterpreterError>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    F: FnMut(u32) -> Fut + Send,
+    Fut: std::future::Future<Output = Result<(), InterpreterError>> + Send,
+{
     let mut magic = [0u8; 13];
     // Protocol magic is deliberately not an engine diagnostic line.
     exact(reader, &mut magic).await?;
-    if &magic != b"JRIP-PAGES-1\n" {
+    if (selection.is_all() && &magic != b"JRIP-PAGES-1\n")
+        || (!selection.is_all() && &magic != b"JRIP-PAGES-2\n")
+    {
         return Err(InterpreterError::Rejected("invalid_output_protocol"));
     }
+    let source_page_count = if selection.is_all() {
+        None
+    } else {
+        let mut count = [0; 4];
+        exact(reader, &mut count).await?;
+        let count = u32::from_be_bytes(count);
+        if count > max_pages || selection.indices(count).is_err() {
+            return Err(InterpreterError::Rejected("page_range_out_of_bounds"));
+        }
+        Some(count)
+    };
+    let expected =
+        source_page_count.map(|total| selection.indices(total).expect("checked indices").len());
     let mut pages = Vec::new();
     let mut total = 0u64;
     loop {
@@ -41,16 +82,26 @@ where
         let page = u32::from_be_bytes(frame[..4].try_into().unwrap());
         let size = u64::from_be_bytes(frame[4..].try_into().unwrap());
         if page == 0 && size == 0 {
-            if pages.is_empty() {
+            if pages.is_empty() && expected != Some(0) {
                 return Err(InterpreterError::Rejected("empty_output"));
             }
             let mut tail = [0u8; 1];
             if reader.read(&mut tail).await? != 0 {
                 return Err(InterpreterError::Rejected("invalid_output"));
             }
-            return Ok(pages);
+            if expected.is_some_and(|n| n != pages.len()) {
+                return Err(InterpreterError::Rejected("source_page_count_mismatch"));
+            }
+            return Ok(RenderedDocument {
+                pages,
+                source_page_count,
+            });
         }
-        if page != pages.len() as u32 + 1 || page > max_pages || size < 8 {
+        if page != pages.len() as u32 + 1
+            || page > max_pages
+            || size < 8
+            || expected.is_some_and(|n| page as usize > n)
+        {
             return Err(InterpreterError::Rejected("invalid_output"));
         }
         total = total
@@ -197,5 +248,146 @@ mod tests {
         .unwrap();
         assert_eq!(error.to_string(), "cancelled");
         assert!(!dir.path().join("page-000002.tiff").exists());
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+    #[tokio::test]
+    async fn requires_bound_source_count_and_exact_selected_frames() {
+        let selection: rip_core::pages::RenderPages =
+            rip_core::pages::PageRanges::new(vec![rip_core::pages::PageRange {
+                first: 2,
+                last: 2,
+            }])
+            .unwrap()
+            .into();
+        let frame = [
+            1u32.to_be_bytes().as_slice(),
+            8u64.to_be_bytes().as_slice(),
+            b"II\x2a\x00\x08\x00\x00\x00",
+        ]
+        .concat();
+        let valid = [
+            b"JRIP-PAGES-2\n".as_slice(),
+            2u32.to_be_bytes().as_slice(),
+            &frame,
+            &[0; 12],
+        ]
+        .concat();
+        for (bytes, ok) in [
+            (valid.clone(), true),
+            (
+                [b"JRIP-PAGES-1\n".as_slice(), &frame, &[0; 12]].concat(),
+                false,
+            ),
+            (
+                [
+                    b"JRIP-PAGES-2\n".as_slice(),
+                    1u32.to_be_bytes().as_slice(),
+                    &frame,
+                    &[0; 12],
+                ]
+                .concat(),
+                false,
+            ),
+            (
+                [
+                    b"JRIP-PAGES-2\n".as_slice(),
+                    101u32.to_be_bytes().as_slice(),
+                    &frame,
+                    &[0; 12],
+                ]
+                .concat(),
+                false,
+            ),
+            (
+                [
+                    valid[..valid.len() - 12].as_ref(),
+                    &[2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8],
+                ]
+                .concat(),
+                false,
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let result = read_selected_page_stream(
+                &mut bytes.as_slice(),
+                dir.path(),
+                100,
+                1024,
+                &selection,
+                &mut |_| async { Ok(()) },
+            )
+            .await;
+            assert_eq!(result.is_ok(), ok);
+            if let Ok(doc) = result {
+                assert_eq!(doc.source_page_count, Some(2));
+                assert_eq!(doc.pages.len(), 1);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod empty_selection_tests {
+    use super::*;
+    #[tokio::test]
+    async fn zero_frames_require_a_proven_empty_ipp_intersection() {
+        let bytes = [
+            b"JRIP-PAGES-2\n".as_slice(),
+            2u32.to_be_bytes().as_slice(),
+            &[0; 12],
+        ]
+        .concat();
+        for (selection, allowed) in [
+            (
+                rip_core::pages::RenderPages::Ipp {
+                    ipp: rip_core::pages::IppPageRanges::new(vec![rip_core::pages::PageRange {
+                        first: 3,
+                        last: i32::MAX as u32,
+                    }])
+                    .unwrap(),
+                },
+                true,
+            ),
+            (
+                rip_core::pages::RenderPages::Ipp {
+                    ipp: rip_core::pages::IppPageRanges::new(vec![rip_core::pages::PageRange {
+                        first: 2,
+                        last: i32::MAX as u32,
+                    }])
+                    .unwrap(),
+                },
+                false,
+            ),
+            (
+                rip_core::pages::PageRanges::new(vec![rip_core::pages::PageRange {
+                    first: 2,
+                    last: 2,
+                }])
+                .unwrap()
+                .into(),
+                false,
+            ),
+            (rip_core::pages::RenderPages::default(), false),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let result = read_selected_page_stream(
+                &mut bytes.as_slice(),
+                dir.path(),
+                100,
+                1024,
+                &selection,
+                &mut |_| async { panic!("empty selection has no progress") },
+            )
+            .await;
+            assert_eq!(result.is_ok(), allowed);
+            if let Ok(rendered) = result {
+                assert_eq!(rendered.source_page_count, Some(2));
+                assert!(rendered.pages.is_empty());
+            }
+        }
     }
 }
