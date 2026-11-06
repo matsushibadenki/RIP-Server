@@ -8,6 +8,32 @@ MVP acceptance is ongoing; see the roadmap for implemented features, verificatio
 
 MVP整体验收仍在进行，请参阅路线图中的已实现功能、验证依据及剩余工作。操作界面位于 `/console`。
 
+## スクリーンショット / Screenshots / 截图
+
+ジョブ投入、原本プレビュー、出力条件の確認・承認を扱う操作画面です。
+
+Operator console for job submission, source preview, output review and approval.
+
+用于作业提交、原稿预览、输出条件确认与审批的操作界面。
+
+![J-RIP desktop operator console / デスクトップ操作画面 / 桌面操作界面](docs/images/operator-console-desktop.png)
+
+<details>
+<summary>モバイル表示（日本語・简体中文） / Mobile views / 移动端界面</summary>
+
+<p>
+<img src="docs/images/physical-output-mobile-ja.png" alt="実機出力（日本語） / Physical output in Japanese / 日文实体输出界面" width="320">
+<img src="docs/images/physical-output-mobile-zh-CN.png" alt="実機出力（简体中文） / Physical output in Simplified Chinese / 简体中文实体输出界面" width="320">
+</p>
+
+</details>
+
+検証用PDF・模擬プリンターを用いた実ブラウザーのキャプチャです。
+
+Captured in a real browser using a test PDF and a mock printer.
+
+使用测试PDF和模拟打印机，在真实浏览器中截取。
+
 ## 起動
 
 Rust（rustup）、Docker（TIFF変換時）が必要です。API自体はDockerへのアクセスを必要としません。
