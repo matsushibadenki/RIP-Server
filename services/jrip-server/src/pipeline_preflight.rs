@@ -30,7 +30,7 @@ fn select<T: Clone + Serialize + PartialEq>(
     if r.mode == Mode::Required {
         conflicts.push(json!({"field":field,"code":"required_setting_unavailable","requested":r.value,"alternatives":options,"retryable":false}));
     } else if r.value != default {
-        adjustments.push(json!({"field":field,"requested":r.value,"resolved":default,"reasonCode":"PREFERENCE_NOT_SUPPORTED","alternatives":options}));
+        adjustments.push(json!({"field":field,"requested":r.value,"resolved":default,"reasonCode":if r.mode==Mode::Automatic {"AUTOMATIC_SELECTION"}else{"PREFERENCE_NOT_SUPPORTED"},"alternatives":options}));
     }
     default
 }
@@ -65,6 +65,54 @@ pub async fn create(
         .cloned()
         .unwrap_or_default();
     let mut adjustments = vec![];
+    // Page numbers are selected at delivery; rasterization remains a single complete set.
+    let page_ranges = if let Some(requirement) = req.intent.page_ranges.take() {
+        match rip_core::pages::PageRanges::new(
+            requirement
+                .value
+                .iter()
+                .map(|range| rip_core::pages::PageRange {
+                    first: range.first,
+                    last: range.last,
+                })
+                .collect(),
+        ) {
+            Ok(ranges) if requirement.mode != Mode::Automatic => ranges,
+            Ok(ranges) => {
+                if !ranges.is_all() {
+                    adjustments.push(json!({"field":"pageRanges","requested":ranges,"resolved":[],"reasonCode":"AUTOMATIC_SELECTION","alternatives":[[]]}));
+                }
+                Default::default()
+            }
+            Err(_) => {
+                conflicts.push(json!({"field":"pageRanges","code":"invalid_page_ranges","requested":requirement.value,"alternatives":[],"retryable":false}));
+                Default::default()
+            }
+        }
+    } else {
+        Default::default()
+    };
+    // Physical copies repeat the delivered document, never the source rasterization.
+    let copy_options: Vec<u32> =
+        serde_json::from_value::<Option<[u32; 2]>>(intersection["deliveryCopies"].clone())
+            .map_err(internal)?
+            .map(|[min, max]| (min..=max).collect())
+            .unwrap_or_default();
+    if !(1..=rip_core::print::MAX_DELIVERY_COPIES).contains(&req.intent.copies.value) {
+        conflicts.push(json!({"field":"copies","code":"invalid_copies","requested":req.intent.copies.value,"alternatives":copy_options,"retryable":false}));
+    }
+    let copies = select(
+        "copies",
+        Some(req.intent.copies.clone()),
+        &copy_options,
+        copy_options.first().copied().unwrap_or(1),
+        &mut conflicts,
+        &mut adjustments,
+    );
+    req.intent.copies = Requirement {
+        mode: Mode::Required,
+        value: 1,
+    };
     let dpis: Vec<u32> = intersection["dpi"]
         .as_array()
         .into_iter()
@@ -178,8 +226,8 @@ pub async fn create(
         worker_run_id: None,
     };
     let workflow = pipeline::Request {
-        page_ranges: Default::default(),
-        copies: 1,
+        page_ranges,
+        copies,
         request_id: req.request_id,
         expected_revision: 0,
         printer_id,
@@ -259,6 +307,10 @@ async fn validate_inspection(
     {
         return Err(bad("invalid_inspection"));
     }
+    let selected_pages = workflow
+        .page_ranges
+        .indices(pages.len() as u32)
+        .map_err(|_| ApiError(StatusCode::UNPROCESSABLE_ENTITY, "page_range_out_of_bounds"))?;
     for (index, page) in pages.iter().enumerate() {
         if page["page"] != index + 1 {
             return Err(bad("invalid_inspection"));
@@ -273,7 +325,7 @@ async fn validate_inspection(
                 .ok_or(bad("invalid_inspection"))?;
             let pixels = (points * f64::from(source.manifest.dpi) / 72.0).ceil() as u64;
             let expected = (u64::from(microns) * u64::from(source.manifest.dpi) + 12700) / 25400;
-            if pixels.abs_diff(expected) > 1 {
+            if selected_pages.contains(&index) && pixels.abs_diff(expected) > 1 {
                 return Err(ApiError(
                     StatusCode::UNPROCESSABLE_ENTITY,
                     "inspection_media_mismatch",

@@ -2324,3 +2324,371 @@ async fn pipeline_selection_survives_restart_and_exact_approval_is_required() {
     assert_eq!(fake.prints.load(Ordering::SeqCst), 1);
     task.abort();
 }
+
+#[tokio::test]
+async fn physical_intent_copies_are_negotiated_committed_and_delivered_after_restart() {
+    let (_dir, app, original, fake, task) = fixture(false).await;
+    let document = "%PDF-1.7\nsource";
+    let id = Uuid::new_v4();
+    let mut intent = physical_intent(document);
+    intent["copies"] = serde_json::json!({"mode":"required","value":3});
+    let (status, preflight) = pipeline_request(
+        &app,
+        "/api/v1/print/pipeline-preflights",
+        serde_json::json!({"requestId":id,"intent":intent}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{preflight}");
+    let capabilities = jrip_server::print::models(&app, Some("test"))
+        .await
+        .unwrap();
+    assert_eq!(
+        capabilities["deliveryIntersection"]["copies"],
+        serde_json::json!([1, 1])
+    );
+    assert_eq!(
+        capabilities["deliveryIntersection"]["deliveryCopies"],
+        serde_json::json!([1, 5])
+    );
+    assert_eq!(preflight["workflowRequest"]["copies"], 3);
+    assert_eq!(preflight["registrationTicket"]["request"]["copies"], 3);
+    assert_eq!(preflight["ticket"]["copies"], 1);
+    assert!(preflight["adjustments"].as_array().unwrap().is_empty());
+    assert_eq!(fake.prints.load(Ordering::SeqCst), 0);
+    let (status, committed) = commit_physical(&app, &preflight, document, false).await;
+    assert!(status.is_success(), "{committed}");
+    assert_eq!(
+        commit_physical(&app, &preflight, document, false).await.1["jobId"],
+        committed["jobId"]
+    );
+    let job_id = Uuid::parse_str(committed["jobId"].as_str().unwrap()).unwrap();
+    // Supply a real hashed raster at the worker boundary; no Docker or physical printer.
+    let path = app
+        .root
+        .join("jobs")
+        .join(job_id.to_string())
+        .join("raster");
+    std::fs::create_dir(&path).unwrap();
+    let page = path.join("page-000001.tiff");
+    std::fs::copy(
+        app.root
+            .join("jobs")
+            .join(original.id.to_string())
+            .join("raster/page-000001.tiff"),
+        &page,
+    )
+    .unwrap();
+    let job = app.repo.get(job_id).await.unwrap();
+    let job = app
+        .repo
+        .transition(job, JobState::Ripping, None)
+        .await
+        .unwrap();
+    let job = app
+        .repo
+        .transition(job, JobState::Spooling, None)
+        .await
+        .unwrap();
+    app.repo
+        .complete_with_artifacts(
+            job,
+            &jrip_server::artifacts::hash_pages(&[page]).await.unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut reopened = jrip_server::open(app.root.clone(), "token".into())
+        .await
+        .unwrap();
+    reopened.printers = app.printers.clone();
+    jrip_server::pipeline::tick(&reopened).await.unwrap();
+    assert_eq!(reopened.repo.delivery(id).await.unwrap().ticket.copies, 3);
+    let contract = reopened.repo.pipeline_ticket(id).await.unwrap();
+    assert_eq!(contract["ticket"]["physical"]["ticket"]["copies"], 3);
+    jrip_server::delivery::tick(&reopened).await.unwrap();
+    assert_eq!(fake.prints.load(Ordering::SeqCst), 1);
+    assert_eq!(fake.copies.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        rip_raster::inspect(&fake.document.lock().unwrap())
+            .unwrap()
+            .len(),
+        1
+    );
+    task.abort();
+}
+
+#[tokio::test]
+async fn physical_intent_copy_modes_reject_invalid_values_and_explain_fallbacks() {
+    let (_dir, app, _, fake, task) = fixture(false).await;
+    for (mode, count, expected_status, resolved) in [
+        ("required", 5, StatusCode::CREATED, 5),
+        ("required", 6, StatusCode::UNPROCESSABLE_ENTITY, 0),
+        ("preferred", 6, StatusCode::CREATED, 1),
+        ("automatic", 4, StatusCode::CREATED, 1),
+        ("required", 0, StatusCode::UNPROCESSABLE_ENTITY, 0),
+        ("preferred", 1000, StatusCode::UNPROCESSABLE_ENTITY, 0),
+        ("automatic", 0, StatusCode::UNPROCESSABLE_ENTITY, 0),
+    ] {
+        let mut intent = physical_intent("%PDF-1.7\nsource");
+        intent["copies"] = serde_json::json!({"mode":mode,"value":count});
+        let (status, value) = pipeline_request(
+            &app,
+            "/api/v1/print/pipeline-preflights",
+            serde_json::json!({"requestId":Uuid::new_v4(),"intent":intent}),
+        )
+        .await;
+        assert_eq!(status, expected_status, "{mode} {count}: {value}");
+        if status == StatusCode::CREATED {
+            assert_eq!(
+                value["workflowRequest"]["copies"].as_u64().unwrap_or(1),
+                resolved
+            );
+            if count != resolved {
+                assert!(
+                    value["adjustments"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|a| a["field"] == "copies" && a["resolved"] == resolved)
+                );
+            }
+        } else {
+            assert!(
+                value["conflicts"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|v| v["field"] == "copies")
+            );
+        }
+    }
+    let mut intent = physical_intent("%PDF-1.7\nsource");
+    intent["copies"] = serde_json::json!({"mode":"required","value":3});
+    let (_, preflight) = pipeline_request(
+        &app,
+        "/api/v1/print/pipeline-preflights",
+        serde_json::json!({"requestId":Uuid::new_v4(),"intent":intent}),
+    )
+    .await;
+    fake.copies_max.store(1, Ordering::SeqCst);
+    assert_eq!(
+        commit_physical(&app, &preflight, "%PDF-1.7\nsource", false)
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(fake.prints.load(Ordering::SeqCst), 0);
+    task.abort();
+}
+
+#[tokio::test]
+async fn physical_intent_pages_commit_canonical_ranges_and_send_selected_document() {
+    let (_dir, app, original, fake, task) = fixture_pages(false, 3).await;
+    let document = "%PDF-1.7\nsource";
+    let id = Uuid::new_v4();
+    let mut intent = physical_intent(document);
+    intent["copies"] = serde_json::json!({"mode":"required","value":2});
+    intent["pageRanges"] =
+        serde_json::json!({"mode":"required","value":[{"first":2,"last":2},{"first":3,"last":3}]});
+    let (status, preflight) = pipeline_request(
+        &app,
+        "/api/v1/print/pipeline-preflights",
+        serde_json::json!({"requestId":id,"intent":intent}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{preflight}");
+    assert_eq!(
+        preflight["workflowRequest"]["pageRanges"],
+        serde_json::json!([{"first":2,"last":3}])
+    );
+    assert_eq!(
+        preflight["registrationTicket"]["request"]["pageRanges"],
+        preflight["workflowRequest"]["pageRanges"]
+    );
+    assert!(preflight["adjustments"].as_array().unwrap().is_empty());
+    assert_eq!(fake.prints.load(Ordering::SeqCst), 0);
+    let (status, committed) = commit_physical(&app, &preflight, document, false).await;
+    assert!(status.is_success(), "{committed}");
+    assert_eq!(
+        commit_physical(&app, &preflight, document, false).await.1["jobId"],
+        committed["jobId"]
+    );
+    let job_id = Uuid::parse_str(committed["jobId"].as_str().unwrap()).unwrap();
+    let directory = app
+        .root
+        .join("jobs")
+        .join(job_id.to_string())
+        .join("raster");
+    std::fs::create_dir(&directory).unwrap();
+    let original_directory = app
+        .root
+        .join("jobs")
+        .join(original.id.to_string())
+        .join("raster");
+    let mut pages = Vec::new();
+    for page in 1..=3 {
+        let name = format!("page-{page:06}.tiff");
+        let target = directory.join(&name);
+        std::fs::copy(original_directory.join(name), &target).unwrap();
+        pages.push(target);
+    }
+    let job = app.repo.get(job_id).await.unwrap();
+    let job = app
+        .repo
+        .transition(job, JobState::Ripping, None)
+        .await
+        .unwrap();
+    let job = app
+        .repo
+        .transition(job, JobState::Spooling, None)
+        .await
+        .unwrap();
+    app.repo
+        .complete_with_artifacts(
+            job,
+            &jrip_server::artifacts::hash_pages(&pages).await.unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut reopened = jrip_server::open(app.root.clone(), "token".into())
+        .await
+        .unwrap();
+    reopened.printers = app.printers.clone();
+    jrip_server::pipeline::tick(&reopened).await.unwrap();
+    let ticket = reopened.repo.pipeline_ticket(id).await.unwrap();
+    assert_eq!(
+        ticket["ticket"]["physical"]["ticket"]["selectedSourcePages"],
+        serde_json::json!([2, 3])
+    );
+    assert_eq!(reopened.repo.delivery(id).await.unwrap().ticket.copies, 2);
+    jrip_server::delivery::tick(&reopened).await.unwrap();
+    let mut expected = Vec::new();
+    rip_raster::convert(
+        &pages[1..],
+        &rip_raster::Options {
+            dpi: 72,
+            color: rip_raster::Color::DeviceRgb,
+        },
+        &mut expected,
+    )
+    .unwrap();
+    for page in rip_raster::inspect(&expected).unwrap() {
+        let name = b"custom_square_25.4x25.4mm";
+        expected[page.offset + 1732..page.offset + 1732 + name.len()].copy_from_slice(name);
+    }
+    assert_eq!(*fake.document.lock().unwrap(), expected);
+    assert_eq!(fake.prints.load(Ordering::SeqCst), 1);
+    assert_eq!(fake.copies.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        app.repo
+            .artifacts(job_id)
+            .await
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    task.abort();
+}
+
+#[tokio::test]
+async fn physical_intent_page_modes_are_explicit_and_invalid_ranges_never_fall_back() {
+    let (_dir, app, _, fake, task) = fixture(false).await;
+    for mode in ["required", "preferred", "automatic"] {
+        let mut intent = physical_intent("%PDF-1.7\nsource");
+        intent["pageRanges"] = serde_json::json!({"mode":mode,"value":[{"first":2,"last":3}]});
+        let (status, value) = pipeline_request(
+            &app,
+            "/api/v1/print/pipeline-preflights",
+            serde_json::json!({"requestId":Uuid::new_v4(),"intent":intent}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{value}");
+        if mode == "automatic" {
+            assert!(value["workflowRequest"].get("pageRanges").is_none());
+            assert!(
+                value["adjustments"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|a| a["field"] == "pageRanges"
+                        && a["resolved"] == serde_json::json!([])
+                        && a["reasonCode"] == "AUTOMATIC_SELECTION")
+            );
+        } else {
+            assert_eq!(
+                value["workflowRequest"]["pageRanges"],
+                serde_json::json!([{"first":2,"last":3}])
+            );
+        }
+        for ranges in [
+            serde_json::json!([{"first":0,"last":1}]),
+            serde_json::json!([{"first":4,"last":3}]),
+            serde_json::json!([{"first":1,"last":101}]),
+            serde_json::json!([{"first":1,"last":3},{"first":3,"last":4}]),
+            serde_json::json!([{"first":3,"last":4},{"first":1,"last":2}]),
+        ] {
+            let mut intent = physical_intent("%PDF-1.7\nsource");
+            intent["pageRanges"] = serde_json::json!({"mode":mode,"value":ranges});
+            let (status, value) = pipeline_request(
+                &app,
+                "/api/v1/print/pipeline-preflights",
+                serde_json::json!({"requestId":Uuid::new_v4(),"intent":intent}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert!(
+                value["conflicts"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|v| v["code"] == "invalid_page_ranges")
+            );
+        }
+    }
+    assert_eq!(fake.prints.load(Ordering::SeqCst), 0);
+    task.abort();
+}
+
+#[tokio::test]
+async fn physical_intent_inspection_bounds_ranges_and_checks_only_selected_media() {
+    let (_dir, mut app, _, fake, task) = fixture(false).await;
+    app.credentials = vec![jrip_server::Credential {
+        validity: None,
+        token: "token".into(),
+        identity: "owner".into(),
+        scopes: vec!["admin".into()],
+    }];
+    let document = "%PDF-1.7\nsource";
+    let inspection = Uuid::new_v4();
+    let report = serde_json::json!({"schemaVersion":1,"inspectionId":inspection,"inspectorRevision":"jrip-mupdf-inspection-v1","sourceSha256":format!("{:x}",Sha256::digest(document)),"sourceBytes":document.len(),"pages":[{"page":1,"widthPoints":144.0,"heightPoints":144.0,"rotation":0},{"page":2,"widthPoints":72.0,"heightPoints":72.0,"rotation":0}],"contentParsed":true,"repaired":false,"encrypted":false});
+    app.repo
+        .save_document_inspection(inspection, "owner", &report)
+        .await
+        .unwrap();
+    for (ranges, expected) in [
+        (
+            serde_json::json!([{"first":2,"last":2}]),
+            StatusCode::CREATED,
+        ),
+        (
+            serde_json::json!([{"first":3,"last":3}]),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            serde_json::json!([{"first":1,"last":1}]),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (serde_json::json!([]), StatusCode::UNPROCESSABLE_ENTITY),
+    ] {
+        let mut intent = physical_intent(document);
+        intent["pageRanges"] = serde_json::json!({"mode":"required","value":ranges});
+        let (status,value)=pipeline_request(&app,"/api/v1/print/pipeline-preflights",serde_json::json!({"requestId":Uuid::new_v4(),"intent":intent,"inspectionId":inspection})).await;
+        assert_eq!(status, expected, "{value}");
+        if ranges == serde_json::json!([{"first":3,"last":3}]) {
+            assert_eq!(value["error"]["code"], "page_range_out_of_bounds");
+        }
+    }
+    assert_eq!(fake.prints.load(Ordering::SeqCst), 0);
+    task.abort();
+}

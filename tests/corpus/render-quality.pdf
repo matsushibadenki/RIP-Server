@@ -1,0 +1,118 @@
+%PDF-1.4
+%JRIP synthetic render regression
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Count 4 /Kids [12 0 R 14 0 R 16 0 R 18 0 R] >>
+endobj
+3 0 obj
+<< /Type /ExtGState /ca 0.5 /CA 0.5 >>
+endobj
+4 0 obj
+<< /Type /ExtGState /BM /Multiply >>
+endobj
+5 0 obj
+<< /Type /ExtGState /op true /OP true /OPM 1 >>
+endobj
+6 0 obj
+<< /Type /ExtGState /op false /OP false /OPM 1 >>
+endobj
+7 0 obj
+<< /Length 83 >>
+stream
+1000 0 0 0 1000 1000 d1
+100 100 800 800 re 240 240 520 230 re 240 570 520 190 re f*
+endstream
+endobj
+8 0 obj
+<< /Length 168 >>
+stream
+1000 0 0 0 1000 1000 d1
+430 80 140 840 re f
+100 650 800 120 re f
+250 240 500 100 re f
+430 650 m 80 150 l 200 150 l 500 570 l f
+570 650 m 920 150 l 800 150 l 500 570 l f
+endstream
+endobj
+9 0 obj
+<< /Length 337 >>
+stream
+/CIDInit /ProcSet findresource begin 12 dict begin begincmap
+/CIDSystemInfo << /Registry (JRIP) /Ordering (Test) /Supplement 0 >> def
+/CMapName /JRIPJapanese def /CMapType 2 def
+1 begincodespacerange <01> <02> endcodespacerange
+2 beginbfchar <01> <65E5> <02> <672C> endbfchar
+endcmap CMapName currentdict /CMap defineresource pop end end
+endstream
+endobj
+10 0 obj
+<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000] /FontMatrix [.001 0 0 .001 0 0] /CharProcs << /sun 7 0 R /book 8 0 R >> /Encoding << /Type /Encoding /Differences [1 /sun /book] >> /FirstChar 1 /LastChar 2 /Widths [1000 1000] /Resources << >> /ToUnicode 9 0 R >>
+endobj
+11 0 obj
+<< /Length 63 >>
+stream
+0 0 1 rg 8 8 48 48 re f
+q /Alpha gs 1 0 0 rg 32 32 32 32 re f Q
+endstream
+endobj
+12 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] /Resources << /ExtGState << /Alpha 3 0 R /Multiply 4 0 R /Overprint 5 0 R /Knockout 6 0 R >> /Font << /Japanese 10 0 R >> >> /Contents 11 0 R >>
+endobj
+13 0 obj
+<< /Length 66 >>
+stream
+0 1 1 rg 8 8 48 48 re f
+q /Multiply gs 1 0 0 rg 32 32 32 32 re f Q
+endstream
+endobj
+14 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] /Resources << /ExtGState << /Alpha 3 0 R /Multiply 4 0 R /Overprint 5 0 R /Knockout 6 0 R >> /Font << /Japanese 10 0 R >> >> /Contents 13 0 R >>
+endobj
+15 0 obj
+<< /Length 112 >>
+stream
+1 0 0 0 k 4 4 28 64 re f
+q /Overprint gs 0 0 1 0 k 16 8 12 16 re f Q
+q /Knockout gs 0 0 1 0 k 16 40 12 16 re f Q
+endstream
+endobj
+16 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] /Resources << /ExtGState << /Alpha 3 0 R /Multiply 4 0 R /Overprint 5 0 R /Knockout 6 0 R >> /Font << /Japanese 10 0 R >> >> /Contents 15 0 R >>
+endobj
+17 0 obj
+<< /Length 44 >>
+stream
+0 g BT /Japanese 24 Tf 12 24 Td <0102> Tj ET
+endstream
+endobj
+18 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] /Resources << /ExtGState << /Alpha 3 0 R /Multiply 4 0 R /Overprint 5 0 R /Knockout 6 0 R >> /Font << /Japanese 10 0 R >> >> /Contents 17 0 R >>
+endobj
+xref
+0 19
+0000000000 65535 f 
+0000000043 00000 n 
+0000000092 00000 n 
+0000000171 00000 n 
+0000000225 00000 n 
+0000000277 00000 n 
+0000000340 00000 n 
+0000000405 00000 n 
+0000000538 00000 n 
+0000000757 00000 n 
+0000001145 00000 n 
+0000001432 00000 n 
+0000001546 00000 n 
+0000001758 00000 n 
+0000001875 00000 n 
+0000002087 00000 n 
+0000002251 00000 n 
+0000002463 00000 n 
+0000002558 00000 n 
+trailer
+<< /Size 19 /Root 1 0 R >>
+startxref
+2770
+%%EOF

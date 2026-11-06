@@ -30,6 +30,10 @@ jobs:
         run: |
           /tmp/jrip-acx-validator/bin/pip install -r adapters/source_profiles/requirements.txt
           python3 -m unittest discover -s adapters/source_profiles -p 'test_*.py' -v
+      - name: Verify owned font fixture reproducibility
+        run: |
+          /tmp/jrip-acx-validator/bin/pip install -r tests/corpus/fonts/requirements.txt
+          /tmp/jrip-acx-validator/bin/python tests/corpus/fonts/generate.py --check
       - name: Install operator-console browser test dependencies
         run: |
           npm ci --prefix tests/ui --ignore-scripts --no-audit --no-fund

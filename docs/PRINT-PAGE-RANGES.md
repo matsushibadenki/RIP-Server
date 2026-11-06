@@ -60,3 +60,5 @@ Pipeline requests may be stored before RIP completion; actual page bounds are ch
 持久ticket、正规化pipeline请求、物理契约hash、Receipt及审批均绑定范围。物理契约包含 `pageSelection`；显式选择另含 `sourcePageCount`、`selectedSourcePages`、`selectedPageCount`。队列事务再次核对审批范围，pipeline子任务及统一ticket读取也验证一致性。同一requestId改变选择会冲突；仅相邻范围分组不同的等价表示可复用。旧数据缺省仍为全部，默认序列化省略新增属性。发送前核对光栅页数与显式选择数，并保留hash、介质、颜色、DPI及设备能力验证。
 
 pipeline可在RIP完成前保存请求，实际页数在投递准备时检查。此功能在渲染之后筛选，不减少MuPDF／Ghostscript的原稿渲染量。原稿PrintIntent及PDF虚拟打印机仍处理全部页面。渲染时选择、双面／介质扩展及基础预览UI为Next；真实设备页码、纸张数量、整理顺序及取消验收为Pending。
+
+🟢 [Done] Pre-source physical PrintIntent selection / 原稿投入前の実機PrintIntent指定 / 原稿接收前的实体PrintIntent选择: [PRINT-INTENT-PAGES.md](PRINT-INTENT-PAGES.md). Rendering remains all-page / 描画は全ページのまま / 仍渲染全部页。

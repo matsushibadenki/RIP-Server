@@ -125,7 +125,7 @@ pub async fn models(app: &App, printer_id: Option<&str>) -> Result<Value, ApiErr
             "configured_media_and_exact_raster_geometry_required".into(),
             "explicit_color_attempt_required_when_color_target_configured".into(),
         ];
-        model.extensions = json!({"org.jrip.printer":{"printerId":id,"completionMeaning":"device-confirmed","configuredColorTarget":printer.color_target,"state":device.state,"reasons":device.reasons}});
+        model.extensions = json!({"org.jrip.printer":{"printerId":id,"completionMeaning":"device-confirmed","deliveryPageRanges":true,"renderAllPages":true,"configuredColorTarget":printer.color_target,"state":device.state,"reasons":device.reasons}});
         models.push(model);
     }
     let value = serde_json::to_value(&models).map_err(internal)?;

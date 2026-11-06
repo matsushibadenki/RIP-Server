@@ -32,7 +32,7 @@
 
 TIFF／PWG Rasterのページデータは部数分複製しません。プリンターに1件のジョブを送って機器側で部数を処理します。結果Receiptが示すのは機器の完了報告であり、紙の枚数や印刷品質をセンサー等で保証するものではありません。丁合の指定は追加しておらず、機器の既定動作になります。
 
-今回の対象は明示的な実機Delivery／後続pipelineです。PDF限定のIPP仮想プリンター受付と、原稿投入前のPrintIntent／raster JobTicketの交渉は引き続き1部です。原稿ページ数やRIP完了意味は変更しません。共通能力のPrinter工程には対応範囲を公開しますが、従来のPrintIntent経路の `deliveryIntersection.copies` は1部のままです。
+今回の対象は明示的な実機Delivery／後続pipelineです。PDF限定のIPP仮想プリンター受付とartifact専用PrintIntent／raster JobTicketは引き続き1部です。実機pipelineの原稿投入前PrintIntentは現在複数部に対応します（[PRINT-INTENT-COPIES.md](PRINT-INTENT-COPIES.md)）。原稿ページ数やRIP完了意味は変更しません。共通能力のPrinter工程には対応範囲を公開しますが、ラスター用 `deliveryIntersection.copies` は1セットを表し、実機用の `deliveryIntersection.deliveryCopies` に対応範囲を公開します。
 
 ⭕️ [Pending] 実機での複数部出力・丁合順・取消タイミング・紙枚数の受入確認。開発環境では模擬IPP要求、能力変更、承認、再送、再起動、pipeline伝播まで検証しています。
 
@@ -46,7 +46,7 @@ Copies are pinned in persistent delivery/pipeline tickets, physical-contract has
 
 The worker rechecks live capabilities immediately before sending. Unsupported changed settings reject without Print-Job. The single IPP job carries explicit `copies` and attribute fidelity; raster data is not duplicated. Substituted/ignored-attribute success remains UNKNOWN and is never automatically resent. Acceptance/completion evidence does not prove physical sheet counts or appearance. Collation is not newly controlled and follows the device default.
 
-The PDF-only virtual printer and pre-source PrintIntent/raster ticket negotiation remain single-copy; their common `deliveryIntersection.copies` remains one. This feature applies to explicit physical delivery and follow-on pipelines. Real-device copies/collation/cancellation acceptance is Pending. Duplex, page selection, richer media controls and basic preview/UI are Next.
+The PDF-only virtual printer and artifact-only PrintIntent/raster ticket remain single-copy. Physical pipeline preflight now supports copies before source acceptance; see [PRINT-INTENT-COPIES.md](PRINT-INTENT-COPIES.md). `deliveryIntersection.copies` remains one raster set; `deliveryCopies` advertises physical counts. Real-device copies/collation/cancellation acceptance is Pending. See ROADMAP for current unfinished work.
 
 ## 简体中文
 
@@ -56,6 +56,6 @@ REST投递预览、显式投递、RIP后续pipeline，以及MCP `print_preview_d
 
 发送前重新取得设备能力，范围变化时拒绝，不发送Print-Job。使用一个IPP任务，显式传递 `copies` 和属性fidelity，不复制光栅页数据。设备忽略或替换属性的成功响应仍归为UNKNOWN，不自动重发。设备完成报告不证明实际纸张数量或外观。未新增逐份整理控制，使用设备默认值。
 
-PDF虚拟打印机和原稿投入前的PrintIntent／raster ticket协商仍限制为1份，对应 `deliveryIntersection.copies` 仍为1。本功能适用于显式实体投递和后续pipeline。真实设备多份、整理顺序及取消验收为Pending。双面、页码范围、更丰富的介质控制及基础预览／GUI为Next。
+PDF虚拟打印机及仅产物的PrintIntent／raster ticket仍限制为一套。实体pipeline预检现已支持接收原稿前协商份数，参见 [PRINT-INTENT-COPIES.md](PRINT-INTENT-COPIES.md)。`deliveryIntersection.copies` 表示一套光栅，`deliveryCopies` 公布实体输出范围。真实设备份数、整理顺序及取消验收为Pending，未完成工作参见ROADMAP。
 
 🟢 [Done] Rendered-page selection is now available for explicit delivery/pipelines. RIP後のページ範囲指定／RIP后页码范围选择: [PRINT-PAGE-RANGES.md](PRINT-PAGE-RANGES.md).

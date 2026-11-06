@@ -386,10 +386,10 @@ pub fn delivery_intersection(models: &[CapabilityModel]) -> Value {
     if !rip.bit_depths.contains(&8) || !printer.bit_depths.contains(&8) {
         conflicts.push(json!({"code":"pipeline_bit_depth_mismatch","retryable":false}));
     }
-    if printer
+    let delivery_copies = printer
         .copies
-        .is_none_or(|[min, max]| !(min..=max).contains(&1))
-    {
+        .filter(|[min, max]| *min >= 1 && min <= max && *max <= MAX_DELIVERY_COPIES);
+    if delivery_copies.is_none() {
         conflicts.push(json!({"code":"pipeline_copies_mismatch","retryable":false}));
     }
     if printer.media.is_empty() {
@@ -424,7 +424,7 @@ pub fn delivery_intersection(models: &[CapabilityModel]) -> Value {
     }
     json!({"settingsCompatible":conflicts.is_empty(),"conflicts":conflicts,
         "dpi":dpi,"directColorSpaces":colors,"media":printer.media,"bitDepths":[8],
-        "artifactBytes":max_bytes,"copies":[1,1],"sides":["one-sided"],"finishings":["none"],
+        "artifactBytes":max_bytes,"copies":[1,1],"deliveryCopies":delivery_copies,"deliveryPageRanges":{"minimum":1,"maximum":100,"sorted":true,"nonOverlapping":true,"stage":"delivery","renderAllPages":true},"sides":["one-sided"],"finishings":["none"],
         "bridge":{"inputMediaType":"image/tiff","outputMediaType":"image/pwg-raster","preservesGeometry":true},
         "explicitColorRequired":requires_color,"colorPathSupported":color_path,"colorOutputSpaces":color_outputs,
         "requiredProfiles":printer.profiles,"runtimeProbed":false,"documentVerified":false,
@@ -464,11 +464,20 @@ mod tests {
         assert_eq!(result["artifactBytes"], 33554432);
         assert_eq!(result["authorizationGranted"], false);
         models[3].copies = Some([2, 5]);
-        assert_eq!(delivery_intersection(&models)["settingsCompatible"], false);
+        assert_eq!(delivery_intersection(&models)["settingsCompatible"], true);
+        assert_eq!(delivery_intersection(&models)["copies"], json!([1, 1]));
         assert_eq!(
-            delivery_intersection(&models)["conflicts"][0]["code"],
-            "pipeline_copies_mismatch"
+            delivery_intersection(&models)["deliveryCopies"],
+            json!([2, 5])
         );
+        for range in [None, Some([0, 5]), Some([5, 2]), Some([1, 1000])] {
+            models[3].copies = range;
+            assert_eq!(delivery_intersection(&models)["settingsCompatible"], false);
+            assert_eq!(
+                delivery_intersection(&models)["conflicts"][0]["code"],
+                "pipeline_copies_mismatch"
+            );
+        }
         models[3].copies = Some([1, 5]);
 
         models[3].profiles = vec!["a".repeat(64)];
