@@ -14,12 +14,14 @@ MAX_SOURCE = 32 * 1024 * 1024
 MAX_ICC = 4 * 1024 * 1024
 MAX_TOTAL = 16 * 1024 * 1024
 MAX_PROFILES = 64
+MAX_PAGE_VISITS = 16384
 
 class Analysis:
     def __init__(self):
         self.profiles = []
         self.warnings = set()
         self.total = 0
+        self.page_profiles = None
 
     def warn(self, code):
         self.warnings.add(code)
@@ -80,17 +82,20 @@ class Analysis:
                 raise ValueError("ENCRYPTED_PDF_UNSUPPORTED")
             def resolve(obj):
                 return obj.get_object() if isinstance(obj, IndirectObject) else obj
-            seen_profiles = set()
+            seen_profiles = {}
             def profile(obj, kind, require_n):
+                index = len(self.profiles)
                 try:
                     stream = resolve(obj)
                     key = (kind, id(stream))
                     if key in seen_profiles:
-                        return
-                    seen_profiles.add(key)
+                        return seen_profiles[key]
+                    index = len(self.profiles)
+                    seen_profiles[key] = index
                     if len(self.profiles) >= MAX_PROFILES or self.total >= MAX_TOTAL:
                         self.warn("PROFILE_BUDGET_LIMIT")
-                        return
+                        seen_profiles[key] = None
+                        return None
                     if not isinstance(stream, StreamObject):
                         raise ValueError("INVALID_PROFILE_STREAM")
                     if any(k in stream for k in ("/F", "/FFilter", "/FDecodeParms")):
@@ -120,6 +125,7 @@ class Analysis:
                 except Exception as error:
                     code = str(error) if isinstance(error, ValueError) and re.fullmatch(r"[A-Z_]+", str(error)) else "PROFILE_STREAM_FAILED"
                     self.add(kind, error=code)
+                return index if index < len(self.profiles) else None
             root = resolve(reader.trailer["/Root"])
             intents = resolve(root.get("/OutputIntents", []))
             if not isinstance(intents, (ArrayObject, list)):
@@ -165,6 +171,51 @@ class Analysis:
                         break
                     walk(child, depth+1)
             walk(root)
+            # Page resources are declarations, not evidence that a paint operation used them.
+            pages = reader.pages
+            if not 1 <= len(pages) <= 100:
+                self.warn("PAGE_PROFILE_LIMIT")
+                return
+            self.page_profiles = []
+            page_visits = 0
+            for number, page in enumerate(pages, 1):
+                indices, refs, objects = set(), set(), set()
+                complete = True
+                def page_walk(obj, depth=0):
+                    nonlocal page_visits, complete
+                    page_visits += 1
+                    if page_visits > MAX_PAGE_VISITS or depth > 32:
+                        complete = False
+                        self.warn("PAGE_RESOURCE_GRAPH_LIMIT")
+                        return
+                    if isinstance(obj, IndirectObject):
+                        key = (obj.idnum, obj.generation)
+                        if key in refs:
+                            return
+                        refs.add(key)
+                        obj = resolve(obj)
+                    if not isinstance(obj, (DictionaryObject, ArrayObject)) or id(obj) in objects:
+                        return
+                    objects.add(id(obj))
+                    if isinstance(obj, ArrayObject):
+                        if len(obj) >= 2 and obj[0] == "/ICCBased":
+                            index = profile(obj[1], "PDF_ICC_BASED", True)
+                            if index is None:
+                                complete = False
+                            else:
+                                indices.add(index)
+                        children = obj
+                    else:
+                        children = [v for k,v in obj.items() if k not in ("/Parent", "/P", "/Pages", "/Kids")]
+                    for child in children:
+                        if page_visits >= MAX_PAGE_VISITS:
+                            complete = False
+                            self.warn("PAGE_RESOURCE_GRAPH_LIMIT")
+                            break
+                        page_walk(child, depth+1)
+                page_walk(page.get("/Resources", DictionaryObject()))
+                self.page_profiles.append({"page":number,"profileIndices":sorted(indices),
+                    "status":"DECLARATIONS_INSPECTED" if complete else "INCOMPLETE"})
         finally:
             logger.removeHandler(handler)
 
@@ -234,15 +285,17 @@ def analyze(data):
         try:
             report.pdf(data)
         except Exception as error:
+            report.page_profiles = None  # Never publish a partial page table as a complete mapping.
             report.warn(str(error) if str(error) in ("ENCRYPTED_PDF_UNSUPPORTED", "PARSER_VERSION_MISMATCH") else "PDF_PARSE_FAILED")
     elif data.startswith(b"%!PS-Adobe-"):
         kind, scope = "postscript", "static-dsc-declarations-not-execution"
         report.postscript(data)
     else:
         raise ValueError("UNSUPPORTED_SOURCE_FORMAT")
-    return {"schemaVersion": 1, "profile": "org.jrip.source-color-profiles-v1", "inspectorRevision": "jrip-source-icc-v1-pypdf-6.21.2",
+    return {"schemaVersion": 1, "profile": "org.jrip.source-color-profiles-v1", "inspectorRevision": "jrip-source-icc-v2-pypdf-6.21.2",
             "sourceSha256": hashlib.sha256(data).hexdigest(), "sourceBytes": len(data), "format": kind, "scope": scope,
             "status": "INCOMPLETE" if report.warnings else "DECLARATIONS_INSPECTED", "profiles": report.profiles,
+            "pageProfileDeclarations": None if report.page_profiles is None else {"profile":"org.jrip.pdf-page-profile-declarations-v1", "scope":"reachable-page-resources-not-executed-content", "executedUseVerified":False, "pages":report.page_profiles},
             "warnings": sorted(report.warnings), "automaticSelection": False, "outputIntentIsInputProfile": False,
             "validationMeaning": "bounded-icc-envelope-not-colorimetric-validation",
             "messages": {"en": "Review declared ICC roles and warnings; no input profile was selected",

@@ -90,6 +90,10 @@ with the pinned bookworm mutool API: its devices accept callback objects rather
 than requiring the newer `Device` constructor. The actual image is tested.
 
 🟠 [Next] Font-use evidence from actual rasterization, Ghostscript/PS/EPS usage,
-font-program identity, practical multilingual comparisons and OpenType shaping.
-日本語: 実ラスタライズ時・Ghostscript／PS／EPSの使用記録、書体プログラムの識別、実用多言語比較・OpenType組版は未完了です。
-简体中文: 实际栅格化、Ghostscript／PS／EPS字体使用记录、字体程序身份、实际多语言比较及OpenType排版仍未完成。
+program-to-rendered-glyph association, practical multilingual comparisons and OpenType shaping.
+日本語: 実ラスタライズ時・Ghostscript／PS／EPSの使用記録、実行字形とプログラムの対応、実用多言語比較・OpenType組版は未完了です。
+简体中文: 实际栅格化、Ghostscript／PS／EPS字体使用记录、执行字形与程序关联、实际多语言比较及OpenType排版仍未完成。
+
+Declared embedded programs now have separate [binary identities](EMBEDDED-FONT-IDENTITY.md); these are not inferred from text-use names.
+日本語: 宣言プログラムのバイナリ識別も別途参照できます。使用名からハッシュを推測しません。
+简体中文: 声明程序另有二进制标识，不根据使用名称猜测哈希。

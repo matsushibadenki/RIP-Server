@@ -55,6 +55,50 @@ class Profiles(unittest.TestCase):
         self.assertEqual(entries["PDF_OUTPUT_INTENT"]["colorSpace"],"cmyk")
         self.assertFalse(result["automaticSelection"]);self.assertFalse(result["outputIntentIsInputProfile"])
 
+    def test_page_profile_mapping_shares_profiles_without_cross_page_leakage(self):
+        writer=PdfWriter()
+        stream=DecodedStreamObject();stream.set_data(icc());stream[NameObject("/N")]=NumberObject(3)
+        ref=writer._add_object(stream)
+        resource=DictionaryObject({NameObject("/ColorSpace"):DictionaryObject({NameObject("/CS1"):ArrayObject([NameObject("/ICCBased"),ref])})})
+        form=DecodedStreamObject();form.set_data(b"");form[NameObject("/Resources")]=resource
+        for index in range(3):
+            page=writer.add_blank_page(72,72)
+            if index == 0:
+                page[NameObject("/Resources")]=resource
+            elif index == 1:
+                page[NameObject("/Resources")]=DictionaryObject({NameObject("/XObject"):DictionaryObject({NameObject("/Fm1"):writer._add_object(form)})})
+        out=io.BytesIO();writer.write(out)
+        result=analyze(out.getvalue())
+        mapping=result["pageProfileDeclarations"]
+        self.assertFalse(mapping["executedUseVerified"])
+        self.assertEqual([p["profileIndices"] for p in mapping["pages"]],[[0],[0],[]])
+        self.assertEqual(len(result["profiles"]),1)
+        self.assertEqual([p["page"] for p in mapping["pages"]],[1,2,3])
+        with patch("analyze.MAX_PAGE_VISITS",1):
+            limited=analyze(out.getvalue())
+        self.assertEqual(limited["status"],"INCOMPLETE")
+        self.assertTrue(all(p["status"]=="INCOMPLETE" for p in limited["pageProfileDeclarations"]["pages"]))
+
+    def test_page_mapping_resolves_inherited_resources(self):
+        writer=PdfWriter();page=writer.add_blank_page(72,72)
+        del page["/Resources"]
+        stream=DecodedStreamObject();stream.set_data(icc());stream[NameObject("/N")]=NumberObject(3)
+        resource=DictionaryObject({NameObject("/ColorSpace"):DictionaryObject({NameObject("/CS1"):ArrayObject([NameObject("/ICCBased"),writer._add_object(stream)])})})
+        writer._pages.get_object()[NameObject("/Resources")]=resource
+        out=io.BytesIO();writer.write(out)
+        report=analyze(out.getvalue())
+        self.assertEqual(report["pageProfileDeclarations"]["pages"][0]["profileIndices"],[0])
+
+    def test_partial_page_table_is_withheld_after_parser_failure(self):
+        def fail(partial, data):
+            partial.page_profiles=[{"page":1,"profileIndices":[],"status":"DECLARATIONS_INSPECTED"}]
+            raise ValueError("broken page reference")
+        with patch("analyze.Analysis.pdf",fail):
+            report=analyze(b"%PDF-1.4\n")
+        self.assertEqual(report["status"],"INCOMPLETE")
+        self.assertIsNone(report["pageProfileDeclarations"])
+        self.assertIn("PDF_PARSE_FAILED",report["warnings"])
+
     def test_pdf_absence_is_scope_limited(self):
         report=analyze(pdf())
         self.assertEqual(report["profiles"],[])

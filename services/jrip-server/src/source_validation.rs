@@ -67,6 +67,7 @@ pub struct ValidatedRender {
     pub source_bytes: u64,
     pub strict_pdf: bool,
     pub font_policy: Option<serde_json::Value>,
+    pub source_geometry: Option<serde_json::Value>,
     pub profile_analysis: serde_json::Value,
 }
 pub async fn render(
@@ -82,6 +83,7 @@ pub async fn render(
     let strict_pdf = job.manifest.format == DocumentFormat::Pdf;
     let result = async {
         let mut font_policy = None;
+        let mut source_geometry = None;
         let inspected = if strict_pdf {
             let report = rip_interpreter::inspect_pdf_attempt_with_image(
                 &source,
@@ -90,6 +92,7 @@ pub async fn render(
             )
             .await?;
             font_policy = Some(report["fontPolicy"].clone());
+            source_geometry = Some(report["pages"].clone());
             Some(
                 report["pages"]
                     .as_array()
@@ -144,6 +147,7 @@ pub async fn render(
             source_bytes: snapshot.bytes,
             strict_pdf,
             font_policy,
+            source_geometry,
             profile_analysis,
         })
     }

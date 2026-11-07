@@ -14,6 +14,7 @@ use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
 mod approvals;
+mod artifact_descriptor;
 pub mod artifacts;
 mod audit;
 mod authorization;
@@ -21,6 +22,7 @@ mod budget;
 pub mod color;
 mod console;
 pub mod delivery;
+mod delivery_artifact;
 pub mod dispatch;
 mod event_stream;
 pub mod inspection;
@@ -31,8 +33,11 @@ mod pipeline_preflight;
 mod preflight;
 mod preview;
 pub mod print;
+mod printer_observation;
+pub mod printer_observer;
 mod retention;
 mod retry;
+mod source_descriptor;
 pub mod source_validation;
 use authorization::authorize;
 pub use authorization::{Credential, CredentialValidity};
@@ -97,6 +102,10 @@ pub fn router(app: App) -> Router {
         .route("/console/", get(console::index))
         .route("/console/app.js", get(console::script))
         .route("/console/delivery.js", get(console::delivery_script))
+        .route(
+            "/console/printer-status.js",
+            get(console::printer_status_script),
+        )
         .route("/console/style.css", get(console::style))
         .route(
             "/health",
@@ -193,6 +202,14 @@ pub fn router(app: App) -> Router {
         .route("/api/v1/pipelines/{id}/cancel", post(pipeline::cancel))
         .route("/api/v1/printers", get(delivery::list))
         .route("/api/v1/printers/{id}", get(delivery::capabilities))
+        .route(
+            "/api/v1/printers/{id}/observations",
+            get(printer_observation::list),
+        )
+        .route(
+            "/api/v1/printers/{id}/observations/{sequence}",
+            get(printer_observation::event),
+        )
         .route("/api/v1/jobs", get(list).post(upload))
         .route("/api/v1/print/resolve", post(resolve_intent))
         .route("/api/v1/print/capabilities", get(print::capabilities))
@@ -256,6 +273,14 @@ pub fn router(app: App) -> Router {
         )
         .route("/api/v1/deliveries/{id}/ticket", get(delivery::contract))
         .route("/api/v1/deliveries/{id}", get(delivery::detail))
+        .route(
+            "/api/v1/deliveries/{id}/artifact/descriptor",
+            get(delivery_artifact::describe),
+        )
+        .route(
+            "/api/v1/deliveries/{id}/artifact",
+            get(delivery_artifact::download),
+        )
         .route("/api/v1/deliveries/{id}/cancel", post(delivery::cancel))
         .route(
             "/api/v1/deliveries/{id}/reconcile",
@@ -268,6 +293,19 @@ pub fn router(app: App) -> Router {
         )
         .route("/api/v1/jobs/{id}/receipt", get(preflight::receipt))
         .route("/api/v1/jobs/{id}/artifacts", get(preflight::artifacts))
+        .route(
+            "/api/v1/jobs/{id}/source/descriptor",
+            get(source_descriptor::describe),
+        )
+        .route("/api/v1/jobs/{id}/source", get(source_descriptor::download))
+        .route(
+            "/api/v1/jobs/{id}/artifacts/{name}/descriptor",
+            get(artifact_descriptor::raster),
+        )
+        .route(
+            "/api/v1/color/attempts/{id}/artifacts/{name}/descriptor",
+            get(artifact_descriptor::color),
+        )
         .route(
             "/api/v1/jobs/{id}/artifacts/{name}/preview",
             get(preview::get),
@@ -375,6 +413,41 @@ fn messages(code: &str) -> serde_json::Value {
             "The delivery page count differs from the selected range",
             "送信ページ数が指定範囲と一致しません",
             "投递页数与所选范围不一致",
+        ),
+        "delivery_artifact_mismatch" | "delivery_contract_mismatch" => (
+            "Delivery bytes or contract do not match the recorded output; do not resend",
+            "送信データまたは契約が保存済み出力と一致しません。再送せず確認してください",
+            "投递数据或契约与登记输出不匹配，请勿重发",
+        ),
+        "invalid_printer_observation_query" => (
+            "Use a nonnegative observation cursor, a positive sequence and a limit from 1 to 100",
+            "観測cursorは0以上、sequenceは正整数、limitは1〜100で指定してください",
+            "观察cursor须为非负整数，sequence须为正整数，limit须为1至100",
+        ),
+        "invalid_pwg_raster" => (
+            "Delivery artifact is not a supported bounded PWG Raster stream",
+            "送信成果物が対応範囲・容量内の正常なPWG Rasterではありません",
+            "投递产物不是受支持且大小受限的有效PWG Raster",
+        ),
+        "source_unavailable" => (
+            "Source bytes are unavailable; check retention and storage",
+            "原稿データを取得できません。保持状態とストレージを確認してください",
+            "原稿数据不可用，请检查保留状态和存储",
+        ),
+        "source_descriptor_mismatch" => (
+            "Source bytes, format or validation evidence do not match the registered document",
+            "原稿のbytes・形式または検証証跡が登録文書と一致しません",
+            "原稿容量、格式或验证证据与登记文档不匹配",
+        ),
+        "artifact_layout_unsupported" => (
+            "Artifact metadata requires a valid bounded single-page 8-bit RGB, CMYK or gray TIFF",
+            "成果物の情報取得には、容量制限内の正常な単ページ8bit RGB・CMYK・グレーTIFFが必要です",
+            "产物描述需要大小受限且有效的单页8位RGB、CMYK或灰度TIFF",
+        ),
+        "artifact_color_contract_mismatch" => (
+            "The artifact color space or ICC does not match the recorded color ticket",
+            "成果物の色空間またはICCが保存済み色変換ticketと一致しません",
+            "产物色彩空间或ICC与保存的颜色ticket不匹配",
         ),
         "preview_unsupported" => (
             "Preview requires a supported 8-bit TIFF and a matching valid ICC for CMYK",

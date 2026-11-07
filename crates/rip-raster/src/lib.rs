@@ -1,4 +1,5 @@
 //! Bounded TIFF-to-PWG Raster encoder. Device colors are preserved; no ICC conversion.
+pub mod describe;
 pub mod preview;
 use std::{
     io::{Read, Seek, Write},

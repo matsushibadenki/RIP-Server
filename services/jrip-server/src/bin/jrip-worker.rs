@@ -108,7 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 {
                     return Err(std::io::Error::other("invalid_empty_selection"));
                 }
-                repo.record_source_validation_with_fonts(
+                repo.record_source_validation_with_geometry(
                     id,
                     run_id,
                     &job.source_sha256,
@@ -118,6 +118,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .unwrap_or(rendered.pages.len() as u32),
                     validated.strict_pdf,
                     validated.font_policy,
+                    validated.source_geometry,
                 )
                 .await
                 .map_err(std::io::Error::other)?;

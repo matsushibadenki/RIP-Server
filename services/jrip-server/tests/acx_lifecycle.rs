@@ -33,10 +33,42 @@ fn credentials() -> Vec<jrip_server::Credential> {
 }
 #[tokio::test]
 async fn advertised_settings_lifecycle_binds_hash_actor_and_durable_acceptance() {
+    exercise_advertised_lifecycle(None, false).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Docker images, Python jsonschema and Node.js"]
+async fn advertised_lifecycle_runs_real_interpreter_and_preserves_terminal_evidence() {
+    for pdf in [false, true] {
+        exercise_advertised_lifecycle(Some(true), pdf).await;
+        exercise_advertised_lifecycle(Some(false), pdf).await;
+    }
+}
+
+async fn exercise_advertised_lifecycle(render: Option<bool>, pdf: bool) {
     let dir = tempfile::tempdir().unwrap();
     let mut state = jrip_server::open(dir.path().into(), OWNER.into())
         .await
         .unwrap();
+    let signing = if render.is_some() {
+        let private =
+            ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+                .unwrap();
+        let signer = rip_storage::receipts::ReceiptSigner::from_pkcs8(private.as_ref()).unwrap();
+        let key = dir.path().join("signing.pk8");
+        let public = dir.path().join("public.raw");
+        std::fs::write(&key, private.as_ref()).unwrap();
+        std::fs::write(&public, signer.public_key()).unwrap();
+        state.repo = rip_storage::Repository::open_with_receipt_signer(
+            &dir.path().join("jobs.sqlite3"),
+            Some(signer),
+        )
+        .await
+        .unwrap();
+        Some((key, public))
+    } else {
+        None
+    };
     state.credentials = credentials();
     let router = jrip_server::router(state.clone());
     let discovery = router
@@ -57,8 +89,19 @@ async fn advertised_settings_lifecycle_binds_hash_actor_and_durable_acceptance()
         lifecycle["authorization"]["preflightGrantsExecution"],
         false
     );
-    let document = "%!PS-Adobe-3.0\nshowpage\n";
-    let intent = json!({"document":{"uri":"https://example.org/source.ps","mediaType":"application/postscript","sha256":format!("{:x}",Sha256::digest(document))},"copies":{"mode":"required","value":1},"dpi":{"mode":"required","value":72},"output":{"destination":"artifact"}});
+    let fixture = std::str::from_utf8(include_bytes!("../../../tests/corpus/colors.pdf")).unwrap();
+    let document = if pdf {
+        if render == Some(false) {
+            &fixture[..fixture.len() - 30]
+        } else {
+            fixture
+        }
+    } else if render == Some(false) {
+        "%!PS-Adobe-3.0\nshowpage\njrip_deliberately_undefined_operator\n"
+    } else {
+        "%!PS-Adobe-3.0\n0 0 1 setrgbcolor 10 10 20 20 rectfill showpage\n"
+    };
+    let intent = json!({"document":{"uri":if pdf {"https://example.org/source.pdf"} else {"https://example.org/source.ps"},"mediaType":if pdf {"application/pdf"} else {"application/postscript"},"sha256":format!("{:x}",Sha256::digest(document))},"copies":{"mode":"required","value":1},"dpi":{"mode":"required","value":72},"output":{"destination":"artifact"}});
     let mut preflight = request(
         "POST",
         lifecycle["preflightEndpoint"].as_str().unwrap(),
@@ -177,12 +220,129 @@ async fn advertised_settings_lifecycle_binds_hash_actor_and_durable_acceptance()
         .replace("{jobId}", job_id);
     assert_eq!(
         router
+            .clone()
             .oneshot(request("GET", &result_path, OWNER, Body::empty()))
             .await
             .unwrap()
             .status(),
         StatusCode::NOT_FOUND
     );
+    if let Some(valid) = render {
+        let mut worker = tokio::process::Command::new(env!("CARGO_BIN_EXE_jrip-worker"));
+        worker.arg(job_id).env("JRIP_DATA_ROOT", dir.path());
+        if let Some((key, _)) = &signing {
+            worker.env("JRIP_RECEIPT_SIGNING_KEY", key);
+        }
+        let output = worker.output().await.unwrap();
+        assert_eq!(
+            output.status.success(),
+            valid,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let id = uuid::Uuid::parse_str(job_id).unwrap();
+        let mut restarted = jrip_server::open(dir.path().into(), OWNER.into())
+            .await
+            .unwrap();
+        restarted.credentials = credentials();
+        let current = restarted.repo.get(id).await.unwrap();
+        assert_eq!(
+            current.state,
+            if valid {
+                rip_core::JobState::Completed
+            } else {
+                rip_core::JobState::Failed
+            }
+        );
+        let after = jrip_server::router(restarted.clone());
+        let response = after
+            .clone()
+            .oneshot(request("GET", &result_path, OWNER, Body::empty()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let terminal = value(response).await;
+        assert_eq!(
+            terminal["status"],
+            if valid { "succeeded" } else { "failed" }
+        );
+        let bundle =
+            json!({"manifest":manifest,"preflight":pf,"accepted":receipt,"result":terminal});
+        let bundle_path = dir.path().join("real-lifecycle.json");
+        std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+        let checker = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/check-acx-lifecycle.py");
+        let checked = tokio::process::Command::new("python3")
+            .arg(checker)
+            .arg(&bundle_path)
+            .arg(&signing.as_ref().unwrap().1)
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            checked.status.success(),
+            "independent checker: {}",
+            String::from_utf8_lossy(&checked.stderr)
+        );
+        let result = &terminal["proof"]["result"];
+        assert_eq!(
+            result["selectedEngine"],
+            if pdf { "mupdf" } else { "ghostscript" }
+        );
+        assert_eq!(
+            terminal["resultHash"],
+            format!(
+                "sha256:{:x}",
+                Sha256::digest(serde_json::to_vec(result).unwrap())
+            )
+        );
+        assert_eq!(
+            result["sourceSha256"],
+            format!("{:x}", Sha256::digest(document))
+        );
+        if valid {
+            assert_eq!(result["completionMeaning"], "raster_export");
+            assert_eq!(result["artifactHashesVerified"], true);
+            assert_eq!(result["pageCount"], if pdf { 2 } else { 1 });
+            assert!(!result["sourceValidation"].is_null());
+            let artifacts = restarted.repo.artifacts(id).await.unwrap();
+            assert_eq!(result["artifacts"], artifacts);
+            for (index, artifact) in artifacts.as_array().unwrap().iter().enumerate() {
+                let raster = restarted
+                    .root
+                    .join("jobs")
+                    .join(job_id)
+                    .join(format!("raster/page-{:06}.tiff", index + 1));
+                assert_eq!(
+                    artifact["sha256"],
+                    format!("{:x}", Sha256::digest(std::fs::read(raster).unwrap()))
+                );
+            }
+        } else {
+            assert!(result["artifacts"].is_null());
+            assert!(restarted.repo.artifacts(id).await.is_err());
+        }
+        let replay = value(
+            after
+                .clone()
+                .oneshot(commit(OWNER, digest, document))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(replay["job"]["id"], job_id);
+        assert_eq!(restarted.repo.list(10, 0).await.unwrap().len(), 1);
+        assert_eq!(
+            value(
+                after
+                    .oneshot(request("GET", &result_path, OWNER, Body::empty()))
+                    .await
+                    .unwrap()
+            )
+            .await,
+            terminal
+        );
+    }
 }
 
 #[tokio::test]

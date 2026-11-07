@@ -22,3 +22,11 @@ lcms2 = { version = "=6.2.0", features = ["static"] }
 rip-color.workspace = true
 tempfile = "3"
 sha2 = "0.10"
+
+tiff = "0.10"
+
+rip-jobs.workspace = true
+
+rip-raster.workspace = true
+
+rip-ipp.workspace = true

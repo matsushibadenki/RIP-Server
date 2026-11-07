@@ -3,7 +3,6 @@ use super::*;
 use rip_core::print::{
     Availability, CapabilityModel, DpiSupport, JobTicket, MediaCapability, Stage,
 };
-use rip_printer::PrinterBackend;
 use serde_json::{Value, json};
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -39,11 +38,7 @@ pub async fn models(app: &App, printer_id: Option<&str>) -> Result<Value, ApiErr
             .iter()
             .find(|printer| printer.id == id)
             .ok_or(bad("printer_not_configured"))?;
-        let device = delivery::backend(app, printer)
-            .map_err(|_| bad("invalid_printer"))?
-            .capabilities()
-            .await
-            .map_err(|_| bad("printer_unavailable"))?;
+        let device = crate::printer_observation::probe(app, printer).await?;
         let mut model = CapabilityModel::rip();
         model.id = format!("org.jrip.printer.{id}");
         model.stage = Stage::Printer;
@@ -141,7 +136,8 @@ pub async fn models(app: &App, printer_id: Option<&str>) -> Result<Value, ApiErr
             "configured_media_and_exact_raster_geometry_required".into(),
             "explicit_color_attempt_required_when_color_target_configured".into(),
         ];
-        model.extensions = json!({"org.jrip.printer":{"printerId":id,"completionMeaning":"device-confirmed","deliveryPageRanges":true,"renderAllPages":false,"renderSelectionFormats":["application/pdf"],"sheetBack":device.sheet_back,"configuredColorTarget":printer.color_target,"state":device.state,"reasons":device.reasons}});
+        let conditions = rip_core::printer_conditions::describe(device.state, &device.reasons);
+        model.extensions = json!({"org.jrip.printer":{"printerId":id,"completionMeaning":"device-confirmed","deliveryPageRanges":true,"renderAllPages":false,"renderSelectionFormats":["application/pdf"],"sheetBack":device.sheet_back,"configuredColorTarget":printer.color_target,"state":device.state,"reasons":device.reasons,"acceptingJobs":device.accepting_jobs,"queuedJobCount":device.queued_job_count,"queuedJobCountMeaning":"device-reported-nonterminal-jobs","conditions":conditions,"markerSupplies":device.marker_supplies,"printerSupplies":device.printer_supplies,"observationReference":format!("/api/v1/printers/{id}/observations"),"observationProfile":rip_storage::printer_observation::PROFILE}});
         models.push(model);
     }
     let value = serde_json::to_value(&models).map_err(internal)?;

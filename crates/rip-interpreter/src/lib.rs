@@ -524,6 +524,13 @@ async fn inspect_script(
             {
                 return Err(InterpreterError::Rejected("invalid_inspection"));
             }
+            rip_core::pages::validate_source_geometry(
+                &value["pages"],
+                value["pages"].as_array().unwrap().len() as u32,
+            )
+            .map_err(|_| InterpreterError::Rejected("invalid_source_geometry"))?;
+            rip_core::font_programs::validate(&value["fontPolicy"])
+                .map_err(|_| InterpreterError::Rejected("invalid_font_program_identity"))?;
             rip_core::font_usage::validate(
                 &value["fontPolicy"]["runtimeEvidence"],
                 value["pages"].as_array().unwrap().len() as u32,
@@ -544,6 +551,10 @@ async fn inspect_script(
             return Err(InterpreterError::Rejected(
                 "invalid_source_profile_analysis",
             ));
+        }
+        if !strict_pdf {
+            rip_core::pages::validate_page_profile_declarations(&value, None)
+                .map_err(|_| InterpreterError::Rejected("invalid_page_profile_declarations"))?;
         }
         Ok(value)
     })

@@ -14,6 +14,8 @@ pub mod kms;
 pub mod maintenance;
 pub mod operation_approvals;
 pub mod pipeline;
+pub mod printer_observation;
+pub mod printer_observer;
 pub mod progress;
 pub mod receipts;
 pub mod retention;
@@ -81,6 +83,11 @@ impl Repository {
         sqlx::query("CREATE INDEX IF NOT EXISTS snapshot_held ON snapshot_reservations(state,id)")
             .execute(&pool)
             .await?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS printer_observer_schedule(printer_id TEXT NOT NULL,binding TEXT NOT NULL,next_at INTEGER NOT NULL,failures INTEGER NOT NULL,run_id TEXT,lease_until INTEGER,last_finished_at INTEGER,last_success_at INTEGER,PRIMARY KEY(printer_id,binding))").execute(&pool).await?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS printer_observations(printer_id TEXT NOT NULL,binding TEXT NOT NULL,stream_id TEXT NOT NULL,issued INTEGER NOT NULL,applied INTEGER NOT NULL,body TEXT NOT NULL,pruned_through INTEGER NOT NULL,PRIMARY KEY(printer_id,binding))").execute(&pool).await?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS printer_observation_contents(printer_id TEXT NOT NULL,binding TEXT NOT NULL,digest TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(printer_id,binding,digest))").execute(&pool).await?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS printer_observation_events(sequence INTEGER PRIMARY KEY AUTOINCREMENT,printer_id TEXT NOT NULL,binding TEXT NOT NULL,payload TEXT NOT NULL)").execute(&pool).await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS printer_observation_cursor ON printer_observation_events(printer_id,binding,sequence)").execute(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS color_policies(digest TEXT PRIMARY KEY,payload TEXT NOT NULL)").execute(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS source_validations(job_id TEXT PRIMARY KEY,payload TEXT NOT NULL)").execute(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, payload TEXT NOT NULL, priority INTEGER NOT NULL, created_at INTEGER NOT NULL, revision INTEGER NOT NULL)").execute(&pool).await?;
@@ -444,7 +451,16 @@ impl Repository {
             .collect()
     }
     pub async fn next_queued(&self) -> Result<Option<Job>, StorageError> {
-        let row = sqlx::query("SELECT payload FROM jobs WHERE json_extract(payload, '$.state') = 'QUEUED' ORDER BY priority DESC, created_at ASC, id ASC LIMIT 1")
+        self.next_queued_at(now()).await
+    }
+    // One priority point per minute, capped at 100. Old queued work eventually
+    // ties the highest priority; FIFO then prevents starvation by new arrivals.
+    async fn next_queued_at(&self, observed_at: i64) -> Result<Option<Job>, StorageError> {
+        let row = sqlx::query("SELECT payload FROM jobs WHERE json_extract(payload, '$.state') = 'QUEUED' ORDER BY MIN(?, priority + CAST(MAX(0, MIN(?, ? - created_at)) / ? AS INTEGER)) DESC, created_at ASC, id ASC LIMIT 1")
+            .bind(rip_core::print::RIP_PRIORITY_MAX)
+            .bind(i64::from(rip_core::print::RIP_PRIORITY_MAX) * rip_core::print::RIP_PRIORITY_AGING_SECONDS)
+            .bind(observed_at)
+            .bind(rip_core::print::RIP_PRIORITY_AGING_SECONDS)
             .fetch_optional(&self.pool)
             .await?;
         row.map(|row| serde_json::from_str(row.get("payload")).map_err(StorageError::from))
@@ -1029,6 +1045,74 @@ mod tests {
             .unwrap();
         assert_eq!(repo.next_queued().await.unwrap().unwrap().id, low.id);
     }
+    #[tokio::test]
+    async fn queue_aging_is_bounded_durable_and_never_releases_held_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("queue.db");
+        let repo = Repository::open(&path).await.unwrap();
+        let make = |id, priority, created_at, state| Job {
+            id: Uuid::from_u128(id),
+            manifest: Manifest {
+                page_ranges: Default::default(),
+                name: "aging.pdf".into(),
+                format: DocumentFormat::Pdf,
+                dpi: 600,
+                color_mode: ColorMode::Cmyk,
+                priority,
+                engine: Default::default(),
+            },
+            state,
+            source_sha256: "hash".into(),
+            created_at,
+            updated_at: created_at,
+            revision: 0,
+            error_code: None,
+            selected_engine: None,
+            worker_run_id: None,
+        };
+        let old = make(1, 0, 1000, JobState::Queued);
+        let urgent = make(2, 100, 6999, JobState::Queued);
+        let held = make(3, 100, 0, JobState::Held);
+        for job in [&old, &urgent, &held] {
+            repo.insert(job).await.unwrap();
+        }
+        // 99 whole minutes is insufficient; exactly 100 reaches the cap.
+        assert_eq!(
+            repo.next_queued_at(6999).await.unwrap().unwrap().id,
+            urgent.id
+        );
+        assert_eq!(repo.next_queued_at(7000).await.unwrap().unwrap().id, old.id);
+        // Future timestamps never reduce declared priority on a clock rollback.
+        assert_eq!(repo.next_queued_at(0).await.unwrap().unwrap().id, urgent.id);
+        let reopened = Repository::open(&path).await.unwrap();
+        assert_eq!(
+            reopened.next_queued_at(i64::MAX).await.unwrap().unwrap().id,
+            old.id
+        );
+        assert_eq!(reopened.get(old.id).await.unwrap().manifest.priority, 0);
+        assert_eq!(reopened.get(old.id).await.unwrap().revision, 0);
+        repo.transition(old.clone(), JobState::Cancelled, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.next_queued_at(7000).await.unwrap().unwrap().id,
+            urgent.id
+        );
+        repo.transition(urgent, JobState::Cancelled, None)
+            .await
+            .unwrap();
+        assert!(repo.next_queued_at(7000).await.unwrap().is_none());
+        // Equal priority and arrival time use UUID ordering for repeatable selection.
+        let second = make(20, 50, 8000, JobState::Queued);
+        let first = make(10, 50, 8000, JobState::Queued);
+        repo.insert(&second).await.unwrap();
+        repo.insert(&first).await.unwrap();
+        assert_eq!(
+            repo.next_queued_at(8000).await.unwrap().unwrap().id,
+            first.id
+        );
+    }
+
     #[tokio::test]
     async fn lease_heartbeat_prevents_recovery_until_expired() {
         let dir = tempfile::tempdir().unwrap();

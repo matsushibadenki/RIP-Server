@@ -1,9 +1,10 @@
 import tempfile
+import zlib
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 from pypdf import PdfWriter
-from pypdf.generic import ArrayObject, DictionaryObject, NameObject, DecodedStreamObject, NumberObject
+from pypdf.generic import ArrayObject, DictionaryObject, NameObject, DecodedStreamObject, EncodedStreamObject, NumberObject
 from font_policy import inspect_fonts
 
 
@@ -21,7 +22,8 @@ class FontPolicyTests(unittest.TestCase):
         page = writer.add_blank_page(width=72, height=72)
         resources = dictionary()
         if font is not None:
-            resources[NameObject('/Font')] = dictionary(F1=writer._add_object(font))
+            entries=font if isinstance(font,list) else [font]
+            resources[NameObject('/Font')]=DictionaryObject({NameObject('/F'+str(i)):writer._add_object(value) for i,value in enumerate(entries)})
         if cycle:
             ref = writer._add_object(resources)
             resources[NameObject('/Resources')] = ref
@@ -108,6 +110,37 @@ class FontPolicyTests(unittest.TestCase):
         font = type1()
         font[NameObject('/Widths')] = ArrayObject([NumberObject(500) for _ in range(10000)])
         self.assertTrue(self.inspect(font)['accepted'])
+
+    def test_failed_program_decompression_consumes_the_shared_budget(self):
+        bomb=EncodedStreamObject();bomb._data=zlib.compress(b'A'*128);bomb[NameObject('/Filter')]=NameObject('/FlateDecode')
+        plain=DecodedStreamObject();plain.set_data(b'later program')
+        fonts=[dictionary(Type='Font',Subtype='TrueType',BaseFont='Owned',FontDescriptor=dictionary(FontFile2=stream)) for stream in (bomb,plain)]
+        with patch('font_identity.MAX_PROGRAM',32), patch('font_policy.MAX_TOTAL',32):
+            report=self.inspect(fonts)
+        self.assertTrue(report['accepted'])
+        self.assertEqual(report['fonts'][0]['programIdentity']['reason'],'DECODE_LIMIT')
+        self.assertEqual(report['fonts'][1]['programIdentity']['reason'],'TOTAL_BYTE_LIMIT')
+
+    def test_same_named_fonts_keep_distinct_program_identities(self):
+        fonts=[]
+        for data in (b'program A',b'program B'):
+            stream=DecodedStreamObject();stream.set_data(data)
+            fonts.append(dictionary(Type='Font',Subtype='TrueType',BaseFont='SameName',FontDescriptor=dictionary(FontFile2=stream)))
+        report=self.inspect(fonts)
+        self.assertEqual([f['baseFont'] for f in report['fonts']],['SameName','SameName'])
+        self.assertNotEqual(report['fonts'][0]['programIdentity']['sha256'],report['fonts'][1]['programIdentity']['sha256'])
+
+    def test_shared_program_is_identified_once_and_does_not_consume_budget_twice(self):
+        path=Path(__file__).resolve().parents[1]/'tests/corpus/fonts/punctuation-quality.pdf'
+        with patch('font_policy.identify', wraps=__import__('font_identity').identify) as measured:
+            report=inspect_fonts(path)
+        self.assertEqual(measured.call_count,2)
+        identities=[font['programIdentity'] for font in report['fonts']]
+        self.assertEqual(len(identities),4)
+        unique={value['sha256']:value['bytes'] for value in identities}
+        self.assertEqual(len(unique),2)
+        with patch('font_policy.MAX_TOTAL',sum(unique.values())):
+            self.assertTrue(all(font['programIdentity']['status']=='HASHED' for font in inspect_fonts(path)['fonts']))
 
     def test_owned_corpora_are_embedded(self):
         for name in ('font-quality.pdf', 'punctuation-quality.pdf'):

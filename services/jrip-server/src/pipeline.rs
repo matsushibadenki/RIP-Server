@@ -198,7 +198,10 @@ pub(crate) async fn cancel(
     let value = app.repo.pipeline(id).await?;
     if value["ticket"]["actor"] != actor(&app, &headers)?
         || value["revision"] != req.expected_revision
-        || matches!(value["state"].as_str(), Some("COMPLETED" | "FAILED"))
+        || matches!(
+            value["state"].as_str(),
+            Some("COMPLETED" | "FAILED" | "CANCELLED")
+        )
     {
         return Err(ApiError(StatusCode::CONFLICT, "state_conflict"));
     }
@@ -353,7 +356,8 @@ async fn advance(app: &App, id: Uuid, value: &Value) -> Result<&'static str, Api
         return Ok(match delivery.state {
             Completed => "COMPLETED",
             Unknown => "UNKNOWN",
-            Cancelled | Aborted | Rejected => "FAILED",
+            Cancelled => "CANCELLED",
+            Aborted | Rejected => "FAILED",
             _ => "DELIVERY",
         });
     }

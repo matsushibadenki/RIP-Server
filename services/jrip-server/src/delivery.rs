@@ -1,7 +1,7 @@
 //! Explicit outbound delivery. Device addresses are administrator configuration only.
 use super::*;
 use rip_printer::{DeviceState, NativeIpp, PrinterBackend};
-use rip_storage::delivery::{Delivery, DeliveryState, DeliveryTicket};
+use rip_storage::delivery::{Delivery, DeliveryState, DeliveryTicket, DeviceQueryFailure};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 #[derive(Clone, Serialize, Deserialize)]
@@ -125,12 +125,10 @@ pub(crate) async fn capabilities(
         .iter()
         .find(|printer| printer.id == id)
         .ok_or(ApiError(StatusCode::NOT_FOUND, "not_found"))?;
-    let capabilities = backend(&app, printer)
-        .map_err(|_| bad("invalid_printer"))?
-        .capabilities()
-        .await
-        .map_err(|_| bad("printer_unavailable"))?;
-    let model = serde_json::json!({"schemaVersion":1,"id":printer.id,"backend":"native-ipp","capabilities":capabilities,"configuredMedia":printer.media,"configuredColorTarget":printer.color_target});
+    let capabilities = crate::printer_observation::probe(&app, printer).await?;
+    let conditions =
+        rip_core::printer_conditions::describe(capabilities.state, &capabilities.reasons);
+    let model = serde_json::json!({"conditions":conditions,"schemaVersion":1,"id":printer.id,"backend":"native-ipp","capabilities":capabilities,"configuredMedia":printer.media,"configuredColorTarget":printer.color_target});
     let revision = format!(
         "sha256:{:x}",
         Sha256::digest(
@@ -220,7 +218,7 @@ fn profile<'a>(
         .ok_or(bad("media_not_configured"))?;
     Ok((p, m))
 }
-fn raster_pages(
+pub(crate) fn raster_pages(
     bytes: &[u8],
     sides: rip_core::print::Sides,
     sheet_back: rip_core::print::SheetBack,
@@ -816,6 +814,7 @@ pub async fn tick(app: &App) -> Result<(), StorageError> {
     }
     for mut d in app.repo.accepted_deliveries().await? {
         let Ok((printer, _)) = registered(app, &d).await else {
+            record_query_failure(app, &d, DeviceQueryFailure::RegistrationUnavailable).await?;
             continue;
         };
         if d.reason.as_deref() == Some("CANCEL_REQUESTED") {
@@ -830,21 +829,50 @@ pub async fn tick(app: &App) -> Result<(), StorageError> {
                 Err(e) => return Err(e),
             }
         }
-        let Ok(status) = printer.job_status(d.device_job_id.unwrap()).await else {
-            continue;
+        let status = match printer.job_status(d.device_job_id.unwrap()).await {
+            Ok(status) => status,
+            Err(error) => {
+                let failure = match error {
+                    rip_printer::Error::InvalidResponse => DeviceQueryFailure::InvalidResponse,
+                    error if error.is_job_not_found() => DeviceQueryFailure::JobNotFound,
+                    _ => DeviceQueryFailure::Unavailable,
+                };
+                record_query_failure(app, &d, failure).await?;
+                continue;
+            }
         };
-        let next = match status.state {
-            DeviceState::Completed => DeliveryState::Completed,
-            DeviceState::Cancelled => DeliveryState::Cancelled,
-            DeviceState::Aborted => DeliveryState::Aborted,
-            _ => continue,
-        };
-        match app.repo.observe_delivery(d.id, d.revision, next).await {
+        match app
+            .repo
+            .observe_delivery_device_progress(
+                d.id,
+                d.revision,
+                status.job_id,
+                status.state.ipp_code(),
+                &status.reasons,
+                status.progress,
+            )
+            .await
+        {
             Ok(_) | Err(StorageError::Conflict) => {}
             Err(e) => return Err(e),
         }
     }
     Ok(())
+}
+
+async fn record_query_failure(
+    app: &App,
+    delivery: &Delivery,
+    failure: DeviceQueryFailure,
+) -> Result<(), StorageError> {
+    match app
+        .repo
+        .fail_delivery_device_query(delivery.id, delivery.revision, failure)
+        .await
+    {
+        Ok(_) | Err(StorageError::Conflict) => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 pub(crate) async fn result_receipt(

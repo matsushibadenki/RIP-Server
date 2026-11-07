@@ -51,6 +51,36 @@ impl DeliveryState {
         }
     }
 }
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeviceObservation {
+    pub profile: String,
+    /// IPP job-state: 3 pending through 9 completed.
+    pub state: i32,
+    pub reasons: Vec<String>,
+    /// When this changed state/reason/counter set was observed, not a heartbeat.
+    pub observed_at: i64,
+    #[serde(
+        default,
+        skip_serializing_if = "rip_core::print::DeviceProgress::is_empty"
+    )]
+    pub progress: rip_core::print::DeviceProgress,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum DeviceQueryFailure {
+    Unavailable,
+    InvalidResponse,
+    JobNotFound,
+    RegistrationUnavailable,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeviceQuery {
+    pub failure: Option<DeviceQueryFailure>,
+    /// Time this query outcome changed, not a per-poll heartbeat.
+    pub changed_at: i64,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Delivery {
@@ -62,6 +92,10 @@ pub struct Delivery {
     pub run_id: Option<Uuid>,
     pub lease_until: Option<i64>,
     pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_observation: Option<DeviceObservation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_query: Option<DeviceQuery>,
 }
 async fn event(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -74,9 +108,18 @@ async fn event(
             .bind(now())
             .execute(&mut **tx)
             .await?;
+    let mut details = serde_json::json!({"revision":delivery.revision,"reasonCode":delivery.reason,"deviceJobId":delivery.device_job_id,"retryable":false});
+    if let Some(observation) = &delivery.device_observation {
+        details["deviceObservation"] = serde_json::to_value(observation)?;
+    }
+    if let Some(query) = &delivery.device_query {
+        details["deviceQuery"] = serde_json::to_value(query)?;
+    }
     sqlx::query("INSERT INTO delivery_event_details(sequence,payload) VALUES(?,?)")
-        .bind(result.last_insert_rowid()).bind(serde_json::to_string(&serde_json::json!({"revision":delivery.revision,"reasonCode":delivery.reason,"deviceJobId":delivery.device_job_id,"retryable":false}))?)
-        .execute(&mut **tx).await?;
+        .bind(result.last_insert_rowid())
+        .bind(serde_json::to_string(&details)?)
+        .execute(&mut **tx)
+        .await?;
     Ok(())
 }
 impl Repository {
@@ -205,6 +248,8 @@ impl Repository {
             run_id: None,
             lease_until: None,
             reason: None,
+            device_observation: None,
+            device_query: None,
         };
         let mut tx = self.pool.begin().await?;
         if let Some(contract) = &contract {
@@ -425,6 +470,112 @@ impl Repository {
         self.update_delivery(d, DeliveryState::Accepted, revision, None)
             .await
     }
+    /// Actual device samples never make a delivery sendable or infer page progress.
+    pub async fn observe_delivery_device(
+        &self,
+        id: Uuid,
+        revision: i64,
+        device_job_id: i32,
+        state: i32,
+        reasons: &[String],
+    ) -> Result<Delivery, StorageError> {
+        self.observe_delivery_device_progress(
+            id,
+            revision,
+            device_job_id,
+            state,
+            reasons,
+            rip_core::print::DeviceProgress::default(),
+        )
+        .await
+    }
+    pub async fn observe_delivery_device_progress(
+        &self,
+        id: Uuid,
+        revision: i64,
+        device_job_id: i32,
+        state: i32,
+        reasons: &[String],
+        progress: rip_core::print::DeviceProgress,
+    ) -> Result<Delivery, StorageError> {
+        let mut delivery = self.delivery(id).await?;
+        if !progress.is_valid()
+            || delivery.state != DeliveryState::Accepted
+            || delivery.revision != revision
+            || device_job_id <= 0
+            || delivery.device_job_id != Some(device_job_id)
+            || !(3..=9).contains(&state)
+            || reasons.len() > 64
+            || reasons
+                .iter()
+                .any(|r| r.is_empty() || r.len() > 255 || r.chars().any(char::is_control))
+        {
+            return Err(StorageError::Conflict);
+        }
+        let mut reasons = reasons.to_vec();
+        reasons.sort();
+        reasons.dedup();
+        if delivery
+            .device_query
+            .as_ref()
+            .is_some_and(|q| q.failure.is_none())
+            && delivery
+                .device_observation
+                .as_ref()
+                .is_some_and(|o| o.state == state && o.reasons == reasons && o.progress == progress)
+        {
+            return Ok(delivery);
+        }
+        if delivery
+            .device_query
+            .as_ref()
+            .is_none_or(|q| q.failure.is_some())
+        {
+            delivery.device_query = Some(DeviceQuery {
+                failure: None,
+                changed_at: now(),
+            });
+        }
+        delivery.device_observation = Some(DeviceObservation {
+            profile: "org.jrip.device-job-observation-v1".into(),
+            state,
+            reasons,
+            observed_at: now(),
+            progress,
+        });
+        delivery.state = match state {
+            7 => DeliveryState::Cancelled,
+            8 => DeliveryState::Aborted,
+            9 => DeliveryState::Completed,
+            _ => DeliveryState::Accepted,
+        };
+        self.update_delivery(delivery, DeliveryState::Accepted, revision, None)
+            .await
+    }
+    pub async fn fail_delivery_device_query(
+        &self,
+        id: Uuid,
+        revision: i64,
+        failure: DeviceQueryFailure,
+    ) -> Result<Delivery, StorageError> {
+        let mut delivery = self.delivery(id).await?;
+        if delivery.state != DeliveryState::Accepted || delivery.revision != revision {
+            return Err(StorageError::Conflict);
+        }
+        if delivery
+            .device_query
+            .as_ref()
+            .is_some_and(|q| q.failure == Some(failure))
+        {
+            return Ok(delivery);
+        }
+        delivery.device_query = Some(DeviceQuery {
+            failure: Some(failure),
+            changed_at: now(),
+        });
+        self.update_delivery(delivery, DeliveryState::Accepted, revision, None)
+            .await
+    }
     pub async fn observe_delivery(
         &self,
         id: Uuid,
@@ -564,6 +715,317 @@ mod tests {
             media: "iso_a4_210x297mm".into(),
         };
         (dir, repo, ticket)
+    }
+    #[tokio::test]
+    async fn device_observations_are_durable_deduplicated_and_bound_to_the_accepted_job() {
+        use sha2::{Digest, Sha256};
+        let (dir, repo, ticket) = fixture().await;
+        let id = Uuid::new_v4();
+        let run = Uuid::new_v4();
+        let queued = repo.enqueue_delivery(id, ticket).await.unwrap();
+        assert!(
+            serde_json::to_value(&queued)
+                .unwrap()
+                .get("deviceObservation")
+                .is_none()
+        );
+        assert!(
+            repo.observe_delivery_device(id, 0, 42, 5, &[])
+                .await
+                .is_err()
+        );
+        repo.claim_delivery(id, 0, run).await.unwrap();
+        let accepted = repo
+            .finish_delivery(id, run, DeliveryState::Accepted, Some(42), None)
+            .await
+            .unwrap();
+        let printing = repo
+            .observe_delivery_device(
+                id,
+                accepted.revision,
+                42,
+                5,
+                &[
+                    "vendor-wait".into(),
+                    "job-printing".into(),
+                    "job-printing".into(),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(printing.state, DeliveryState::Accepted);
+        assert_eq!(
+            printing.device_observation.as_ref().unwrap().reasons,
+            vec!["job-printing", "vendor-wait"]
+        );
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM delivery_events")
+            .fetch_one(&repo.pool)
+            .await
+            .unwrap();
+        let unchanged = repo
+            .observe_delivery_device(
+                id,
+                printing.revision,
+                42,
+                5,
+                &["job-printing".into(), "vendor-wait".into()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(unchanged.revision, printing.revision);
+        assert_eq!(unchanged.device_observation, printing.device_observation);
+        assert_eq!(
+            count,
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM delivery_events")
+                .fetch_one(&repo.pool)
+                .await
+                .unwrap()
+        );
+        assert!(repo.delivery_result_receipt(id).await.is_err());
+        assert!(
+            repo.observe_delivery_device(id, accepted.revision, 42, 6, &[])
+                .await
+                .is_err()
+        );
+        assert!(
+            repo.observe_delivery_device(id, printing.revision, 99, 6, &[])
+                .await
+                .is_err()
+        );
+        assert!(
+            repo.observe_delivery_device(id, printing.revision, 42, 2, &[])
+                .await
+                .is_err()
+        );
+        assert!(
+            repo.observe_delivery_device(id, printing.revision, 42, 6, &["x".repeat(256)])
+                .await
+                .is_err()
+        );
+        assert!(
+            repo.observe_delivery_device(id, printing.revision, 42, 6, &["bad\nreason".into()])
+                .await
+                .is_err()
+        );
+        let stopped = repo
+            .observe_delivery_device(id, printing.revision, 42, 6, &["media-needed".into()])
+            .await
+            .unwrap();
+        let cancelled = repo
+            .request_delivery_cancel(id, stopped.revision)
+            .await
+            .unwrap();
+        let resumed = repo
+            .observe_delivery_device(id, cancelled.revision, 42, 5, &["job-printing".into()])
+            .await
+            .unwrap();
+        assert_eq!(resumed.reason.as_deref(), Some("CANCEL_REQUESTED"));
+        let completed = repo
+            .observe_delivery_device(
+                id,
+                resumed.revision,
+                42,
+                9,
+                &["job-completed-successfully".into()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(completed.state, DeliveryState::Completed);
+        let receipt = repo.delivery_result_receipt(id).await.unwrap();
+        assert_eq!(receipt["proof"]["result"]["deviceObservation"]["state"], 9);
+        assert_eq!(
+            receipt["resultHash"],
+            format!(
+                "sha256:{:x}",
+                Sha256::digest(serde_json::to_vec(&receipt["proof"]["result"]).unwrap())
+            )
+        );
+        let reopened = Repository::open(&dir.path().join("queue.db"))
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(reopened.delivery(id).await.unwrap()).unwrap(),
+            serde_json::to_value(&completed).unwrap()
+        );
+        assert!(
+            repo.observe_delivery_device(id, completed.revision, 42, 5, &[])
+                .await
+                .is_err()
+        );
+    }
+    #[tokio::test]
+    async fn physical_counters_advance_without_state_change_and_bind_final_receipt() {
+        use rip_core::print::DeviceProgress;
+        let (dir, repo, ticket) = fixture().await;
+        let id = Uuid::new_v4();
+        let run = Uuid::new_v4();
+        repo.enqueue_delivery(id, ticket).await.unwrap();
+        repo.claim_delivery(id, 0, run).await.unwrap();
+        let accepted = repo
+            .finish_delivery(id, run, DeliveryState::Accepted, Some(42), None)
+            .await
+            .unwrap();
+        let zero = DeviceProgress {
+            impressions_completed: Some(0),
+            media_sheets_completed: Some(0),
+        };
+        let first = repo
+            .observe_delivery_device_progress(id, accepted.revision, 42, 5, &[], zero)
+            .await
+            .unwrap();
+        let progress = DeviceProgress {
+            impressions_completed: Some(8),
+            media_sheets_completed: Some(4),
+        };
+        let advanced = repo
+            .observe_delivery_device_progress(id, first.revision, 42, 5, &[], progress)
+            .await
+            .unwrap();
+        assert_eq!(advanced.revision, first.revision + 1);
+        assert_eq!(
+            advanced.device_observation.as_ref().unwrap().progress,
+            progress
+        );
+        let duplicate = repo
+            .observe_delivery_device_progress(id, advanced.revision, 42, 5, &[], progress)
+            .await
+            .unwrap();
+        assert_eq!(duplicate.revision, advanced.revision);
+        assert!(
+            repo.observe_delivery_device_progress(
+                id,
+                advanced.revision,
+                42,
+                5,
+                &[],
+                DeviceProgress {
+                    impressions_completed: Some(u32::MAX),
+                    media_sheets_completed: None
+                }
+            )
+            .await
+            .is_err()
+        );
+        let complete = repo
+            .observe_delivery_device_progress(id, advanced.revision, 42, 9, &[], progress)
+            .await
+            .unwrap();
+        let receipt = repo.delivery_result_receipt(id).await.unwrap();
+        assert_eq!(
+            receipt["proof"]["result"]["deviceObservation"]["progress"],
+            serde_json::to_value(progress).unwrap()
+        );
+        let reopened = Repository::open(&dir.path().join("queue.db"))
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened.delivery(id).await.unwrap().device_observation,
+            complete.device_observation
+        );
+    }
+
+    #[tokio::test]
+    async fn query_failures_preserve_samples_cancel_requests_and_never_requeue() {
+        let (dir, repo, ticket) = fixture().await;
+        let id = Uuid::new_v4();
+        let run = Uuid::new_v4();
+        let queued = repo.enqueue_delivery(id, ticket).await.unwrap();
+        assert!(
+            serde_json::to_value(&queued)
+                .unwrap()
+                .get("deviceQuery")
+                .is_none()
+        );
+        assert!(
+            repo.fail_delivery_device_query(id, 0, DeviceQueryFailure::Unavailable)
+                .await
+                .is_err()
+        );
+        repo.claim_delivery(id, 0, run).await.unwrap();
+        let accepted = repo
+            .finish_delivery(id, run, DeliveryState::Accepted, Some(42), None)
+            .await
+            .unwrap();
+        let failed = repo
+            .fail_delivery_device_query(id, accepted.revision, DeviceQueryFailure::Unavailable)
+            .await
+            .unwrap();
+        assert!(failed.device_observation.is_none());
+        assert_eq!(failed.state, DeliveryState::Accepted);
+        let first = repo
+            .observe_delivery_device(id, failed.revision, 42, 5, &[])
+            .await
+            .unwrap();
+        assert!(first.device_query.as_ref().unwrap().failure.is_none());
+        let cancelled = repo
+            .request_delivery_cancel(id, first.revision)
+            .await
+            .unwrap();
+        let failure = repo
+            .fail_delivery_device_query(id, cancelled.revision, DeviceQueryFailure::InvalidResponse)
+            .await
+            .unwrap();
+        assert_eq!(failure.device_observation, first.device_observation);
+        assert_eq!(failure.reason.as_deref(), Some("CANCEL_REQUESTED"));
+        let duplicate = repo
+            .fail_delivery_device_query(id, failure.revision, DeviceQueryFailure::InvalidResponse)
+            .await
+            .unwrap();
+        assert_eq!(duplicate.revision, failure.revision);
+        assert!(
+            repo.fail_delivery_device_query(id, first.revision, DeviceQueryFailure::Unavailable)
+                .await
+                .is_err()
+        );
+        let reopened = Repository::open(&dir.path().join("queue.db"))
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened.delivery(id).await.unwrap().device_query,
+            failure.device_query
+        );
+        assert!(reopened.next_delivery().await.unwrap().is_none());
+        assert!(reopened.delivery_result_receipt(id).await.is_err());
+        let recovered = reopened
+            .observe_delivery_device(id, failure.revision, 42, 5, &[])
+            .await
+            .unwrap();
+        assert_eq!(recovered.revision, failure.revision + 1);
+        assert_eq!(recovered.reason.as_deref(), Some("CANCEL_REQUESTED"));
+        assert!(recovered.device_query.unwrap().failure.is_none());
+        let completed = reopened
+            .observe_delivery_device(id, recovered.revision, 42, 9, &[])
+            .await
+            .unwrap();
+        assert!(
+            reopened
+                .fail_delivery_device_query(id, completed.revision, DeviceQueryFailure::JobNotFound)
+                .await
+                .is_err()
+        );
+        assert!(reopened.delivery_result_receipt(id).await.unwrap()["proof"]["result"]["deviceQuery"]["failure"].is_null());
+    }
+
+    #[tokio::test]
+    async fn concurrent_device_observations_have_one_revision_winner() {
+        let (_dir, repo, ticket) = fixture().await;
+        let id = Uuid::new_v4();
+        let run = Uuid::new_v4();
+        repo.enqueue_delivery(id, ticket).await.unwrap();
+        repo.claim_delivery(id, 0, run).await.unwrap();
+        let accepted = repo
+            .finish_delivery(id, run, DeliveryState::Accepted, Some(42), None)
+            .await
+            .unwrap();
+        let (a, b) = tokio::join!(
+            repo.observe_delivery_device(id, accepted.revision, 42, 5, &[]),
+            repo.observe_delivery_device(id, accepted.revision, 42, 6, &[])
+        );
+        assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
+        assert_eq!(
+            repo.delivery(id).await.unwrap().revision,
+            accepted.revision + 1
+        );
     }
     #[tokio::test]
     async fn page_ranges_preserve_legacy_json_and_atomic_approval_binding() {

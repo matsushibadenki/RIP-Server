@@ -29,3 +29,10 @@ pub async fn delivery_script() -> Response {
         "text/javascript; charset=utf-8",
     )
 }
+
+pub async fn printer_status_script() -> Response {
+    asset(
+        include_str!("../ui/printer-status.js"),
+        "text/javascript; charset=utf-8",
+    )
+}

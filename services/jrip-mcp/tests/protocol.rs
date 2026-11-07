@@ -33,7 +33,16 @@ async fn handshake_discovery_and_validated_api_calls() {
     );
     initialize(&mut s).await;
     let listing = s.handle(req(2, "tools/list", json!({}))).await.unwrap();
-    assert_eq!(listing["result"]["tools"].as_array().unwrap().len(), 47);
+    assert_eq!(listing["result"]["tools"].as_array().unwrap().len(), 53);
+    for name in ["rip_describe_artifact", "color_describe_artifact"] {
+        assert!(
+            listing["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["name"] == name)
+        );
+    }
     let stages = s
         .handle(req(
             90,
@@ -491,7 +500,7 @@ async fn scoped_tools_hide_and_deny_mutations_and_subscriptions() {
     );
     initialize(&mut s).await;
     let tools = s.handle(req(1, "tools/list", json!({}))).await.unwrap();
-    assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 24);
+    assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 26);
     assert_eq!(s.handle(req(2,"tools/call",json!({"name":"rip_cancel_job","arguments":{"jobId":uuid::Uuid::new_v4(),"expectedRevision":0}}))).await.unwrap()["result"]["isError"],true);
     let app = jrip_server::open(dir.path().into(), TOKEN.into())
         .await
@@ -721,6 +730,444 @@ async fn resources_and_revision_checked_deletion_share_api_state() {
 }
 
 #[tokio::test]
+async fn delivery_artifact_mcp_reads_and_chunks_require_read_scopes_without_print_authority() {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = jrip_server::open(dir.path().into(), TOKEN.into())
+        .await
+        .unwrap();
+    app.credentials = vec![jrip_server::Credential {
+        token: TOKEN.into(),
+        identity: "reader".into(),
+        scopes: vec!["jobs:read".into(), "artifacts:read".into()],
+        validity: None,
+    }];
+    let job:rip_core::Job=serde_json::from_value(json!({"id":uuid::Uuid::new_v4(),"manifest":{"name":"delivery.pdf","format":"application/pdf","dpi":72,"color_mode":"rgb"},"state":"COMPLETED","source_sha256":"a".repeat(64),"created_at":0,"updated_at":0,"revision":0,"error_code":null,"selected_engine":null,"worker_run_id":null})).unwrap();
+    app.repo.insert(&job).await.unwrap();
+    let page = dir.path().join("page.tiff");
+    tiff::encoder::TiffEncoder::new(std::fs::File::create(&page).unwrap())
+        .unwrap()
+        .write_image::<tiff::encoder::colortype::RGB8>(2, 1, &[255, 0, 0, 0, 0, 255])
+        .unwrap();
+    let mut bytes = vec![];
+    rip_raster::convert(
+        &[page],
+        &rip_raster::Options {
+            dpi: 72,
+            color: rip_raster::Color::DeviceRgb,
+        },
+        &mut bytes,
+    )
+    .unwrap();
+    bytes[4 + 1732..4 + 1736].copy_from_slice(b"test");
+    let id = uuid::Uuid::new_v4();
+    let ticket = rip_storage::delivery::DeliveryTicket {
+        source_job: job.id,
+        copies: 1,
+        sides: Default::default(),
+        sheet_back: Default::default(),
+        page_ranges: Default::default(),
+        color_attempt_id: None,
+        printer_id: "test".into(),
+        artifact_sha256: format!("{:x}", Sha256::digest(&bytes)),
+        artifact_bytes: bytes.len() as u64,
+        dpi: 72,
+        document_type: "rgb_8".into(),
+        media: "test".into(),
+    };
+    app.repo.enqueue_delivery(id, ticket).await.unwrap();
+    std::fs::create_dir_all(app.root.join("deliveries")).unwrap();
+    let path = app.root.join("deliveries").join(format!("{id}.pwg"));
+    std::fs::write(&path, &bytes).unwrap();
+    let router = jrip_server::router(app.clone());
+    let mut session = Session::new(router.clone(), TOKEN.into()).with_access(
+        "reader".into(),
+        vec!["jobs:read".into(), "artifacts:read".into()],
+        None,
+    );
+    initialize(&mut session).await;
+    let descriptor = tool_value(
+        session
+            .handle(req(
+                2,
+                "tools/call",
+                json!({"name":"print_describe_delivery_artifact","arguments":{"deliveryId":id}}),
+            ))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(descriptor["kind"], "DeliveryArtifact");
+    assert_eq!(descriptor["pageCount"], 1);
+    assert_eq!(descriptor["physicalContractVerified"], false);
+    let uri = format!("jrip://deliveries/{id}/artifact/descriptor");
+    let response = session
+        .handle(req(3, "resources/read", json!({"uri":uri})))
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(response["result"]["contents"][0]["text"].as_str().unwrap())
+            .unwrap(),
+        descriptor
+    );
+    let chunk = format!("jrip://deliveries/{id}/artifact/chunks/0/4");
+    let response = session
+        .handle(req(4, "resources/read", json!({"uri":chunk})))
+        .await
+        .unwrap();
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(response["result"]["contents"][0]["blob"].as_str().unwrap())
+            .unwrap(),
+        b"RaS2"
+    );
+    for tail in [
+        "0/32769",
+        "0/0",
+        "01/1",
+        "-1/1",
+        "0/1?x=1",
+        "18446744073709551615/1",
+    ] {
+        let uri = format!("jrip://deliveries/{id}/artifact/chunks/{tail}");
+        assert_eq!(
+            session
+                .handle(req(5, "resources/read", json!({"uri":uri})))
+                .await
+                .unwrap()["error"]["code"],
+            -32602
+        );
+    }
+    for scopes in [vec!["jobs:read".into()], vec!["artifacts:read".into()]] {
+        let mut denied =
+            Session::new(router.clone(), TOKEN.into()).with_access("denied".into(), scopes, None);
+        initialize(&mut denied).await;
+        assert_eq!(
+            denied
+                .handle(req(6, "resources/read", json!({"uri":uri})))
+                .await
+                .unwrap()["error"]["code"],
+            -32001
+        );
+        assert_eq!(
+            denied
+                .handle(req(7, "resources/read", json!({"uri":chunk})))
+                .await
+                .unwrap()["error"]["code"],
+            -32001
+        );
+    }
+    assert_eq!(
+        app.repo.delivery(id).await.unwrap().state,
+        rip_storage::delivery::DeliveryState::Queued
+    );
+    assert_eq!(app.repo.delivery(id).await.unwrap().revision, 0);
+    std::fs::write(path, b"changed").unwrap();
+    assert_eq!(
+        session
+            .handle(req(8, "resources/read", json!({"uri":chunk})))
+            .await
+            .unwrap()["error"]["code"],
+        -32002
+    );
+}
+
+#[tokio::test]
+async fn source_descriptor_resources_and_verified_chunks_are_bounded_and_scoped() {
+    use base64::Engine;
+    let dir = tempfile::tempdir().unwrap();
+    let app = jrip_server::open(dir.path().into(), TOKEN.into())
+        .await
+        .unwrap();
+    let manifest =
+        serde_json::from_value(json!({"name":"original.pdf","format":"application/pdf"})).unwrap();
+    let mut source = b"%PDF-1.4\n".to_vec();
+    source.resize(70000, b'A');
+    let job = rip_jobs::submit_bytes(&app.repo, &app.root, manifest, &source)
+        .await
+        .unwrap();
+    let router = jrip_server::router(app.clone());
+    let mut session = Session::new(router.clone(), TOKEN.into());
+    initialize(&mut session).await;
+    let descriptor = tool_value(
+        session
+            .handle(req(
+                2,
+                "tools/call",
+                json!({"name":"print_describe_source","arguments":{"jobId":job.id}}),
+            ))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(descriptor["kind"], "SourceDocument");
+    assert_eq!(descriptor["bytes"], 70000);
+    assert_eq!(descriptor["structureVerified"], false);
+    assert!(descriptor["pageCount"].is_null());
+    assert!(descriptor.to_string().len() < 4096);
+    let uri = format!("jrip://jobs/{}/source/descriptor", job.id);
+    let response = session
+        .handle(req(3, "resources/read", json!({"uri":uri})))
+        .await
+        .unwrap();
+    let resource: Value =
+        serde_json::from_str(response["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(resource, descriptor);
+    let chunk = format!("jrip://jobs/{}/source/chunks/0/32768", job.id);
+    let response = session
+        .handle(req(4, "resources/read", json!({"uri":chunk})))
+        .await
+        .unwrap();
+    let encoded = response["result"]["contents"][0]["blob"].as_str().unwrap();
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap(),
+        source[..32768]
+    );
+    for tail in [
+        "0/32769",
+        "0/0",
+        "-1/1",
+        "01/1",
+        "0/1?x=1",
+        "18446744073709551615/1",
+    ] {
+        let uri = format!("jrip://jobs/{}/source/chunks/{tail}", job.id);
+        assert_eq!(
+            session
+                .handle(req(5, "resources/read", json!({"uri":uri})))
+                .await
+                .unwrap()["error"]["code"],
+            -32602
+        );
+    }
+    for scopes in [vec!["jobs:read".into()], vec!["artifacts:read".into()]] {
+        let mut reader =
+            Session::new(router.clone(), TOKEN.into()).with_access("reader".into(), scopes, None);
+        initialize(&mut reader).await;
+        assert_eq!(
+            reader
+                .handle(req(6, "resources/read", json!({"uri":uri})))
+                .await
+                .unwrap()["error"]["code"],
+            -32001
+        );
+        assert_eq!(
+            reader
+                .handle(req(7, "resources/read", json!({"uri":chunk})))
+                .await
+                .unwrap()["error"]["code"],
+            -32001
+        );
+    }
+    std::fs::write(
+        app.root
+            .join("jobs")
+            .join(job.id.to_string())
+            .join("document"),
+        b"changed",
+    )
+    .unwrap();
+    assert_eq!(
+        session
+            .handle(req(8, "resources/read", json!({"uri":chunk})))
+            .await
+            .unwrap()["error"]["code"],
+        -32002
+    );
+}
+
+#[tokio::test]
+async fn artifact_descriptor_tools_verify_real_raster_and_reject_paths_and_missing_scope() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = jrip_server::open(dir.path().into(), TOKEN.into())
+        .await
+        .unwrap();
+    let job:rip_core::Job=serde_json::from_value(json!({"id":uuid::Uuid::new_v4(),"manifest":{"name":"facts.pdf","format":"application/pdf"},"state":"SPOOLING","source_sha256":"a".repeat(64),"created_at":0,"updated_at":0,"revision":0,"error_code":null,"selected_engine":null,"worker_run_id":null})).unwrap();
+    app.repo.insert(&job).await.unwrap();
+    let folder = app
+        .root
+        .join("jobs")
+        .join(job.id.to_string())
+        .join("raster");
+    std::fs::create_dir_all(&folder).unwrap();
+    let path = folder.join("page-000001.tiff");
+    tiff::encoder::TiffEncoder::new(std::fs::File::create(&path).unwrap())
+        .unwrap()
+        .write_image::<tiff::encoder::colortype::Gray8>(1, 1, &[128])
+        .unwrap();
+    let pages = jrip_server::artifacts::hash_pages(&[path]).await.unwrap();
+    app.repo
+        .complete_with_artifacts(job.clone(), &pages)
+        .await
+        .unwrap();
+    let mut session = Session::new(jrip_server::router(app.clone()), TOKEN.into());
+    initialize(&mut session).await;
+    let arguments = json!({"jobId":job.id,"name":"page-000001.tiff"});
+    let result = tool_value(
+        session
+            .handle(req(
+                2,
+                "tools/call",
+                json!({"name":"rip_describe_artifact","arguments":arguments}),
+            ))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(result["contentId"], format!("sha256:{}", pages[0].sha256));
+    assert_eq!(result["raster"]["colorSpace"], "gray");
+    assert_eq!(result["raster"]["samplesVerified"], true);
+    for name in [
+        "../page-000001.tiff",
+        "page-000001.tiff?x=1",
+        "page-000000.tiff",
+        "page-000101.tiff",
+        "page-000001.tiff/preview",
+        "page-000001.tiff\n",
+    ] {
+        for tool in ["rip_describe_artifact", "color_describe_artifact"] {
+            let key = if tool == "rip_describe_artifact" {
+                "jobId"
+            } else {
+                "colorAttemptId"
+            };
+            let mut args = json!({"name":name});
+            args[key] = json!(job.id);
+            let reply = session
+                .handle(req(3, "tools/call", json!({"name":tool,"arguments":args})))
+                .await
+                .unwrap();
+            assert_eq!(reply["error"]["code"], -32602);
+        }
+    }
+    let mut reader = Session::new(jrip_server::router(app), TOKEN.into()).with_access(
+        "reader".into(),
+        vec!["jobs:read".into()],
+        None,
+    );
+    initialize(&mut reader).await;
+    assert_eq!(
+        reader
+            .handle(req(
+                4,
+                "tools/call",
+                json!({"name":"rip_describe_artifact","arguments":arguments})
+            ))
+            .await
+            .unwrap()["result"]["isError"],
+        true
+    );
+}
+
+#[tokio::test]
+async fn priority_preflight_and_scheduler_discovery_are_preserved_by_mcp() {
+    let (_dir, mut session) = session().await;
+    initialize(&mut session).await;
+    for (mode, value, expected) in [
+        ("required", 0, 0),
+        ("required", 100, 100),
+        ("preferred", 75, 75),
+        ("preferred", 101, 50),
+        ("automatic", 100, 50),
+    ] {
+        let intent = json!({"document":{"uri":"https://example.org/priority.ps",
+            "mediaType":"application/postscript","sha256":"a".repeat(64)},
+            "copies":{"mode":"required","value":1},"output":{"destination":"artifact"},
+            "priority":{"mode":mode,"value":value}});
+        let result = tool_value(
+            session
+                .handle(req(
+                    2,
+                    "tools/call",
+                    json!({"name":"print_create_preflight","arguments":{"intent":intent}}),
+                ))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(result["ticket"]["manifest"]["priority"], expected);
+    }
+    let models = tool_value(
+        session
+            .handle(req(
+                3,
+                "tools/call",
+                json!({"name":"print_get_capabilities","arguments":{}}),
+            ))
+            .await
+            .unwrap(),
+    );
+    let rip = models["stages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|stage| stage["capability"]["stage"] == "rip")
+        .unwrap();
+    let scheduling = &rip["capability"]["extensions"]["org.jrip.scheduling"];
+    assert_eq!(scheduling["scope"], "single-host-rip");
+    assert_eq!(scheduling["agingIntervalSeconds"], 60);
+    assert_eq!(scheduling["maximumEffectivePriority"], 100);
+    assert_eq!(scheduling["preemptive"], false);
+}
+
+#[tokio::test]
+async fn printer_tool_preserves_known_zero_and_unknown_device_queue_counts() {
+    for count in [json!(0), json!(7), Value::Null] {
+        let snapshot = json!({"model":{"id":"test","conditions":{"profile":"org.jrip.printer-conditions-v1","conditions":[{"rawReason":"toner-low-warning","severity":"warning","recovery":{"action":"CHECK_MARKER_SUPPLY","advisoryOnly":true}}]},"capabilities":{"queuedJobCount":count,"markerSupplies":{"profile":"org.jrip.cups-marker-supplies-v1","status":"REPORTED","markers":[{"index":1,"levelPercent":count}]},"printerSupplies":{"profile":"org.jrip.pwg-printer-supplies-v1","status":"REPORTED","supplies":[{"position":1,"unit":"percent","levelPercent":count}]}}},
+            "observedAt":123,"expiresAt":153});
+        let expected = snapshot.clone();
+        let router = axum::Router::new().route(
+            "/api/v1/printers/test",
+            axum::routing::get(move || {
+                let snapshot = snapshot.clone();
+                async move { axum::Json(snapshot) }
+            }),
+        );
+        let mut session = Session::new(router, TOKEN.into());
+        initialize(&mut session).await;
+        let response = session
+            .handle(req(
+                2,
+                "tools/call",
+                json!({"name":"print_get_printer",
+            "arguments":{"printerId":"test"}}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(tool_value(response), expected);
+    }
+}
+
+#[tokio::test]
+async fn common_capability_tool_preserves_live_load_and_expiry() {
+    for count in [json!(0), json!(7), Value::Null] {
+        let expected = json!({"capabilityRevision":"snapshot","observedAt":123,"expiresAt":153,"stages":[{"capability":{"stage":"printer","extensions":{"org.jrip.printer":{"acceptingJobs":false,"queuedJobCount":count,"queuedJobCountMeaning":"device-reported-nonterminal-jobs","markerSupplies":{"profile":"org.jrip.cups-marker-supplies-v1","status":"REPORTED","markers":[{"index":1,"levelPercent":count}]},"printerSupplies":{"profile":"org.jrip.pwg-printer-supplies-v1","status":"REPORTED","supplies":[{"position":1,"unit":"percent","levelPercent":count}]},"conditions":{"profile":"org.jrip.printer-conditions-v1","reasonEvidence":"UNREPORTED","conditions":[]}}}}}],"authorizationGranted":false});
+        let snapshot = expected.clone();
+        let router = axum::Router::new().route(
+            "/api/v1/print/capabilities",
+            axum::routing::get(move || {
+                let snapshot = snapshot.clone();
+                async move { axum::Json(snapshot) }
+            }),
+        );
+        let mut session = Session::new(router, TOKEN.into()).with_access(
+            "reader".into(),
+            vec!["jobs:read".into()],
+            None,
+        );
+        initialize(&mut session).await;
+        let response = session
+            .handle(req(
+                2,
+                "tools/call",
+                json!({"name":"print_get_capabilities","arguments":{"printerId":"test"}}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(tool_value(response), expected);
+    }
+}
+
+#[tokio::test]
 async fn printer_capability_tool_rejects_paths_urls_and_control_characters() {
     let (_dir, mut session) = session().await;
     initialize(&mut session).await;
@@ -924,6 +1371,12 @@ async fn timeline_resource_subscription_resumes_and_respects_read_scope() {
     assert_eq!(unified["ticket"]["pipelineId"], id.to_string());
     assert_eq!(unified["execution"]["pipelineState"], "BLOCKED");
     assert_eq!(unified["execution"]["completed"], false);
+    assert!(
+        unified["execution"]
+            .get("deviceObservation")
+            .unwrap()
+            .is_null()
+    );
     assert_eq!(page["events"].as_array().unwrap().len(), 1);
     assert_eq!(page["events"][0]["reasonCode"], "TEST_BLOCKED");
     assert_eq!(
@@ -1766,6 +2219,186 @@ async fn binary_resources_are_bounded_verified_and_scoped() {
         .unwrap();
     assert!(listing.to_string().contains("/chunks/{offset}/{length}"));
     let prefix = format!("jrip://jobs/{}/artifacts/page-000001.tiff/chunks", job.id);
+    let mut joined = Vec::new();
+    let mut etag = None;
+    for offset in [0, 32768, 65536] {
+        let result = s
+            .handle(req(
+                2,
+                "resources/read",
+                json!({"uri":format!("{prefix}/{offset}/32768")}),
+            ))
+            .await
+            .unwrap();
+        let chunk = &result["result"]["contents"][0];
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(chunk["blob"].as_str().unwrap())
+            .unwrap();
+        assert!(bytes.len() <= 32768);
+        let metadata = &chunk["_meta"]["org.jrip.artifact-chunk-v1"];
+        if let Some(ref etag) = etag {
+            assert_eq!(etag, &metadata["etag"]);
+        }
+        etag = Some(metadata["etag"].clone());
+        assert!(
+            metadata["contentRange"]
+                .as_str()
+                .unwrap()
+                .ends_with("/70000")
+        );
+        joined.extend(bytes);
+    }
+    assert_eq!(joined, data);
+    for suffix in [
+        "0/0",
+        "0/32769",
+        "01/1",
+        "-1/2",
+        "18446744073709551615/1",
+        "0/1?x=y",
+    ] {
+        let reply = s
+            .handle(req(
+                3,
+                "resources/read",
+                json!({"uri":format!("{prefix}/{suffix}")}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(reply["error"]["code"], -32602);
+    }
+    let reply = s
+        .handle(req(
+            4,
+            "resources/read",
+            json!({"uri":format!("{prefix}/70000/1")}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(reply["error"]["code"], -32002);
+    std::fs::write(&file, vec![0; data.len()]).unwrap();
+    let reply = s
+        .handle(req(
+            5,
+            "resources/read",
+            json!({"uri":format!("{prefix}/0/1")}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(reply["error"]["code"], -32002);
+    let mut reader = s.with_access("reader".into(), vec!["jobs:read".into()], None);
+    let reply = reader
+        .handle(req(
+            6,
+            "resources/read",
+            json!({"uri":format!("{prefix}/0/1")}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(reply["error"]["code"], -32001);
+    let listing = reader
+        .handle(req(7, "resources/templates/list", json!({})))
+        .await
+        .unwrap();
+    assert!(!listing.to_string().contains("/chunks/"));
+}
+
+#[tokio::test]
+async fn color_binary_resources_are_bounded_verified_and_scoped() {
+    use base64::Engine as _;
+    use sha2::{Digest, Sha256};
+    let dir = tempfile::tempdir().unwrap();
+    let app = jrip_server::open(dir.path().into(), TOKEN.into())
+        .await
+        .unwrap();
+    let job = rip_core::Job {
+        id: uuid::Uuid::new_v4(),
+        manifest: serde_json::from_value(
+            json!({"name":"source.pdf","format":"application/pdf","dpi":300,"color_mode":"rgb"}),
+        )
+        .unwrap(),
+        state: rip_core::JobState::Spooling,
+        source_sha256: "a".repeat(64),
+        created_at: 0,
+        updated_at: 0,
+        revision: 0,
+        error_code: None,
+        selected_engine: None,
+        worker_run_id: None,
+    };
+    app.repo.insert(&job).await.unwrap();
+    let data: Vec<u8> = (0..70000).map(|i| (i % 251) as u8).collect();
+    let path = app
+        .root
+        .join("jobs")
+        .join(job.id.to_string())
+        .join("raster");
+    std::fs::create_dir_all(&path).unwrap();
+    let file = path.join("page-000001.tiff");
+    std::fs::write(&file, &data).unwrap();
+    app.repo
+        .complete_with_artifacts(
+            job.clone(),
+            &[rip_core::Artifact {
+                source_page: None,
+                source_page_count: None,
+                page: 1,
+                name: "page-000001.tiff".into(),
+                media_type: "image/tiff".into(),
+                bytes: data.len() as u64,
+                sha256: format!("{:x}", Sha256::digest(&data)),
+            }],
+        )
+        .await
+        .unwrap();
+    let color_id = uuid::Uuid::new_v4();
+    let source = app.repo.get(job.id).await.unwrap();
+    app.repo
+        .create_color(
+            color_id,
+            job.id,
+            source.revision,
+            json!({"sourceArtifacts":[{}]}),
+        )
+        .await
+        .unwrap();
+    app.repo
+        .update_color(color_id, 0, "RUNNING", 0, None, None)
+        .await
+        .unwrap();
+    app.repo
+        .update_color(color_id, 1, "RUNNING", 1, None, None)
+        .await
+        .unwrap();
+    let pages = app.repo.artifacts(job.id).await.unwrap();
+    app.repo
+        .update_color(
+            color_id,
+            2,
+            "COMPLETED",
+            1,
+            Some(json!({"artifacts":pages})),
+            None,
+        )
+        .await
+        .unwrap();
+    let color_path = app
+        .root
+        .join("jobs")
+        .join(job.id.to_string())
+        .join("color")
+        .join(color_id.to_string());
+    std::fs::create_dir_all(&color_path).unwrap();
+    let file = color_path.join("page-000001.tiff");
+    std::fs::write(&file, &data).unwrap();
+    let mut s = Session::new(jrip_server::router(app), TOKEN.into());
+    initialize(&mut s).await;
+    let listing = s
+        .handle(req(8, "resources/templates/list", json!({})))
+        .await
+        .unwrap();
+    assert!(listing.to_string().contains("/chunks/{offset}/{length}"));
+    let prefix = format!("jrip://color/attempts/{color_id}/artifacts/page-000001.tiff/chunks");
     let mut joined = Vec::new();
     let mut etag = None;
     for offset in [0, 32768, 65536] {

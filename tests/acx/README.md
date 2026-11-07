@@ -56,3 +56,13 @@ python3 -m unittest discover -s tests/acx -p 'test_*.py' -v
 简体中文：仅安装`jsonschema`时可能静默省略可选的日期验证。
 固定必需依赖`rfc3339-validator`并显式注册；缺失时直接失败，不接受错误的`issuedAt`。
 CI回归测试覆盖有效日期、无效日期及依赖缺失。
+
+The separate `advertised_lifecycle_runs_real_interpreter_and_preserves_terminal_evidence`
+ignored test adds Docker-backed MuPDF/PDF and Ghostscript/PS acceptance with the same
+independent checker. It hashes actual TIFF pages and verifies signed success/failure
+receipts, including malformed sources, restart replay and commit deduplication.
+This does not make the synthetic negative-signature fixtures into renderer tests.
+
+実DockerのMuPDF/PDF・Ghostscript/PS受入も同じ独立checkerで検証する。実TIFFのhashと署名receiptを照合し、異常原稿・再起動・重複commitを確認。実機印刷は別途検証する。
+
+实际Docker的MuPDF/PDF及Ghostscript/PS验收也使用同一独立checker，核对真实TIFF hash和签名receipt，并验证异常原稿、重启及提交去重。实体打印需另行验收。

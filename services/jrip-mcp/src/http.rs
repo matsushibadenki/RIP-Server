@@ -326,7 +326,7 @@ async fn listen(State(state): State<Http>, headers: HeaderMap) -> Result<Respons
         }
         // Hints are expendable; reannounce existing history on each new GET stream.
         for cursor in session.subscriptions.values_mut() {
-            *cursor = 0;
+            *cursor = Default::default();
         }
     }
     let events = stream::unfold(

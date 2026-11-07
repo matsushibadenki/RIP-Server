@@ -132,3 +132,17 @@ ICC每条4 MiB／总计16 MiB、输出64 KiB。
 模拟ICC仅验证结构处理，不证明设备色彩质量。
 ⭕️ [Pending] 实际客户原稿、不支持filter及设备ICC验收。
 🔴 [Later] 实际使用的色空间映射及完整PS／CIE／CRD颜色语义。
+
+## Page associations / ページ対応 / 页面关联
+
+🟢 [Done] Inspector revision `jrip-source-icc-v2-pypdf-6.21.2` adds optional `pageProfileDeclarations` with profile `org.jrip.pdf-page-profile-declarations-v1`. For each PDF source page (before output range selection), `profileIndices` is a sorted, unique, zero-based index into the same analysis `profiles` array. Only PDF_ICC_BASED entries may be referenced; catalog OutputIntent is not assigned to pages as an input profile. Shared streams retain one entry and can be referenced by several pages. Inherited page Resources and nested Form resource dictionaries are followed; page-tree backlinks are excluded, cycles are bounded. Annotation appearance dictionaries and inline/executed content are outside this page-resource scope. Traversal is limited to 16384 total page-resource visits and depth 32, with at most 100 pages and 64 profile records. Exhaustion marks affected pages INCOMPLETE and emits PAGE_RESOURCE_GRAPH_LIMIT; empty references never prove the absence of runtime ICC usage.
+
+`executedUseVerified=false` is mandatory. Page status describes declaration traversal, while each referenced profile retains its independent envelope/error state and global warnings. This does not inspect paint operators, prove renderer ICC use, choose an input profile or establish colorimetric validity. PS/EPS and legacy records have no page mapping. The existing source-hash/run/lease binding, analysis JCS digest and receipt include the new evidence. Storage additionally checks mapping count against validated page count. The source descriptor exposes declarations plus the exact indexed profile list, digest and authenticated validation reference; it rechecks source identity, digest, count, role and index invariants. REST/MCP read scopes remain jobs:read + artifacts:read. Per-page effective ICC execution, separate PDF boxes and immutable publication envelopes remain Next.
+
+🟢 [Done] PDFの各原稿ページについてICCBased宣言を同じ解析内のprofiles配列へ0始まりindexで対応付ける。共有profileは一度だけ登録し、複数ページから参照する。継承ResourcesとネストしたFormをたどり、ページツリー逆参照を除外する。OutputIntentは入力profileとしてページへ割り当てない。対象はresource宣言で、注釈appearance、inline画像、実行された描画命令の使用証明ではない。合計16384訪問・深さ32・100ページ・64profileの上限を適用し、探索不足はINCOMPLETEと警告で示す。空配列も実行時ICC不使用の証明にはしない。
+
+executedUseVerified=falseを必須とし、ページ探索状態・profile個別の検証状態・全体警告を区別する。原稿hash／run／leaseに拘束した解析digestとreceiptへ保存し、descriptorでは対応表・同じprofile配列・digest・検証参照を返す。保存時と読取時にページ数・index・役割を検証する。PS／EPS・旧記録はnull。入力profileの自動選択は行わない。描画で実際に使われたICC、個別PDF box、公開時固定envelopeは引き続きNext。
+
+🟢 [Done] 对PDF每个原稿页，通过从0开始的有序唯一index引用同一次analysis的profiles数组。共享profile仅登记一次，可由多页引用。遍历继承Resources和嵌套Form，排除页面树反向链接；不把OutputIntent当作页面输入profile。范围是resource声明，不包含注释appearance、inline图像或已执行绘图操作的使用证明。限制为总计16384次访问、深度32、100页及64条profile；不足时标记INCOMPLETE并发出警告。空引用不证明运行时未使用ICC。
+
+executedUseVerified必须为false。页面遍历状态、各profile验证状态及全局警告独立保留。映射与原稿hash／run／lease绑定，并纳入解析digest和receipt。descriptor提供声明、同一profile数组、digest和认证验证引用；保存和读取均检查页数、index及用途。PS／EPS与旧记录为null，不自动选择输入profile。实际绘图ICC使用、各PDF box和固定发布envelope仍为Next。

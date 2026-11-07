@@ -25,8 +25,42 @@ impl Repository {
         strict_pdf: bool,
         font_policy: Option<Value>,
     ) -> Result<Value, StorageError> {
+        self.record_source_validation_with_geometry(
+            id,
+            run,
+            hash,
+            bytes,
+            pages,
+            strict_pdf,
+            font_policy,
+            None,
+        )
+        .await
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_source_validation_with_geometry(
+        &self,
+        id: Uuid,
+        run: Uuid,
+        hash: &str,
+        bytes: u64,
+        pages: u32,
+        strict_pdf: bool,
+        font_policy: Option<Value>,
+        source_geometry: Option<Value>,
+    ) -> Result<Value, StorageError> {
+        if let Some(geometry) = &source_geometry {
+            if !strict_pdf {
+                return Err(StorageError::Conflict);
+            }
+            rip_core::pages::validate_source_geometry(geometry, pages)
+                .map_err(|_| StorageError::Conflict)?;
+        }
         if let Some(policy) = &font_policy {
             let fonts = policy["fonts"].as_array().ok_or(StorageError::Conflict)?;
+            if policy.get("programIdentityProfile").is_some() {
+                rip_core::font_programs::validate(policy).map_err(|_| StorageError::Conflict)?;
+            }
             if let Some(usage) = policy.get("runtimeEvidence") {
                 rip_core::font_usage::validate(usage, pages).map_err(|_| StorageError::Conflict)?;
             }
@@ -81,6 +115,9 @@ impl Repository {
         if let Some(policy) = font_policy {
             report["fontPolicy"] = policy;
         }
+        if let Some(geometry) = source_geometry {
+            report["sourceGeometry"] = json!({"profile":"org.jrip.pdf-display-bounds-v1","unit":"point-1/72-inch","meaning":"crop-rotation-user-unit-display-bounds","pages":geometry});
+        }
         if job.manifest.page_ranges.is_ipp() {
             let selected = job
                 .manifest
@@ -122,6 +159,8 @@ impl Repository {
         {
             return Err(StorageError::Conflict);
         }
+        rip_core::pages::validate_page_profile_declarations(&analysis, None)
+            .map_err(|_| StorageError::Conflict)?;
         let digest = rip_digest::digest(&analysis).map_err(|_| StorageError::Conflict)?;
         let mut tx = self.pool.begin().await?;
         sqlx::query("UPDATE jobs SET revision=revision WHERE id=?")
@@ -138,6 +177,11 @@ impl Repository {
         {
             return Err(StorageError::Conflict);
         }
+        rip_core::pages::validate_page_profile_declarations(
+            &analysis,
+            report["pageCount"].as_u64().map(|n| n as u32),
+        )
+        .map_err(|_| StorageError::Conflict)?;
         report["colorProfileAnalysis"] = json!({"analysis":analysis,"digestProfile":rip_digest::PROFILE,"analysisDigest":digest});
         sqlx::query("UPDATE source_validations SET payload=? WHERE job_id=?")
             .bind(report.to_string())
@@ -229,8 +273,10 @@ mod tests {
             .await
             .unwrap();
         let mut policy = json!({"profile":"org.jrip.pdf-font-policy-v1","accepted":true,"scope":"declared-resources","fonts":[{"baseFont":"Helvetica","subtype":"Type1","state":"STANDARD14_SUBSTITUTION"}],"standard14Substitution":true});
+        policy["programIdentityProfile"] = json!(rip_core::font_programs::PROFILE);
         policy["runtimeEvidence"] = json!({"schemaVersion":1,"profile":"org.jrip.mupdf-font-usage-v1","engine":"mupdf","phase":"pdf-inspection","pageCount":2,"textOperations":0,"glyphCallbacks":0,"fonts":[]});
         for (field, value) in [
+            ("programIdentityProfile", json!("unknown")),
             ("runtimeEvidence", json!({"engine":"ghostscript"})),
             ("accepted", json!(false)),
             ("standard14Substitution", json!(false)),

@@ -629,6 +629,21 @@ async fn inspection_records_executed_font_names_glyphs_and_vertical_modes() {
     )
     .unwrap();
     let report = rip_interpreter::inspect_pdf(&source).await.unwrap();
+    rip_core::font_programs::validate(&report["fontPolicy"]).unwrap();
+    let programs: std::collections::HashSet<_> = report["fontPolicy"]["fonts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|font| {
+            assert_eq!(font["programIdentity"]["status"], "HASHED");
+            assert_eq!(
+                font["programIdentity"]["encodedSha256"],
+                font["programIdentity"]["sha256"]
+            );
+            font["programIdentity"]["sha256"].as_str().unwrap()
+        })
+        .collect();
+    assert_eq!(programs.len(), 2);
     let usage = &report["fontPolicy"]["runtimeEvidence"];
     rip_core::font_usage::validate(usage, 12).unwrap();
     assert_eq!(usage["engine"], "mupdf");

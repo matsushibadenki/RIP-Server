@@ -35,7 +35,7 @@ async fn sandbox_analyzes_pdf_and_ps_declarations_without_profile_selection() {
         }
         assert_eq!(
             report["inspectorRevision"],
-            "jrip-source-icc-v1-pypdf-6.21.2"
+            "jrip-source-icc-v2-pypdf-6.21.2"
         );
     }
 }

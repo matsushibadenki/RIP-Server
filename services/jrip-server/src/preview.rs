@@ -6,7 +6,7 @@ use axum::{
 };
 use uuid::Uuid;
 
-static DECODERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+pub(crate) static DECODERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
 pub async fn get(
     State(app): State<App>,

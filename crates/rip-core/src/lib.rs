@@ -1,8 +1,10 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+pub mod font_programs;
 pub mod font_usage;
 pub mod pages;
 pub mod print;
+pub mod printer_conditions;
 
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]

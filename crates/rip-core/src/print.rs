@@ -4,6 +4,29 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 /// Device-side copy count is independent of the source raster page count.
 pub const MAX_DELIVERY_COPIES: u32 = 999;
+/// Device-reported counters, never source pages or an inferred completion ratio.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeviceProgress {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impressions_completed: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_sheets_completed: Option<u32>,
+}
+impl DeviceProgress {
+    pub fn is_empty(&self) -> bool {
+        self.impressions_completed.is_none() && self.media_sheets_completed.is_none()
+    }
+    pub fn is_valid(&self) -> bool {
+        [self.impressions_completed, self.media_sheets_completed]
+            .into_iter()
+            .flatten()
+            .all(|n| n <= i32::MAX as u32)
+    }
+}
+/// The single-host RIP scheduler raises priority by one point per interval.
+pub const RIP_PRIORITY_AGING_SECONDS: i64 = 60;
+pub const RIP_PRIORITY_MAX: u32 = 100;
 /// Explicit physical binding; missing legacy fields mean one-sided.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -66,6 +89,9 @@ pub fn default_copies() -> u32 {
 pub fn single_copy(value: &u32) -> bool {
     *value == 1
 }
+pub const DELIVERY_ARTIFACT_DESCRIPTOR_PROFILE: &str = "org.jrip.delivery-artifact-descriptor-v1";
+pub const SOURCE_ARTIFACT_DESCRIPTOR_PROFILE: &str = "org.jrip.source-artifact-descriptor-v1";
+pub const RASTER_ARTIFACT_DESCRIPTOR_PROFILE: &str = "org.jrip.raster-artifact-descriptor-v1";
 pub const RIP_REVISION: &str = "jrip-rip-v1";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -337,7 +363,7 @@ impl CapabilityModel {
                 "source_integrity_is_not_document_structure_preflight".into(),
                 "completion_is_tiff_export".into(),
             ],
-            extensions: json!({"org.jrip.pageSelection":{"formats":["application/pdf"],"stage":"render","minimum":1,"maximum":100,"sourcePageMapping":true},"org.jrip.engines":{"mupdf":["application/pdf"],"ghostscript":["application/pdf","application/postscript","application/eps"]}}),
+            extensions: json!({"org.jrip.pageSelection":{"formats":["application/pdf"],"stage":"render","minimum":1,"maximum":100,"sourcePageMapping":true},"org.jrip.sourceDescriptor":{"profile":SOURCE_ARTIFACT_DESCRIPTOR_PROFILE,"endpointTemplate":"/api/v1/jobs/{jobId}/source/descriptor","contentTemplate":"/api/v1/jobs/{jobId}/source","structuralValidationOnRead":false},"org.jrip.artifactDescriptor":{"profile":RASTER_ARTIFACT_DESCRIPTOR_PROFILE,"endpointTemplate":"/api/v1/jobs/{jobId}/artifacts/{name}/descriptor","mediaTypes":["image/tiff"],"sampleValidation":true},"org.jrip.scheduling":{"profile":"org.jrip.priority-aging-v1","scope":"single-host-rip","eligibleState":"QUEUED","priority":{"minimum":0,"maximum":RIP_PRIORITY_MAX,"default":50},"agingIntervalSeconds":RIP_PRIORITY_AGING_SECONDS,"maximumEffectivePriority":RIP_PRIORITY_MAX,"ageOrigin":"createdAt","tieBreak":["createdAt","jobId"],"preemptive":false},"org.jrip.engines":{"mupdf":["application/pdf"],"ghostscript":["application/pdf","application/postscript","application/eps"]}}),
         }
     }
     pub fn color() -> Self {
@@ -357,7 +383,7 @@ impl CapabilityModel {
             "device_link_header_intent_required".into(),
             "black_preservation_cmyk_only_excludes_absolute_intent".into(),
         ];
-        model.extensions = json!({"org.jrip.color":{"blackPointCompensation":true,"blackPreservation":["none","k_only","k_plane"],"tacPercent":[100,400]}});
+        model.extensions = json!({"org.jrip.artifactDescriptor":{"profile":RASTER_ARTIFACT_DESCRIPTOR_PROFILE,"endpointTemplate":"/api/v1/color/attempts/{colorAttemptId}/artifacts/{name}/descriptor","mediaTypes":["image/tiff"],"sampleValidation":true},"org.jrip.color":{"blackPointCompensation":true,"blackPreservation":["none","k_only","k_plane"],"tacPercent":[100,400]}});
         model
     }
     pub fn queue() -> Self {
@@ -374,7 +400,7 @@ impl CapabilityModel {
             "ambiguous_device_submission_never_automatically_retried".into(),
             "acceptance_is_not_device_completion".into(),
         ];
-        model.extensions = json!({"org.jrip.queue":{"deliveryIdempotency":true,"leases":true,"boundedAutomaticRetry":false,"deadlines":false,"fairness":false}});
+        model.extensions = json!({"org.jrip.deliveryArtifactDescriptor":{"profile":DELIVERY_ARTIFACT_DESCRIPTOR_PROFILE,"endpointTemplate":"/api/v1/deliveries/{deliveryId}/artifact/descriptor","mediaTypes":["image/pwg-raster"],"streamValidation":true},"org.jrip.queue":{"deliveryIdempotency":true,"leases":true,"boundedAutomaticRetry":false,"deadlines":false,"fairness":false}});
         model
     }
     pub fn snapshot(&self, now: i64) -> Value {

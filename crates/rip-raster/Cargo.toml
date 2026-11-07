@@ -9,6 +9,7 @@ tiff = "0.10"
 thiserror.workspace = true
 tempfile = "3"
 sha2 = "0.10"
+serde.workspace = true
 
 [dev-dependencies]
 lcms2 = { version = "=6.2.0", features = ["static"] }

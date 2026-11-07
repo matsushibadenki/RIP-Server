@@ -22,6 +22,11 @@ async fn console_assets_are_same_origin_static_and_do_not_grant_api_access() {
         ),
         ("/console/style.css", "text/css", "@media"),
         (
+            "/console/printer-status.js",
+            "text/javascript",
+            "window.JripPrinterStatus",
+        ),
+        (
             "/console/delivery.js",
             "text/javascript",
             "expectedTicketSha256",

@@ -52,12 +52,18 @@ pub(crate) async fn store(
             Sha256::digest(r.get::<String, _>("payload").as_bytes())
         )
     });
-    let result = json!({"deliveryId":delivery.id,"sourceJob":delivery.ticket.source_job,"state":delivery.state,
+    let mut result = json!({"deliveryId":delivery.id,"sourceJob":delivery.ticket.source_job,"state":delivery.state,
         "revision":delivery.revision,"deviceJobId":delivery.device_job_id,"reasonCode":delivery.reason,
         "completionMeaning":if delivery.state==DeliveryState::Completed {"device-confirmed"}else{"delivery-terminal"},
         "confirmationSource":if delivery.reason.as_deref()==Some("REMOTE_JOB_RECONCILED") {"remote-job-reconciliation"}else if delivery.device_job_id.is_some(){"delivery-state-observation"}else{"delivery-state-record"},
         "printedAppearanceVerified":false,"rasterResultReceiptSha256":raster_receipt_hash,
         "request":request});
+    if let Some(observation) = &delivery.device_observation {
+        result["deviceObservation"] = serde_json::to_value(observation)?;
+    }
+    if let Some(query) = &delivery.device_query {
+        result["deviceQuery"] = serde_json::to_value(query)?;
+    }
     let issued: String = sqlx::query_scalar("SELECT strftime('%Y-%m-%dT%H:%M:%SZ','now')")
         .fetch_one(&mut **tx)
         .await?;

@@ -36,9 +36,7 @@ pinned Ed25519 signatures. Re-signed inconsistent records are rejected. CI insta
 the validator before ignored tests. See [fixture contract](../tests/acx/README.md).
 Successful artifact metadata is synthetic; this validates the evidence publisher,
 not interpreter output or physical printing.
-⭕️ [Pending] Combined lifecycle acceptance through the real Docker interpreters
-with the independent conformance checker is still outstanding; cross-provider interoperability and physical printer
-acceptance remain separate work.
+🟢 [Done] Combined Docker lifecycle acceptance follows discovery, preflight, concurrent commit and restart replay through real MuPDF/PDF and Ghostscript/PS workers. Valid documents publish hash-checked TIFF pages; truncated PDF and a late PS error publish failed receipts without artifacts. Python schema and independent Node signature/hash checks validate the signed real receipts. The existing CI ignored-test pass includes this test. Cross-provider interoperability and physical printer acceptance remain separate work.
 
 ## 日本語
 
@@ -56,7 +54,7 @@ preflightのticket・主体・認可証跡・期限をJCS digestへ拘束し、c
 🟢 [Done] ACX schema固定コピーとPython／Nodeで受付・成功・失敗・取消証跡を独立検証します。
 署名・digest・記録間の関連を照合し、再署名された契約不一致も拒否します。CIにも組み込みました。
 成功artifactは模擬metadataで、実描画・実機印刷の検証とは区別します。
-⭕️ [Pending] 独立適合checkerと実interpreterを組み合わせた統合lifecycle受入試験。
+🟢 [Done] 独立checkerと実Docker workerを組み合わせた公開lifecycle受入を確認。MuPDF/PDF・Ghostscript/PSの正常原稿、切断PDF・途中ページ後のPSエラー、TIFF hash、署名付き受付／終端receipt、再起動・同時commit・再要求を検証。実機受入や他provider相互運用とは区別する。
 
 ## 简体中文
 
@@ -71,4 +69,4 @@ preflightのticket・主体・認可証跡・期限をJCS digestへ拘束し、c
 不将这些测试视为全部job的tenant隔离或独立ACX schema验证。
 🟢 [Done] 用固定ACX schema及Python／Node独立验证接收、成功、失败及取消证据。
 核对签名、digest及记录关联，拒绝重新签名的契约不一致，并纳入CI。成功artifact为模拟元数据，不证明实际渲染或打印。
-⭕️ [Pending] 独立符合性checker与实际interpreter组合的完整lifecycle验收。
+🟢 [Done] 独立checker结合实际Docker worker的公开lifecycle验收通过：MuPDF/PDF与Ghostscript/PS正常处理、截断PDF与中途PS错误、TIFF hash、已签名接收及终结receipt、重启、并发提交与重放。实体设备与跨provider互操作仍需单独验收。

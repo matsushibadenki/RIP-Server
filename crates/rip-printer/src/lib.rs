@@ -1,4 +1,6 @@
 //! Native IPP outbound boundary. Acceptance is distinct from physical completion.
+pub mod pwg_supplies;
+pub mod supplies;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper_util::rt::TokioIo;
@@ -34,11 +36,19 @@ pub enum Error {
     #[error("printer_ipp_status_{0:04x}")]
     Status(u16),
 }
+impl Error {
+    pub fn is_job_not_found(&self) -> bool {
+        matches!(self, Self::Status(ipp::NOT_FOUND))
+    }
+}
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Capabilities {
     pub document_formats: Vec<String>,
     pub accepting_jobs: bool,
+    pub queued_job_count: Option<u32>,
+    pub marker_supplies: supplies::MarkerSupplies,
+    pub printer_supplies: pwg_supplies::PrinterSupplies,
     pub state: i32,
     pub reasons: Vec<String>,
     pub pwg_resolutions: Vec<[u32; 2]>,
@@ -139,6 +149,17 @@ pub enum DeviceState {
     Completed,
 }
 impl DeviceState {
+    pub fn ipp_code(self) -> i32 {
+        match self {
+            Self::Pending => 3,
+            Self::Held => 4,
+            Self::Processing => 5,
+            Self::Stopped => 6,
+            Self::Cancelled => 7,
+            Self::Aborted => 8,
+            Self::Completed => 9,
+        }
+    }
     fn from_code(code: i32) -> Result<Self, Error> {
         match code {
             3 => Ok(Self::Pending),
@@ -155,6 +176,7 @@ impl DeviceState {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JobStatus {
+    pub progress: rip_core::print::DeviceProgress,
     pub job_id: i32,
     pub job_name: Option<String>,
     pub state: DeviceState,
@@ -548,6 +570,35 @@ fn values(message: &Message<'_>, group: u8, name: &str, tag: u8) -> Result<Vec<S
         })
         .collect()
 }
+fn reasons(message: &Message<'_>, group: u8, name: &str) -> Result<Vec<String>, Error> {
+    let values = values(message, group, name, 0x44)?;
+    if values.len() > 64
+        || values
+            .iter()
+            .any(|v| v.is_empty() || v.len() > 255 || v.chars().any(char::is_control))
+    {
+        return Err(Error::InvalidResponse);
+    }
+    Ok(values)
+}
+fn optional_counter(message: &Message<'_>, group: u8, name: &str) -> Result<Option<u32>, Error> {
+    let counts: Vec<_> = message
+        .attributes
+        .iter()
+        .filter(|a| a.group == group && a.name == name)
+        .collect();
+    match counts.as_slice() {
+        [] => Ok(None),
+        [a] if a.tag == 0x12 && a.value.is_empty() => Ok(None),
+        [a] if a.tag == 0x21 && a.value.len() == 4 => {
+            let count = i32::from_be_bytes(a.value.as_slice().try_into().unwrap());
+            Ok(Some(
+                u32::try_from(count).map_err(|_| Error::InvalidResponse)?,
+            ))
+        }
+        _ => Err(Error::InvalidResponse),
+    }
+}
 fn state(message: &Message<'_>, group: u8, name: &str) -> Result<i32, Error> {
     let attribute = message.one(group, name).ok_or(Error::InvalidResponse)?;
     if attribute.tag != 0x23 || attribute.value.len() != 4 {
@@ -563,6 +614,15 @@ impl PrinterBackend for NativeIpp {
         message.text(0x44, "requested-attributes", "document-format-supported");
         for name in [
             "printer-is-accepting-jobs",
+            "queued-job-count",
+            "printer-supply",
+            "printer-supply-description",
+            "marker-names",
+            "marker-types",
+            "marker-colors",
+            "marker-levels",
+            "marker-low-levels",
+            "marker-high-levels",
             "printer-state",
             "printer-state-reasons",
             "pwg-raster-document-resolution-supported",
@@ -592,6 +652,7 @@ impl PrinterBackend for NativeIpp {
         if !(3..=5).contains(&printer_state) {
             return Err(Error::InvalidResponse);
         }
+        let queued_job_count = optional_counter(&message, 4, "queued-job-count")?;
         let mut pwg_resolutions = Vec::new();
         for attribute in message
             .attributes
@@ -645,13 +706,16 @@ impl PrinterBackend for NativeIpp {
             _ => return Err(Error::InvalidResponse),
         };
         Ok(Capabilities {
+            queued_job_count,
+            marker_supplies: supplies::describe(&message),
+            printer_supplies: pwg_supplies::describe(&message),
             sides,
             sheet_back,
             copies_supported,
             document_formats: formats,
             accepting_jobs: accepting.value == [1],
             state: printer_state,
-            reasons: values(&message, 4, "printer-state-reasons", 0x44)?,
+            reasons: reasons(&message, 4, "printer-state-reasons")?,
             pwg_resolutions,
             pwg_types: values(&message, 4, "pwg-raster-document-type-supported", 0x44)?,
             media: values(&message, 4, "media-supported", 0x44)?,
@@ -692,6 +756,16 @@ impl PrinterBackend for NativeIpp {
         }
         let (id, mut message) = self.message(ipp::GET_JOB_ATTRIBUTES);
         message.integer("job-id", job_id);
+        message.text(0x44, "requested-attributes", "job-id");
+        for name in [
+            "job-name",
+            "job-state",
+            "job-state-reasons",
+            "job-impressions-completed",
+            "job-media-sheets-completed",
+        ] {
+            message.additional(0x44, name.as_bytes());
+        }
         let bytes = self
             .exchange(ipp::GET_JOB_ATTRIBUTES, id, message.finish())
             .await?;
@@ -704,10 +778,18 @@ impl PrinterBackend for NativeIpp {
             return Err(Error::InvalidResponse);
         }
         Ok(JobStatus {
+            progress: rip_core::print::DeviceProgress {
+                impressions_completed: optional_counter(&message, 2, "job-impressions-completed")?,
+                media_sheets_completed: optional_counter(
+                    &message,
+                    2,
+                    "job-media-sheets-completed",
+                )?,
+            },
             job_name: names.into_iter().next(),
             job_id,
             state: DeviceState::from_code(state(&message, 2, "job-state")?)?,
-            reasons: values(&message, 2, "job-state-reasons", 0x44)?,
+            reasons: reasons(&message, 2, "job-state-reasons")?,
         })
     }
     async fn cancel(&self, job_id: i32) -> Result<(), Error> {

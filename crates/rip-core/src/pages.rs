@@ -365,3 +365,126 @@ mod ipp_tests {
         );
     }
 }
+
+/// Display bounds measured by the strict PDF inspector (CropBox/rotation/UserUnit).
+pub fn validate_source_geometry(
+    value: &serde_json::Value,
+    count: u32,
+) -> Result<(), ValidationError> {
+    let pages = value
+        .as_array()
+        .ok_or(ValidationError("invalid_source_geometry"))?;
+    if !(1..=100).contains(&count)
+        || pages.len() != count as usize
+        || pages.iter().enumerate().any(|(i, p)| {
+            p["page"].as_u64() != Some(i as u64 + 1)
+                || ["widthPoints", "heightPoints"].iter().any(|key| {
+                    !p[*key]
+                        .as_f64()
+                        .is_some_and(|n| n.is_finite() && n > 0.0 && n <= 2834.6457)
+                })
+        })
+    {
+        return Err(ValidationError("invalid_source_geometry"));
+    }
+    Ok(())
+}
+#[cfg(test)]
+mod source_geometry_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn bounded_complete_ordered_geometry_is_required() {
+        let valid = json!([{"page":1,"widthPoints":72.0,"heightPoints":144.0},{"page":2,"widthPoints":144.0,"heightPoints":72.0}]);
+        assert!(validate_source_geometry(&valid, 2).is_ok());
+        for bad in [
+            json!(null),
+            json!([]),
+            json!([{"page":2,"widthPoints":72,"heightPoints":72}]),
+            json!([{"page":1,"widthPoints":0,"heightPoints":72}]),
+            json!([{"page":1,"widthPoints":2835,"heightPoints":72}]),
+            json!([{"page":1,"widthPoints":"72","heightPoints":72}]),
+        ] {
+            assert!(validate_source_geometry(&bad, 1).is_err());
+        }
+        assert!(validate_source_geometry(&valid, 1).is_err());
+    }
+}
+
+/// Validate optional passive page/profile associations without inferring executed use.
+pub fn validate_page_profile_declarations(
+    analysis: &serde_json::Value,
+    count: Option<u32>,
+) -> Result<(), ValidationError> {
+    let Some(mapping) = analysis
+        .get("pageProfileDeclarations")
+        .filter(|v| !v.is_null())
+    else {
+        return Ok(());
+    };
+    let invalid = ValidationError("invalid_page_profile_declarations");
+    let pages = mapping["pages"]
+        .as_array()
+        .ok_or(ValidationError("invalid_page_profile_declarations"))?;
+    let profiles = analysis["profiles"]
+        .as_array()
+        .ok_or(ValidationError("invalid_page_profile_declarations"))?;
+    if analysis["format"] != "pdf"
+        || mapping["profile"] != "org.jrip.pdf-page-profile-declarations-v1"
+        || mapping["scope"] != "reachable-page-resources-not-executed-content"
+        || mapping["executedUseVerified"] != false
+        || !(1..=100).contains(&pages.len())
+        || count.is_some_and(|n| n as usize != pages.len())
+        || profiles.len() > 64
+    {
+        return Err(invalid);
+    }
+    for (index, page) in pages.iter().enumerate() {
+        let refs = page["profileIndices"]
+            .as_array()
+            .ok_or(ValidationError("invalid_page_profile_declarations"))?;
+        if page["page"].as_u64() != Some(index as u64 + 1)
+            || !matches!(
+                page["status"].as_str(),
+                Some("DECLARATIONS_INSPECTED" | "INCOMPLETE")
+            )
+            || refs.len() > 64
+            || refs.iter().any(|v| {
+                !v.as_u64().is_some_and(|n| {
+                    n < profiles.len() as u64 && profiles[n as usize]["kind"] == "PDF_ICC_BASED"
+                })
+            })
+            || refs.windows(2).any(|w| w[0].as_u64() >= w[1].as_u64())
+        {
+            return Err(invalid);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod page_profile_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn declarations_reject_wrong_roles_indices_pages_and_execution_claims() {
+        let valid = json!({"format":"pdf","profiles":[{"kind":"PDF_OUTPUT_INTENT"},{"kind":"PDF_ICC_BASED"}],"pageProfileDeclarations":{"profile":"org.jrip.pdf-page-profile-declarations-v1","scope":"reachable-page-resources-not-executed-content","executedUseVerified":false,"pages":[{"page":1,"profileIndices":[1],"status":"DECLARATIONS_INSPECTED"}]}});
+        assert!(validate_page_profile_declarations(&valid, Some(1)).is_ok());
+        assert!(validate_page_profile_declarations(&valid, Some(2)).is_err());
+        for indices in [
+            json!([0]),
+            json!([2]),
+            json!([-1]),
+            json!([1, 1]),
+            json!(["1"]),
+        ] {
+            let mut bad = valid.clone();
+            bad["pageProfileDeclarations"]["pages"][0]["profileIndices"] = indices;
+            assert!(validate_page_profile_declarations(&bad, Some(1)).is_err());
+        }
+        let mut bad = valid.clone();
+        bad["pageProfileDeclarations"]["executedUseVerified"] = json!(true);
+        assert!(validate_page_profile_declarations(&bad, None).is_err());
+        assert!(validate_page_profile_declarations(&json!({"profiles":[]}), Some(1)).is_ok());
+    }
+}

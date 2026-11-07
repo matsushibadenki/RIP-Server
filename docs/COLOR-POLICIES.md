@@ -64,7 +64,7 @@ missing profiles, scope checks, bounded cursor paging, restart persistence,
 reference-based submission, replay conflicts and override rejection. Docker is not
 needed for these API/storage checks.
 
-⭕️ [Pending] Actual Docker conversion with a saved policy reference has not yet been completed. 🔴 [Later] Mutable named aliases, retirement/approval workflows,
+🟢 [Done] Saved-policy Docker acceptance verifies two-page sRGB pixel identity, pinned ICC and policy reports, queueing before a newer policy version, restart persistence and idempotent replay without reconversion. The test is `saved_policy_docker_conversion_pins_version_pixels_and_restart_evidence` in `services/jrip-server/tests/color.rs`, included in the existing CI ignored-test pass. This verifies the local fixture, not device color accuracy. 🔴 [Later] Mutable named aliases, retirement/approval workflows,
 automatic input-profile inference, interactive gamut visualization and per-artifact/remote retention. Common local retention is described in [ARTIFACT-RETENTION.md](ARTIFACT-RETENTION.md).
 
 ## 日本語
@@ -82,7 +82,7 @@ automatic input-profile inference, interactive gamut visualization and per-artif
 従来のinline指定は維持し、従来の `policySha256` と新しいregistry digestは区別します。
 
 登録・権限・版分離・cursor・再起動・再送競合をテストします。
-⭕️ [Pending] 保存版を使う実変換の受入試験は未完了です。
+🟢 [Done] 保存版からのDocker実変換を検証済み。2ページsRGBの画素一致・ICCとpolicyレポート・投入後の新版登録に対する版固定・再起動・再変換なしの同一要求復旧を確認。既存CIのignored試験に含む。実機の色精度を保証するものではありません。
 🔴 [Later] 名前alias、廃止／承認workflow、入力profileの自動推定、色域の可視化、個別／remote artifact保持期限。共通local保持は [追加仕様](ARTIFACT-RETENTION.md) を参照してください。
 
 ## 简体中文
@@ -98,5 +98,5 @@ automatic input-profile inference, interactive gamut visualization and per-artif
 原inline接口和历史 `policySha256` 编码保持不变，与新registry digest区分。
 
 验证注册、权限、版本、cursor、重启及重放冲突。
-⭕️ [Pending] 保存版策略的实际转换验收尚未完成。
+🟢 [Done] 保存版策略的Docker实际转换验收通过：两页sRGB像素一致、ICC与策略报告、提交后保存新版仍固定原版、重启及不重复转换的幂等重放。已纳入现有CI ignored测试，不表示实体设备色彩精度验收。
 🔴 [Later] 名称alias、停用／审批workflow、输入profile自动推断、色域可视化及单独／remote artifact保留期限。共同本地保留见 [追加规格](ARTIFACT-RETENTION.md)。

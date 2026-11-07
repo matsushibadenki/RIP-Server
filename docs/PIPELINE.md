@@ -189,3 +189,11 @@ MCP resource `jrip://inspections/{inspectionId}/events` は参照・購読・解
 Explicit follow-on pipelines accept `copies` (default 1); physical capability and approval checks are deferred to delivery preparation. 明示的な後続pipelineの部数指定／显式后续pipeline份数: [PRINT-COPIES.md](PRINT-COPIES.md).
 
 Follow-on pipelines also persist `pageRanges`; actual bounds are checked after RIP. 後続pipelineはページ範囲を保持しRIP後に範囲を検証します。后续pipeline保存页码范围，在RIP后验证实际边界。[PRINT-PAGE-RANGES.md](PRINT-PAGE-RANGES.md).
+
+## Device terminal outcomes / 機器の終了結果 / 设备终结结果
+
+🟢 [Done] 機器側取消はpipelineの`CANCELLED`、機器側中止・拒否は`FAILED`、機器側完了は`COMPLETED`へ反映する。取消を失敗に置き換えない。終端への取消・再開は拒否し、追加送信・revision更新を行わない。機器の状態と理由は[観測記録](DEVICE-JOB-OBSERVATIONS.md)および終端receiptに残る。pipeline全体の状態は、下位Deliveryの取消を観測した次のworker passで更新される。
+
+🟢 [Done] Device cancellation maps to pipeline `CANCELLED`; abort/rejection maps to `FAILED`; device completion maps to `COMPLETED`. Terminal pipelines reject cancellation/resume without resending or advancing revision. Device observations remain in printer events and terminal receipts. The next pipeline worker pass propagates the delivery outcome. The mock IPP test covers states 7/8/9, raw reasons, receipt status, terminal stability and exactly one submission.
+
+🟢 [Done] 设备取消映射为pipeline的`CANCELLED`，中止或拒绝为`FAILED`，设备完成为`COMPLETED`。终结流程拒绝取消和恢复，不重新发送或增加revision。设备状态及原因保留在事件和终结receipt中；下一次pipeline worker运行传播投递结果。模拟IPP测试覆盖7/8/9状态、原因、receipt、终结稳定性及仅发送一次。

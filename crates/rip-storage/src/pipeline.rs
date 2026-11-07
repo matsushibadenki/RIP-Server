@@ -133,6 +133,8 @@ impl Repository {
                 "colorState":color["state"],"colorRevision":color["revision"],
                 "deliveryState":delivery["state"],"deliveryRevision":delivery["revision"],
                 "deviceJobId":delivery["deviceJobId"],
+                "deviceObservation":delivery["deviceObservation"],
+                "deviceQuery":delivery["deviceQuery"],
                 "completed":workflow["state"] == "COMPLETED" && delivery["state"] == "COMPLETED" && !contract.is_null()},
             "authorizationGranted":false}),
         )

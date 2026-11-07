@@ -20,7 +20,13 @@ use uuid::Uuid;
 #[ignore = "requires locally built jrip-color:local Docker image"]
 async fn color_managed_delivery_requires_matching_target_and_binds_attempt() {
     let ranges = serde_json::from_value(serde_json::json!([{"first":2,"last":2}])).unwrap();
-    let (_dir, mut app, job, fake, task) = fixture_mapped_pages(false, 1, Some((ranges, 2))).await;
+    let (_dir, mut app, job, fake, task) = fixture_with_source_hash(
+        false,
+        1,
+        Some((ranges, 2)),
+        &format!("{:x}", Sha256::digest(b"source")),
+    )
+    .await;
     let icc = lcms2::Profile::new_srgb().icc().unwrap();
     let record = rip_color::registry::Registry::open(app.root.join("color-profiles"))
         .unwrap()
@@ -155,6 +161,27 @@ async fn color_managed_delivery_requires_matching_target_and_binds_attempt() {
     assert_eq!(fake.prints.load(Ordering::SeqCst), 0);
     jrip_server::delivery::tick(&app).await.unwrap();
     assert_eq!(fake.prints.load(Ordering::SeqCst), 1);
+    let response = jrip_server::router(app.clone())
+        .oneshot(
+            Request::get(format!(
+                "/api/v1/deliveries/{delivery_id}/artifact/descriptor"
+            ))
+            .header("authorization", "Bearer token")
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let descriptor: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(
+        descriptor["provenance"]["colorAttemptId"],
+        color_id.to_string()
+    );
+    assert_eq!(descriptor["selectedSourcePages"], serde_json::json!([2]));
+    assert_eq!(descriptor["pageCount"], 1);
+    assert_eq!(fake.prints.load(Ordering::SeqCst), 1);
     let download = jrip_server::router(app.clone())
         .oneshot(
             Request::get(format!(
@@ -203,6 +230,15 @@ struct Fake {
     duplex: Arc<AtomicUsize>,
     prints: Arc<AtomicUsize>,
     state: Arc<AtomicUsize>,
+    progress_mode: Arc<AtomicUsize>,
+    queue_count: Arc<AtomicUsize>,
+    accepting_jobs: Arc<AtomicUsize>,
+    printer_state: Arc<AtomicUsize>,
+    marker_mode: Arc<AtomicUsize>,
+    pwg_supply_mode: Arc<AtomicUsize>,
+    capability_queries: Arc<AtomicUsize>,
+    printer_reasons: Arc<std::sync::Mutex<Vec<String>>>,
+    reasons: Arc<std::sync::Mutex<Vec<String>>>,
     malformed: bool,
     job_name: Arc<std::sync::Mutex<String>>,
 }
@@ -225,6 +261,7 @@ async fn handle(
     r.text(0x48, "attributes-natural-language", "en");
     match q.operation {
         rip_ipp::GET_PRINTER_ATTRIBUTES => {
+            f.capability_queries.fetch_add(1, Ordering::SeqCst);
             r.group(4);
             let mut range = 1i32.to_be_bytes().to_vec();
             range.extend_from_slice(&(f.copies_max.load(Ordering::SeqCst) as i32).to_be_bytes());
@@ -240,8 +277,67 @@ async fn handle(
                 );
             }
             r.text(0x49, "document-format-supported", "image/pwg-raster");
-            r.attribute(0x22, "printer-is-accepting-jobs", &[1]);
-            r.attribute(0x23, "printer-state", &3i32.to_be_bytes());
+            r.attribute(
+                0x22,
+                "printer-is-accepting-jobs",
+                &[u8::from(f.accepting_jobs.load(Ordering::SeqCst) != 0)],
+            );
+            r.attribute(
+                0x23,
+                "printer-state",
+                &(f.printer_state.load(Ordering::SeqCst) as i32).to_be_bytes(),
+            );
+            for (index, reason) in f.printer_reasons.lock().unwrap().iter().enumerate() {
+                if index == 0 {
+                    r.text(0x44, "printer-state-reasons", reason)
+                } else {
+                    r.additional(0x44, reason.as_bytes())
+                }
+            }
+            match f.queue_count.load(Ordering::SeqCst) {
+                usize::MAX => {}
+                n if n == usize::MAX - 1 => r.integer("queued-job-count", -1),
+                n => r.integer("queued-job-count", n as i32),
+            }
+            match f.marker_mode.load(Ordering::SeqCst) {
+                1 => {
+                    r.integer("marker-levels", 0);
+                    r.additional(0x21, &90i32.to_be_bytes());
+                    r.text(0x42, "marker-names", "Black toner");
+                    r.additional(0x42, b"Waste tank");
+                    r.text(0x44, "marker-types", "toner");
+                    r.additional(0x44, b"waste-ink");
+                    r.integer("marker-high-levels", 100);
+                    r.additional(0x21, &0i32.to_be_bytes());
+                    r.integer("marker-low-levels", 5);
+                    r.additional(0x21, &95i32.to_be_bytes());
+                }
+                2 => {
+                    r.integer("marker-levels", -1);
+                    r.additional(0x21, &(-2i32).to_be_bytes());
+                    r.additional(0x21, &(-3i32).to_be_bytes());
+                }
+                3 => {
+                    r.integer("marker-levels", 1);
+                    r.additional(0x21, &2i32.to_be_bytes());
+                    r.text(0x42, "marker-names", "Only one");
+                }
+                4 => r.attribute(0x12, "marker-levels", &[]),
+                _ => {}
+            }
+            match f.pwg_supply_mode.load(Ordering::SeqCst) {
+                1=>{
+                    r.attribute(0x30,"printer-supply",b"type=toner;maxcapacity=100;level=0;colorantname=black;unit=percent;class=supplyThatIsConsumed;");
+                    let text="黒トナー".as_bytes();let mut d=2u16.to_be_bytes().to_vec();d.extend_from_slice(b"ja");d.extend_from_slice(&(text.len() as u16).to_be_bytes());d.extend_from_slice(text);r.attribute(0x35,"printer-supply-description",&d);
+                },
+                2=>r.attribute(0x30,"printer-supply",b"type=staples;maxcapacity=5000;level=2000;colorantname=no-color;unit=items;"),
+                3=>r.attribute(0x30,"printer-supply",b"type=ink;maxcapacity=-2;level=-3;colorantname=cyan;"),
+                4=>r.attribute(0x30,"printer-supply",b"type=toner;maxcapacity=100;level=10;Level=20;colorantname=black;"),
+                5=>{r.attribute(0x30,"printer-supply",b"type=toner;maxcapacity=100;level=10;colorantname=black;");r.text(0x41,"printer-supply-description","One");r.additional(0x41,b"Extra");},
+                6=>r.attribute(0x12,"printer-supply",&[]),
+                7=>r.attribute(0x30,"printer-supply",b"type=wasteToner;maxcapacity=100;level=25;colorantname=no-color;class=receptacleThatIsFilled;unit=percent;"),
+                _=>{},
+            }
             r.resolution_dpi("pwg-raster-document-resolution-supported", 72);
             r.text(0x44, "pwg-raster-document-type-supported", "rgb_8");
             r.text(0x44, "media-supported", "custom_square_25.4x25.4mm");
@@ -291,6 +387,21 @@ async fn handle(
             r.attribute(0x23, "job-state", &3i32.to_be_bytes());
         }
         rip_ipp::GET_JOB_ATTRIBUTES => {
+            if f.progress_mode.load(Ordering::SeqCst) == 9 {
+                return (
+                    [(axum::http::header::CONTENT_TYPE, "application/ipp")],
+                    vec![0],
+                );
+            }
+            if f.progress_mode.load(Ordering::SeqCst) == 10 {
+                let mut response = rip_ipp::Response::new([1, 1], rip_ipp::NOT_FOUND, q.request_id);
+                response.text(0x47, "attributes-charset", "utf-8");
+                response.text(0x48, "attributes-natural-language", "en");
+                return (
+                    [(axum::http::header::CONTENT_TYPE, "application/ipp")],
+                    response.finish(),
+                );
+            }
             r.group(2);
             r.integer("job-id", 42);
             r.text(0x42, "job-name", &f.job_name.lock().unwrap());
@@ -299,6 +410,32 @@ async fn handle(
                 "job-state",
                 &(f.state.load(Ordering::SeqCst) as i32).to_be_bytes(),
             );
+            let (impressions, sheets) = match f.state.load(Ordering::SeqCst) {
+                5 => (3, 2),
+                6 => (4, 2),
+                9 => (8, 4),
+                _ => (0, 0),
+            };
+            let progress_mode = f.progress_mode.load(Ordering::SeqCst);
+            if progress_mode != 1 {
+                r.integer(
+                    "job-impressions-completed",
+                    if progress_mode == 2 { 0 } else { impressions },
+                );
+                if progress_mode != 3 {
+                    r.integer(
+                        "job-media-sheets-completed",
+                        if progress_mode == 2 { 0 } else { sheets },
+                    );
+                }
+            }
+            for (index, reason) in f.reasons.lock().unwrap().iter().enumerate() {
+                if index == 0 {
+                    r.text(0x44, "job-state-reasons", reason);
+                } else {
+                    r.additional(0x44, reason.as_bytes());
+                }
+            }
         }
         rip_ipp::CANCEL_JOB => {
             assert_eq!(q.integer(1, "job-id"), Some(42));
@@ -345,6 +482,20 @@ async fn fixture_mapped_pages(
     Fake,
     tokio::task::JoinHandle<()>,
 ) {
+    fixture_with_source_hash(malformed, count, mapping, "source").await
+}
+async fn fixture_with_source_hash(
+    malformed: bool,
+    count: u32,
+    mapping: Option<(rip_core::pages::PageRanges, u32)>,
+    source_hash: &str,
+) -> (
+    tempfile::TempDir,
+    jrip_server::App,
+    Job,
+    Fake,
+    tokio::task::JoinHandle<()>,
+) {
     let dir = tempfile::tempdir().unwrap();
     let mut app = jrip_server::open(dir.path().into(), "token".into())
         .await
@@ -356,6 +507,15 @@ async fn fixture_mapped_pages(
         duplex: Arc::new(AtomicUsize::new(0)),
         prints: Arc::new(AtomicUsize::new(0)),
         state: Arc::new(AtomicUsize::new(3)),
+        progress_mode: Arc::new(AtomicUsize::new(0)),
+        queue_count: Arc::new(AtomicUsize::new(7)),
+        accepting_jobs: Arc::new(AtomicUsize::new(1)),
+        printer_state: Arc::new(AtomicUsize::new(3)),
+        marker_mode: Arc::new(AtomicUsize::new(0)),
+        pwg_supply_mode: Arc::new(AtomicUsize::new(0)),
+        capability_queries: Arc::new(AtomicUsize::new(0)),
+        printer_reasons: Arc::new(std::sync::Mutex::new(vec![])),
+        reasons: Arc::new(std::sync::Mutex::new(vec![])),
         malformed,
         job_name: Arc::new(std::sync::Mutex::new(String::new())),
     };
@@ -382,7 +542,7 @@ async fn fixture_mapped_pages(
         )
         .unwrap(),
         state: JobState::Spooling,
-        source_sha256: "source".into(),
+        source_sha256: source_hash.into(),
         created_at: 0,
         updated_at: 0,
         revision: 0,
@@ -830,6 +990,7 @@ async fn live_capabilities_have_revision_expiry_and_no_device_address() {
     let body: serde_json::Value =
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(body["model"]["capabilities"]["acceptingJobs"], true);
+    assert_eq!(body["model"]["capabilities"]["queuedJobCount"], 7);
     assert!(
         body["capabilityRevision"]
             .as_str()
@@ -861,6 +1022,522 @@ async fn live_capabilities_have_revision_expiry_and_no_device_address() {
         serde_json::json!([[72, 72]])
     );
     assert!(!common.to_string().contains(&app.printers[0].uri));
+    let mut revisions = Vec::new();
+    for count in [7, 0, usize::MAX, 7] {
+        f.queue_count.store(count, Ordering::SeqCst);
+        let response = jrip_server::router(app.clone())
+            .oneshot(
+                Request::get("/api/v1/print/capabilities?printerId=test")
+                    .header("authorization", "Bearer token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let snapshot: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        let stage = &snapshot["stages"][3];
+        let live = &stage["capability"]["extensions"]["org.jrip.printer"];
+        assert_eq!(live["acceptingJobs"], true);
+        assert_eq!(
+            live["queuedJobCount"],
+            if count == usize::MAX {
+                serde_json::Value::Null
+            } else {
+                serde_json::json!(count)
+            }
+        );
+        assert_eq!(
+            live["queuedJobCountMeaning"],
+            "device-reported-nonterminal-jobs"
+        );
+        assert_eq!(
+            stage["expiresAt"].as_i64().unwrap() - stage["observedAt"].as_i64().unwrap(),
+            30
+        );
+        assert_eq!(stage["capability"]["availability"], "available");
+        revisions.push((
+            snapshot["capabilityRevision"].clone(),
+            stage["capabilityRevision"].clone(),
+        ));
+        assert!(!snapshot.to_string().contains(&app.printers[0].uri));
+    }
+    assert_ne!(revisions[0], revisions[1]);
+    assert_ne!(revisions[1], revisions[2]);
+    assert_eq!(revisions[0], revisions[3]);
+    f.queue_count.store(0, Ordering::SeqCst);
+    f.accepting_jobs.store(0, Ordering::SeqCst);
+    let stopped = jrip_server::print::models(&app, Some("test"))
+        .await
+        .unwrap();
+    assert_eq!(
+        stopped["stages"][3]["capability"]["availability"],
+        "unavailable"
+    );
+    assert_eq!(
+        stopped["stages"][3]["capability"]["extensions"]["org.jrip.printer"]["queuedJobCount"],
+        0
+    );
+    assert_eq!(
+        stopped["stages"][3]["capability"]["extensions"]["org.jrip.printer"]["acceptingJobs"],
+        false
+    );
+    f.queue_count.store(usize::MAX - 1, Ordering::SeqCst);
+    assert!(
+        jrip_server::print::models(&app, Some("test"))
+            .await
+            .is_err()
+    );
+
+    assert_eq!(f.prints.load(Ordering::SeqCst), 0);
+    task.abort();
+}
+
+#[tokio::test]
+async fn printer_conditions_match_live_raw_and_common_models_without_sending() {
+    let (_dir, app, job, f, task) = fixture(false).await;
+    for (state, reasons, evidence) in [
+        (
+            3,
+            vec!["toner-low-warning", "vendor-alert-report"],
+            "REPORTED",
+        ),
+        (
+            5,
+            vec!["media-empty", "media-jam-error", "cover-open"],
+            "REPORTED",
+        ),
+        (5, vec!["toner-empty-warning"], "REPORTED"),
+        (3, vec!["none"], "NO_REASONS_REPORTED"),
+        (3, vec![], "UNREPORTED"),
+        (3, vec!["none", "media-jam-error"], "REPORTED"),
+    ] {
+        f.printer_state.store(state, Ordering::SeqCst);
+        *f.printer_reasons.lock().unwrap() = reasons.iter().map(|s| s.to_string()).collect();
+        let response = jrip_server::router(app.clone())
+            .oneshot(
+                Request::get("/api/v1/printers/test")
+                    .header("authorization", "Bearer token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let raw: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        let common = jrip_server::print::models(&app, Some("test"))
+            .await
+            .unwrap();
+        let conditions = &raw["model"]["conditions"];
+        assert_eq!(
+            conditions,
+            &common["stages"][3]["capability"]["extensions"]["org.jrip.printer"]["conditions"]
+        );
+        assert_eq!(conditions["reasonEvidence"], evidence);
+        assert_eq!(conditions["supplyLevelsKnown"], false);
+        assert_eq!(conditions["automaticResendPermitted"], false);
+        for condition in conditions["conditions"].as_array().unwrap() {
+            let raw = condition["rawReason"].as_str().unwrap();
+            assert!(reasons.contains(&raw));
+            assert_eq!(condition["known"], !raw.starts_with("vendor"));
+            if raw == "media-empty" {
+                assert_eq!(condition["severity"], "error");
+                assert_eq!(condition["recovery"]["action"], "CHECK_AND_LOAD_MEDIA");
+            }
+            if raw == "toner-empty-warning" {
+                assert_eq!(condition["severity"], "warning");
+                assert_eq!(
+                    conditions["inconsistencies"],
+                    serde_json::json!(["STOPPED_WITHOUT_REPORTED_ERROR"])
+                );
+            }
+            for lang in ["en", "ja", "zh-CN"] {
+                assert!(condition["recovery"]["messages"][lang].as_str().is_some());
+            }
+        }
+        if state == 3 && reasons.contains(&"media-jam-error") {
+            assert_eq!(conditions["inconsistencies"].as_array().unwrap().len(), 2);
+        }
+        assert_eq!(f.prints.load(Ordering::SeqCst), 0);
+        assert_eq!(app.repo.get(job.id).await.unwrap().revision, job.revision);
+    }
+    task.abort();
+}
+
+#[tokio::test]
+async fn marker_supplies_have_consistent_read_only_raw_and_common_snapshots() {
+    let (_dir, mut app, job, f, task) = fixture(false).await;
+    app.credentials = vec![jrip_server::Credential {
+        token: "reader".into(),
+        identity: "reader".into(),
+        scopes: vec!["jobs:read".into()],
+        validity: None,
+    }];
+    for mode in 0..=4 {
+        f.marker_mode.store(mode, Ordering::SeqCst);
+        let mut inventories = Vec::new();
+        for path in [
+            "/api/v1/printers/test",
+            "/api/v1/print/capabilities?printerId=test",
+        ] {
+            let response = jrip_server::router(app.clone())
+                .oneshot(
+                    Request::get(path)
+                        .header("authorization", "Bearer reader")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: serde_json::Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            let inventory = if path.contains("/printers/") {
+                body["model"]["capabilities"]["markerSupplies"].clone()
+            } else {
+                assert_eq!(body["stages"][3]["capability"]["availability"], "available");
+                body["stages"][3]["capability"]["extensions"]["org.jrip.printer"]["markerSupplies"]
+                    .clone()
+            };
+            assert_eq!(inventory["profile"], "org.jrip.cups-marker-supplies-v1");
+            assert_eq!(inventory["advisoryOnly"], true);
+            assert!(!body.to_string().contains(&app.printers[0].uri));
+            inventories.push(inventory);
+        }
+        assert_eq!(inventories[0], inventories[1]);
+        let inventory = &inventories[0];
+        match mode {
+            0 => assert_eq!(inventory["status"], "UNREPORTED"),
+            1 => {
+                assert_eq!(inventory["numericLevelsReported"], 2);
+                assert_eq!(inventory["markers"][0]["levelPercent"], 0);
+                assert_eq!(inventory["markers"][1]["kind"], "waste-ink");
+                assert_eq!(inventory["markers"][1]["levelPercent"], 90);
+                assert_eq!(inventory["markers"][1]["highLevelPercent"], 0);
+            }
+            2 => {
+                assert_eq!(inventory["numericLevelsReported"], 0);
+                for (i, state) in ["UNAVAILABLE", "UNKNOWN", "NOT_AT_CAPACITY"]
+                    .iter()
+                    .enumerate()
+                {
+                    assert_eq!(inventory["markers"][i]["levelState"], *state);
+                    assert!(inventory["markers"][i]["levelPercent"].is_null());
+                }
+            }
+            3 => {
+                assert_eq!(inventory["status"], "INVALID_RESPONSE");
+                assert_eq!(inventory["reasonCode"], "MARKER_ARRAY_LENGTH_MISMATCH");
+                assert!(inventory["markers"].as_array().unwrap().is_empty());
+            }
+            4 => assert_eq!(inventory["levelsAttributeState"], "UNKNOWN"),
+            _ => unreachable!(),
+        }
+        assert_eq!(app.repo.get(job.id).await.unwrap().revision, job.revision);
+        assert_eq!(f.prints.load(Ordering::SeqCst), 0);
+    }
+    task.abort();
+}
+
+#[tokio::test]
+async fn pwg_supply_snapshots_keep_standard_units_and_separate_cups_evidence_without_print_authority()
+ {
+    let (_dir, mut app, job, f, task) = fixture(false).await;
+    app.credentials = vec![jrip_server::Credential {
+        token: "reader".into(),
+        identity: "reader".into(),
+        scopes: vec!["jobs:read".into()],
+        validity: None,
+    }];
+    f.marker_mode.store(1, Ordering::SeqCst);
+    for mode in 0..=7 {
+        f.pwg_supply_mode.store(mode, Ordering::SeqCst);
+        let mut reports = Vec::new();
+        for path in [
+            "/api/v1/printers/test",
+            "/api/v1/print/capabilities?printerId=test",
+        ] {
+            let response = jrip_server::router(app.clone())
+                .oneshot(
+                    Request::get(path)
+                        .header("authorization", "Bearer reader")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: serde_json::Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            let (standard, markers) = if path.contains("/printers/") {
+                (
+                    body["model"]["capabilities"]["printerSupplies"].clone(),
+                    body["model"]["capabilities"]["markerSupplies"].clone(),
+                )
+            } else {
+                assert_eq!(body["stages"][3]["capability"]["availability"], "available");
+                let live = &body["stages"][3]["capability"]["extensions"]["org.jrip.printer"];
+                (
+                    live["printerSupplies"].clone(),
+                    live["markerSupplies"].clone(),
+                )
+            };
+            assert_eq!(markers["status"], "REPORTED");
+            assert_eq!(markers["markers"].as_array().unwrap().len(), 2);
+            assert_eq!(standard["profile"], "org.jrip.pwg-printer-supplies-v1");
+            assert_eq!(standard["advisoryOnly"], true);
+            assert!(!body.to_string().contains(&app.printers[0].uri));
+            reports.push(standard);
+        }
+        assert_eq!(reports[0], reports[1]);
+        let r = &reports[0];
+        match mode {
+            0 => assert_eq!(r["status"], "UNREPORTED"),
+            1 => {
+                assert_eq!(r["supplies"][0]["levelPercent"], 0);
+                assert_eq!(r["supplies"][0]["description"]["language"], "ja");
+                assert_eq!(r["supplies"][0]["description"]["text"], "黒トナー");
+            }
+            2 => {
+                assert_eq!(r["supplies"][0]["level"], 2000);
+                assert_eq!(r["supplies"][0]["unit"], "items");
+                assert!(r["supplies"][0]["levelPercent"].is_null());
+            }
+            3 => {
+                assert_eq!(r["supplies"][0]["levelState"], "SOME_AVAILABLE");
+                assert!(r["supplies"][0]["level"].is_null());
+            }
+            4 | 5 => {
+                assert_eq!(r["status"], "INVALID_RESPONSE");
+                assert!(r["supplies"].as_array().unwrap().is_empty());
+            }
+            6 => assert_eq!(r["attributeState"], "UNKNOWN"),
+            7 => {
+                assert_eq!(r["supplies"][0]["levelPercent"], 25);
+                assert_eq!(r["supplies"][0]["levelMeaning"], "REMAINING_SPACE");
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(app.repo.get(job.id).await.unwrap().revision, job.revision);
+        assert_eq!(f.prints.load(Ordering::SeqCst), 0);
+    }
+    task.abort();
+}
+
+#[tokio::test]
+async fn durable_device_observations_are_scoped_replayable_and_never_probe_or_send_on_history_reads()
+ {
+    async fn get(
+        app: &jrip_server::App,
+        path: &str,
+        token: Option<&str>,
+    ) -> axum::response::Response {
+        let mut req = Request::get(path);
+        if let Some(token) = token {
+            req = req.header("authorization", format!("Bearer {token}"));
+        }
+        jrip_server::router(app.clone())
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+    async fn body(response: axum::response::Response) -> serde_json::Value {
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
+    }
+    let (_dir, mut app, job, f, task) = fixture(false).await;
+    app.credentials = vec![
+        jrip_server::Credential {
+            token: "reader".into(),
+            identity: "reader".into(),
+            scopes: vec!["jobs:read".into()],
+            validity: None,
+        },
+        jrip_server::Credential {
+            token: "artifact".into(),
+            identity: "artifact".into(),
+            scopes: vec!["artifacts:read".into()],
+            validity: None,
+        },
+    ];
+    let history = "/api/v1/printers/test/observations";
+    for (token, status) in [
+        (None, StatusCode::UNAUTHORIZED),
+        (Some("artifact"), StatusCode::FORBIDDEN),
+    ] {
+        assert_eq!(get(&app, history, token).await.status(), status);
+    }
+    let empty = body(get(&app, history, Some("reader")).await).await;
+    assert!(empty["latest"].is_null());
+    assert_eq!(f.capability_queries.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        get(&app, "/api/v1/printers/test", Some("reader"))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        get(
+            &app,
+            "/api/v1/print/capabilities?printerId=test",
+            Some("reader")
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let response = get(&app, history, Some("reader")).await;
+    assert_eq!(response.headers()["cache-control"], "private, no-store");
+    let first = body(response).await;
+    assert_eq!(first["events"].as_array().unwrap().len(), 1);
+    assert_eq!(first["latest"]["revision"], 1);
+    let sequence = first["events"][0]["sequence"].as_i64().unwrap();
+    let reference = first["events"][0]["reference"].as_str().unwrap();
+    assert!(reference.ends_with(&sequence.to_string()));
+    f.queue_count.store(0, Ordering::SeqCst);
+    f.marker_mode.store(1, Ordering::SeqCst);
+    f.pwg_supply_mode.store(7, Ordering::SeqCst);
+    *f.printer_reasons.lock().unwrap() = vec!["toner-low-warning".into()];
+    assert_eq!(
+        get(&app, "/api/v1/printers/test", Some("reader"))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let changed = body(get(&app, history, Some("reader")).await).await;
+    assert_eq!(changed["latest"]["revision"], 2);
+    assert_eq!(changed["latest"]["snapshot"]["queuedJobCount"], 0);
+    assert_eq!(
+        changed["latest"]["snapshot"]["markerSupplies"]["markers"][0]["levelPercent"],
+        0
+    );
+    assert_eq!(
+        changed["latest"]["snapshot"]["printerSupplies"]["supplies"][0]["levelMeaning"],
+        "REMAINING_SPACE"
+    );
+    let page = body(get(&app, &format!("{history}?limit=1"), Some("reader")).await).await;
+    assert_eq!(page["hasMore"], true);
+    let page2 = body(
+        get(
+            &app,
+            &format!("{history}?after={}&limit=1", page["nextAfter"]),
+            Some("reader"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(page2["events"].as_array().unwrap().len(), 1);
+    let queries = f.capability_queries.load(Ordering::SeqCst);
+    let event = body(get(&app, reference, Some("reader")).await).await;
+    assert_eq!(event["snapshot"], first["latest"]["snapshot"]);
+    assert_eq!(
+        event["snapshotSha256"],
+        rip_digest::digest(&event["snapshot"]).unwrap()
+    );
+    assert_eq!(f.capability_queries.load(Ordering::SeqCst), queries);
+    for token in [None, Some("artifact")] {
+        assert!(matches!(
+            get(&app, reference, token).await.status(),
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+        ));
+    }
+    f.queue_count.store(usize::MAX - 1, Ordering::SeqCst);
+    for _ in 0..2 {
+        assert_eq!(
+            get(&app, "/api/v1/printers/test", Some("reader"))
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    let failed = body(get(&app, history, Some("reader")).await).await;
+    assert_eq!(failed["latest"]["queryFailure"], "INVALID_RESPONSE");
+    assert_eq!(failed["latest"]["snapshot"], changed["latest"]["snapshot"]);
+    assert_eq!(
+        failed["latest"]["lastObservedAt"],
+        changed["latest"]["lastObservedAt"]
+    );
+    assert_eq!(failed["events"].as_array().unwrap().len(), 3);
+    f.queue_count.store(0, Ordering::SeqCst);
+    assert_eq!(
+        get(
+            &app,
+            "/api/v1/print/capabilities?printerId=test",
+            Some("reader")
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let recovered = body(get(&app, history, Some("reader")).await).await;
+    assert!(recovered["latest"]["queryFailure"].is_null());
+    assert_eq!(recovered["events"][3]["kind"], "QUERY_RECOVERED");
+    let mut reopened = jrip_server::open(app.root.clone(), "reader".into())
+        .await
+        .unwrap();
+    reopened.printers = app.printers.clone();
+    reopened.credentials = app.credentials.clone();
+    let restored = body(get(&reopened, history, Some("reader")).await).await;
+    assert_eq!(restored["streamId"], first["streamId"]);
+    assert_eq!(restored["latest"], recovered["latest"]);
+    let queries = f.capability_queries.load(Ordering::SeqCst);
+    reopened.printers[0].uri = "ipp://different-device.invalid/printer".into();
+    assert!(body(get(&reopened, history, Some("reader")).await).await["latest"].is_null());
+    assert_eq!(
+        get(&reopened, reference, Some("reader")).await.status(),
+        StatusCode::NOT_FOUND
+    );
+    reopened.printers = app.printers.clone();
+    reopened.printer_security = vec![jrip_server::delivery::PrinterSecurity {
+        printer_id: "test".into(),
+        bearer_token: Some("private-device-credential".into()),
+        ca_pem: None,
+    }];
+    assert!(body(get(&reopened, history, Some("reader")).await).await["latest"].is_null());
+    assert_eq!(f.capability_queries.load(Ordering::SeqCst), queries);
+    assert_eq!(
+        get(&reopened, "/api/v1/printers/test", Some("reader"))
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let configuration_failure = body(get(&reopened, history, Some("reader")).await).await;
+    assert_eq!(
+        configuration_failure["latest"]["queryFailure"],
+        "CONFIGURATION_UNAVAILABLE"
+    );
+    assert!(configuration_failure["latest"]["snapshot"].is_null());
+    assert_ne!(configuration_failure["streamId"], first["streamId"]);
+    assert_eq!(f.capability_queries.load(Ordering::SeqCst), queries);
+    task.abort();
+    assert_eq!(
+        get(&app, "/api/v1/printers/test", Some("reader"))
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let unavailable = body(get(&app, history, Some("reader")).await).await;
+    assert_eq!(unavailable["latest"]["queryFailure"], "UNAVAILABLE");
+    assert_eq!(
+        unavailable["latest"]["snapshot"],
+        recovered["latest"]["snapshot"]
+    );
+    for suffix in ["?after=-1", "?limit=0", "?limit=101", "/0"] {
+        assert_eq!(
+            get(&app, &format!("{history}{suffix}"), Some("reader"))
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    assert!(!restored.to_string().contains(&app.printers[0].uri));
+    assert!(!restored.to_string().contains("private-device-credential"));
+    assert_eq!(app.repo.get(job.id).await.unwrap().revision, job.revision);
     assert_eq!(f.prints.load(Ordering::SeqCst), 0);
     task.abort();
 }
@@ -887,6 +1564,343 @@ async fn pipeline_request(
     )
 }
 #[tokio::test]
+async fn delivery_artifact_contract_reads_never_send_and_survive_cancel_restart_and_config_removal()
+{
+    let (dir, mut app, job, fake, task) =
+        fixture_with_source_hash(false, 3, None, &format!("{:x}", Sha256::digest(b"source"))).await;
+    fake.duplex.store(1, Ordering::SeqCst);
+    let id = Uuid::new_v4();
+    let (status,_)=pipeline_request(&app,&format!("/api/v1/jobs/{}/deliveries",job.id),
+        serde_json::json!({"requestId":id,"expectedRevision":job.revision,"printerId":"test","media":"custom_square_25.4x25.4mm",
+            "copies":3,"sides":"two-sided-long-edge","pageRanges":[{"first":2,"last":3}]})).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let original = app.repo.delivery(id).await.unwrap();
+    app.credentials = [
+        ("token", vec!["admin"]),
+        ("job", vec!["jobs:read"]),
+        ("artifact", vec!["artifacts:read"]),
+    ]
+    .into_iter()
+    .map(|(token, scopes)| jrip_server::Credential {
+        token: token.into(),
+        identity: token.into(),
+        scopes: scopes.into_iter().map(String::from).collect(),
+        validity: None,
+    })
+    .collect();
+    async fn get(
+        app: &jrip_server::App,
+        id: Uuid,
+        descriptor: bool,
+        token: Option<&str>,
+        range: Option<&str>,
+    ) -> axum::response::Response {
+        let mut req = Request::get(format!(
+            "/api/v1/deliveries/{id}/artifact{}",
+            if descriptor { "/descriptor" } else { "" }
+        ));
+        if let Some(token) = token {
+            req = req.header("authorization", format!("Bearer {token}"));
+        }
+        if let Some(range) = range {
+            req = req.header("range", range);
+        }
+        jrip_server::router(app.clone())
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+    async fn value(response: axum::response::Response) -> serde_json::Value {
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
+    }
+    for descriptor in [false, true] {
+        for (token, status) in [
+            (None, StatusCode::UNAUTHORIZED),
+            (Some("job"), StatusCode::FORBIDDEN),
+            (Some("artifact"), StatusCode::FORBIDDEN),
+        ] {
+            assert_eq!(
+                get(&app, id, descriptor, token, None).await.status(),
+                status
+            );
+        }
+    }
+    let response = get(&app, id, true, Some("token"), None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["cache-control"], "private, no-store");
+    let descriptor = value(response).await;
+    assert_eq!(descriptor["kind"], "DeliveryArtifact");
+    assert_eq!(descriptor["pageCount"], 2);
+    assert_eq!(descriptor["copies"], 3);
+    assert_eq!(descriptor["selectedSourcePages"], serde_json::json!([2, 3]));
+    assert_eq!(descriptor["pages"][0]["width"], 72);
+    assert_eq!(descriptor["pages"][0]["height"], 72);
+    assert_eq!(descriptor["pages"][0]["dpi"], serde_json::json!([72, 72]));
+    assert_eq!(descriptor["physicalContractVerified"], true);
+    assert_eq!(descriptor["printedAppearanceVerified"], false);
+    assert_eq!(descriptor["provenance"]["sourceSha256"], job.source_sha256);
+    assert_eq!(descriptor["sha256"], original.ticket.artifact_sha256);
+    assert!(!descriptor.to_string().contains(&app.printers[0].uri));
+    assert!(
+        !descriptor
+            .to_string()
+            .contains(dir.path().to_str().unwrap())
+    );
+    assert_eq!(
+        app.repo.delivery(id).await.unwrap().revision,
+        original.revision
+    );
+    assert_eq!(fake.prints.load(Ordering::SeqCst), 0);
+    let response = get(&app, id, false, Some("token"), Some("bytes=0-3")).await;
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(response.headers()["content-type"], "image/pwg-raster");
+    assert_eq!(
+        &response.into_body().collect().await.unwrap().to_bytes()[..],
+        b"RaS2"
+    );
+    let mut reopened = jrip_server::open(app.root.clone(), "token".into())
+        .await
+        .unwrap();
+    reopened.credentials = app.credentials.clone();
+    assert!(reopened.printers.is_empty());
+    assert_eq!(
+        value(get(&reopened, id, true, Some("token"), None).await).await["contentId"],
+        descriptor["contentId"]
+    );
+    reopened
+        .repo
+        .request_delivery_cancel(id, original.revision)
+        .await
+        .unwrap();
+    let cancelled = value(get(&reopened, id, true, Some("token"), None).await).await;
+    assert_eq!(cancelled["execution"]["deliveryState"], "CANCELLED");
+    assert_eq!(cancelled["contentId"], descriptor["contentId"]);
+    let path = app.root.join("deliveries").join(format!("{id}.pwg"));
+    let bytes = std::fs::read(&path).unwrap();
+    let legacy_id = Uuid::new_v4();
+    app.repo
+        .enqueue_delivery(legacy_id, original.ticket.clone())
+        .await
+        .unwrap();
+    std::fs::write(
+        app.root.join("deliveries").join(format!("{legacy_id}.pwg")),
+        &bytes,
+    )
+    .unwrap();
+    let legacy = value(get(&app, legacy_id, true, Some("token"), None).await).await;
+    assert_eq!(legacy["physicalContractVerified"], false);
+    assert!(legacy["provenance"]["sourceSha256"].is_null());
+    let response = get(&app, id, false, Some("token"), None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut changed = bytes.clone();
+    let last = changed.len() - 1;
+    changed[last] ^= 1;
+    std::fs::write(&path, changed).unwrap();
+    assert_eq!(
+        &response.into_body().collect().await.unwrap().to_bytes()[..],
+        bytes.as_slice()
+    );
+    assert_eq!(
+        get(&app, id, true, Some("token"), None).await.status(),
+        StatusCode::CONFLICT
+    );
+    let invalid_id = Uuid::new_v4();
+    let invalid = b"RaS2bad";
+    let mut ticket = original.ticket;
+    ticket.artifact_bytes = invalid.len() as u64;
+    ticket.artifact_sha256 = format!("{:x}", Sha256::digest(invalid));
+    app.repo.enqueue_delivery(invalid_id, ticket).await.unwrap();
+    std::fs::write(
+        app.root
+            .join("deliveries")
+            .join(format!("{invalid_id}.pwg")),
+        invalid,
+    )
+    .unwrap();
+    assert_eq!(
+        get(&app, invalid_id, true, Some("token"), None)
+            .await
+            .status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(fake.prints.load(Ordering::SeqCst), 0);
+    task.abort();
+}
+
+#[tokio::test]
+async fn failed_device_queries_are_distinct_from_print_failure_and_recover_without_resend() {
+    let (_dir, mut app, job, fake, task) = fixture(false).await;
+    let id = Uuid::new_v4();
+    let (status, _) = pipeline_request(&app,&format!("/api/v1/jobs/{}/pipelines",job.id),
+        serde_json::json!({"requestId":id,"expectedRevision":job.revision,"printerId":"test","media":"custom_square_25.4x25.4mm"})).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    jrip_server::pipeline::tick(&app).await.unwrap();
+    jrip_server::delivery::tick(&app).await.unwrap();
+    let observed = app.repo.delivery(id).await.unwrap().device_observation;
+    for (mode, reason) in [(9, "INVALID_RESPONSE"), (10, "JOB_NOT_FOUND")] {
+        fake.progress_mode.store(mode, Ordering::SeqCst);
+        jrip_server::delivery::tick(&app).await.unwrap();
+        let failed = app.repo.delivery(id).await.unwrap();
+        assert_eq!(failed.state, rip_storage::delivery::DeliveryState::Accepted);
+        assert_eq!(failed.device_observation, observed);
+        let snapshot = app.repo.pipeline_ticket(id).await.unwrap();
+        assert_eq!(snapshot["execution"]["deviceQuery"]["failure"], reason);
+        assert_eq!(snapshot["execution"]["completed"], false);
+        assert!(app.repo.delivery_result_receipt(id).await.is_err());
+        jrip_server::delivery::tick(&app).await.unwrap();
+        assert_eq!(
+            app.repo.delivery(id).await.unwrap().revision,
+            failed.revision
+        );
+    }
+    fake.progress_mode.store(0, Ordering::SeqCst);
+    jrip_server::delivery::tick(&app).await.unwrap();
+    assert!(
+        app.repo
+            .delivery(id)
+            .await
+            .unwrap()
+            .device_query
+            .unwrap()
+            .failure
+            .is_none()
+    );
+    assert_eq!(fake.prints.load(Ordering::SeqCst), 1);
+    let original_uri = app.printers[0].uri.clone();
+    app.printers[0].uri = "ipp://127.0.0.1:1/changed".into();
+    jrip_server::delivery::tick(&app).await.unwrap();
+    assert_eq!(
+        serde_json::to_value(app.repo.delivery(id).await.unwrap().device_query).unwrap()["failure"],
+        "REGISTRATION_UNAVAILABLE"
+    );
+    app.printers[0].uri = original_uri;
+    jrip_server::delivery::tick(&app).await.unwrap();
+    assert!(
+        app.repo
+            .delivery(id)
+            .await
+            .unwrap()
+            .device_query
+            .unwrap()
+            .failure
+            .is_none()
+    );
+    assert_eq!(fake.prints.load(Ordering::SeqCst), 1);
+    let address = app.printers[0]
+        .uri
+        .strip_prefix("ipp://")
+        .unwrap()
+        .split('/')
+        .next()
+        .unwrap()
+        .to_owned();
+    task.abort();
+    let _ = task.await;
+    let last_sample = app.repo.delivery(id).await.unwrap().device_observation;
+    jrip_server::delivery::tick(&app).await.unwrap();
+    assert_eq!(
+        serde_json::to_value(app.repo.delivery(id).await.unwrap().device_query).unwrap()["failure"],
+        "UNAVAILABLE"
+    );
+    assert_eq!(
+        app.repo.delivery(id).await.unwrap().device_observation,
+        last_sample
+    );
+    let listener = tokio::net::TcpListener::bind(&address).await.unwrap();
+    let router = Router::new()
+        .route("/printer", post(handle))
+        .with_state(fake.clone());
+    let restarted = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    jrip_server::delivery::tick(&app).await.unwrap();
+    assert!(
+        app.repo
+            .delivery(id)
+            .await
+            .unwrap()
+            .device_query
+            .unwrap()
+            .failure
+            .is_none()
+    );
+    assert_eq!(fake.prints.load(Ordering::SeqCst), 1);
+    let timeline = app.repo.unified_pipeline_events(id, 0, 100).await.unwrap();
+    assert!(
+        timeline["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["details"]["deviceQuery"]["failure"] == "JOB_NOT_FOUND")
+    );
+    restarted.abort();
+}
+
+#[tokio::test]
+async fn device_terminal_outcomes_preserve_pipeline_receipt_and_event_meanings() {
+    for (state, outcome, receipt_status) in [
+        (7, "CANCELLED", "cancelled"),
+        (8, "FAILED", "failed"),
+        (9, "COMPLETED", "succeeded"),
+    ] {
+        let (_dir, app, job, fake, task) = fixture(false).await;
+        let id = Uuid::new_v4();
+        let (status, _) = pipeline_request(
+            &app,
+            &format!("/api/v1/jobs/{}/pipelines", job.id),
+            serde_json::json!({"requestId":id,"expectedRevision":job.revision,
+                "printerId":"test","media":"custom_square_25.4x25.4mm"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        jrip_server::pipeline::tick(&app).await.unwrap();
+        jrip_server::delivery::tick(&app).await.unwrap();
+        fake.state.store(state, Ordering::SeqCst);
+        *fake.reasons.lock().unwrap() = vec!["vendor-terminal-reason".into()];
+        jrip_server::delivery::tick(&app).await.unwrap();
+        jrip_server::pipeline::tick(&app).await.unwrap();
+        let pipeline = app.repo.pipeline(id).await.unwrap();
+        assert_eq!(pipeline["state"], outcome);
+        let receipt = app.repo.delivery_result_receipt(id).await.unwrap();
+        assert_eq!(receipt["status"], receipt_status);
+        assert_eq!(
+            receipt["proof"]["result"]["deviceObservation"]["state"],
+            state
+        );
+        let timeline = app.repo.unified_pipeline_events(id, 0, 100).await.unwrap();
+        assert!(
+            timeline["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["origin"]["kind"] == "printer"
+                    && e["details"]["deviceObservation"]["state"] == state
+                    && e["details"]["deviceObservation"]["reasons"]
+                        == serde_json::json!(["vendor-terminal-reason"]))
+        );
+        assert_eq!(
+            pipeline_request(
+                &app,
+                &format!("/api/v1/pipelines/{id}/cancel"),
+                serde_json::json!({"expectedRevision":pipeline["revision"]})
+            )
+            .await
+            .0,
+            StatusCode::CONFLICT
+        );
+        for _ in 0..2 {
+            jrip_server::delivery::tick(&app).await.unwrap();
+            jrip_server::pipeline::tick(&app).await.unwrap();
+        }
+        assert_eq!(
+            app.repo.pipeline(id).await.unwrap()["revision"],
+            pipeline["revision"]
+        );
+        assert_eq!(app.repo.delivery_result_receipt(id).await.unwrap(), receipt);
+        assert_eq!(fake.prints.load(Ordering::SeqCst), 1);
+        task.abort();
+    }
+}
+
+#[tokio::test]
 async fn pipeline_recovers_and_tracks_device_completion_without_duplicate_delivery() {
     let (_dir, app, job, f, task) = fixture(false).await;
     let id = Uuid::new_v4();
@@ -906,6 +1920,7 @@ async fn pipeline_recovers_and_tracks_device_completion_without_duplicate_delive
     let pending = app.repo.pipeline_ticket(id).await.unwrap();
     assert_eq!(pending["contractFinalized"], false);
     assert_eq!(pending["execution"]["completed"], false);
+    assert!(pending["execution"]["deviceObservation"].is_null());
     assert_eq!(pending["rasterEvidenceAvailable"], false);
     assert!(app.repo.delete(job.clone()).await.is_err());
     assert_eq!(
@@ -927,6 +1942,43 @@ async fn pipeline_recovers_and_tracks_device_completion_without_duplicate_delive
     jrip_server::pipeline::tick(&reopened).await.unwrap();
     assert_eq!(f.prints.load(Ordering::SeqCst), 0);
     jrip_server::delivery::tick(&reopened).await.unwrap();
+    for (state, reasons) in [
+        (5, vec!["job-printing"]),
+        (
+            6,
+            vec!["media-needed", "printer-stopped", "vendor-needs-attention"],
+        ),
+        (5, vec!["job-printing"]),
+    ] {
+        *f.reasons.lock().unwrap() = reasons.iter().map(|s| s.to_string()).collect();
+        f.state.store(state, Ordering::SeqCst);
+        jrip_server::delivery::tick(&reopened).await.unwrap();
+        let sample = reopened.repo.delivery(id).await.unwrap();
+        assert_eq!(sample.state, rip_storage::delivery::DeliveryState::Accepted);
+        assert_eq!(
+            sample.device_observation.as_ref().unwrap().state,
+            state as i32
+        );
+        assert_eq!(f.prints.load(Ordering::SeqCst), 1);
+        let unified = reopened.repo.pipeline_ticket(id).await.unwrap();
+        assert_eq!(
+            unified["execution"]["deviceObservation"],
+            serde_json::to_value(sample.device_observation.as_ref().unwrap()).unwrap()
+        );
+        assert_eq!(unified["ticketSha256"], prepared["ticketSha256"]);
+        assert_eq!(unified["portableDigest"], prepared["portableDigest"]);
+        assert_eq!(unified["execution"]["completed"], false);
+        jrip_server::delivery::tick(&reopened).await.unwrap();
+        assert_eq!(
+            reopened.repo.delivery(id).await.unwrap().revision,
+            sample.revision
+        );
+        assert_eq!(
+            app.repo.delivery(id).await.unwrap().device_observation,
+            sample.device_observation
+        );
+    }
+    *f.reasons.lock().unwrap() = vec!["job-completed-successfully".into()];
     f.state.store(9, Ordering::SeqCst);
     jrip_server::delivery::tick(&reopened).await.unwrap();
     jrip_server::pipeline::tick(&reopened).await.unwrap();
@@ -934,8 +1986,23 @@ async fn pipeline_recovers_and_tracks_device_completion_without_duplicate_delive
     assert_eq!(f.prints.load(Ordering::SeqCst), 1);
     let complete = reopened.repo.pipeline_ticket(id).await.unwrap();
     assert_eq!(complete["execution"]["completed"], true);
+    assert_eq!(complete["execution"]["deviceObservation"]["state"], 9);
+    assert_eq!(
+        complete["execution"]["deviceObservation"]["progress"],
+        serde_json::json!({"impressionsCompleted":8,"mediaSheetsCompleted":4})
+    );
+    assert_eq!(
+        complete["execution"]["deviceObservation"]["reasons"],
+        serde_json::json!(["job-completed-successfully"])
+    );
     let receipt = app.repo.delivery_result_receipt(id).await.unwrap();
     assert_eq!(receipt["status"], "succeeded");
+    assert_eq!(receipt["proof"]["result"]["deviceObservation"]["state"], 9);
+    assert_eq!(
+        receipt["proof"]["result"]["deviceObservation"]["reasons"],
+        serde_json::json!(["job-completed-successfully"])
+    );
+
     assert_eq!(
         receipt["proof"]["result"]["deviceJobId"],
         complete["execution"]["deviceJobId"]
@@ -1181,6 +2248,18 @@ async fn pipeline_waits_for_approval_and_rechecks_authorization() {
         StatusCode::OK
     );
     assert_eq!(app.repo.pipeline(id).await.unwrap()["state"], "CANCELLED");
+    let cancelled = app.repo.pipeline(id).await.unwrap();
+    assert_eq!(
+        pipeline_request(
+            &app,
+            &format!("/api/v1/pipelines/{id}/cancel"),
+            serde_json::json!({"expectedRevision":cancelled["revision"]})
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(app.repo.pipeline(id).await.unwrap(), cancelled);
     jrip_server::pipeline::tick(&app).await.unwrap();
     assert!(app.repo.next_delivery().await.unwrap().is_none());
     assert_eq!(f.prints.load(Ordering::SeqCst), 0);
@@ -2407,6 +3486,7 @@ async fn physical_intent_copies_are_negotiated_committed_and_delivered_after_res
     let document = "%PDF-1.7\nsource";
     let id = Uuid::new_v4();
     let mut intent = physical_intent(document);
+    intent["priority"] = serde_json::json!({"mode":"required","value":83});
     intent["copies"] = serde_json::json!({"mode":"required","value":3});
     let (status, preflight) = pipeline_request(
         &app,
@@ -2426,6 +3506,7 @@ async fn physical_intent_copies_are_negotiated_committed_and_delivered_after_res
         capabilities["deliveryIntersection"]["deliveryCopies"],
         serde_json::json!([1, 5])
     );
+    assert_eq!(preflight["ticket"]["manifest"]["priority"], 83);
     assert_eq!(preflight["workflowRequest"]["copies"], 3);
     assert_eq!(preflight["registrationTicket"]["request"]["copies"], 3);
     assert_eq!(preflight["ticket"]["copies"], 1);
@@ -2455,6 +3536,7 @@ async fn physical_intent_copies_are_negotiated_committed_and_delivered_after_res
     )
     .unwrap();
     let job = app.repo.get(job_id).await.unwrap();
+    assert_eq!(job.manifest.priority, 83);
     let job = app
         .repo
         .transition(job, JobState::Ripping, None)
@@ -2476,6 +3558,10 @@ async fn physical_intent_copies_are_negotiated_committed_and_delivered_after_res
         .await
         .unwrap();
     reopened.printers = app.printers.clone();
+    assert_eq!(
+        reopened.repo.get(job_id).await.unwrap().manifest.priority,
+        83
+    );
     jrip_server::pipeline::tick(&reopened).await.unwrap();
     assert_eq!(reopened.repo.delivery(id).await.unwrap().ticket.copies, 3);
     let contract = reopened.repo.pipeline_ticket(id).await.unwrap();
@@ -2970,7 +4056,8 @@ async fn physical_duplex_intent_and_follow_on_pipeline_preserve_binding() {
 
 #[tokio::test]
 async fn all_sheet_back_modes_are_persisted_encoded_and_sent_with_exact_live_binding() {
-    let (_dir, app, job, fake, task) = fixture_pages(false, 3).await;
+    let (_dir, app, job, fake, task) =
+        fixture_with_source_hash(false, 3, None, &format!("{:x}", Sha256::digest(b"source"))).await;
     let mut sent = 0;
     for mode in [1, 2, 4, 5] {
         for (sides, binding) in [
@@ -2997,6 +4084,23 @@ async fn all_sheet_back_modes_are_persisted_encoded_and_sent_with_exact_live_bin
             );
             jrip_server::delivery::tick(&reopened).await.unwrap();
             sent += 1;
+            let response = jrip_server::router(reopened.clone())
+                .oneshot(
+                    Request::get(format!("/api/v1/deliveries/{id}/artifact/descriptor"))
+                        .header("authorization", "Bearer token")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let descriptor: serde_json::Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            assert_eq!(descriptor["sheetBack"], back.as_str());
+            assert_eq!(descriptor["sides"], sides);
+            assert_eq!(descriptor["pageCount"], 3);
+
             assert_eq!(fake.prints.load(Ordering::SeqCst), sent);
             assert_eq!(
                 rip_raster::inspect_duplex(
@@ -3249,11 +4353,63 @@ async fn operator_console_physical_delivery_is_reviewed_approved_recoverable_and
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     });
-    let server = tokio::spawn(async move {
-        axum::serve(listener, jrip_server::router(app))
-            .await
-            .unwrap()
-    });
+    let control = fake.clone();
+    let printer_control = fake.clone();
+    let test_router = jrip_server::router(app).route(
+        "/__test/device",
+        post(move |axum::Json(value): axum::Json<serde_json::Value>| {
+            let control = control.clone();
+            async move {
+                *control.reasons.lock().unwrap() = value["reasons"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap().to_owned())
+                    .collect();
+                control.progress_mode.store(
+                    value["progressMode"].as_u64().unwrap_or(0) as usize,
+                    Ordering::SeqCst,
+                );
+                control
+                    .state
+                    .store(value["state"].as_u64().unwrap() as usize, Ordering::SeqCst);
+                StatusCode::NO_CONTENT
+            }
+        }),
+    );
+    let test_router = test_router.route(
+        "/__test/printer",
+        post(move |axum::Json(value): axum::Json<serde_json::Value>| {
+            let control = printer_control.clone();
+            async move {
+                control.printer_state.store(
+                    value["state"].as_u64().unwrap_or(3) as usize,
+                    Ordering::SeqCst,
+                );
+                *control.printer_reasons.lock().unwrap() = value["reasons"]
+                    .as_array()
+                    .map(|a| a.iter().map(|v| v.as_str().unwrap().to_owned()).collect())
+                    .unwrap_or_default();
+                control.marker_mode.store(
+                    value["markerMode"].as_u64().unwrap_or(0) as usize,
+                    Ordering::SeqCst,
+                );
+                control.pwg_supply_mode.store(
+                    value["pwgMode"].as_u64().unwrap_or(0) as usize,
+                    Ordering::SeqCst,
+                );
+                control.queue_count.store(
+                    value["queuedJobs"]
+                        .as_u64()
+                        .map(|n| n as usize)
+                        .unwrap_or(usize::MAX),
+                    Ordering::SeqCst,
+                );
+                StatusCode::NO_CONTENT
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, test_router).await.unwrap() });
     let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let status = tokio::process::Command::new("node")
         .arg("tests/ui/delivery.mjs")

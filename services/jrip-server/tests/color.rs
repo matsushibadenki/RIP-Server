@@ -424,6 +424,95 @@ async fn immutable_color_policies_are_scoped_durable_and_used_by_attempts() {
 }
 
 #[tokio::test]
+#[ignore = "requires locally built jrip-color:local Docker image"]
+async fn saved_policy_docker_conversion_pins_version_pixels_and_restart_evidence() {
+    let (dir, app, job, icc) = seed().await;
+    let originals = app.repo.artifacts(job.id).await.unwrap();
+    let definition = json!({"schemaVersion":1,"labels":{"en":"Proof","ja":"校正","zh-CN":"校样"},
+        "inputProfileSha256":icc,"outputProfileSha256":icc,
+        "policy":ticket(&job,Uuid::new_v4(),&icc)["policy"]});
+    let (status, saved) = call(
+        &app,
+        "/api/v1/color/policies",
+        json!({"definition":definition,"reason":"Docker acceptance"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = Uuid::new_v4();
+    let path = format!("/api/v1/jobs/{}/color-attempts/from-policy", job.id);
+    let request =
+        json!({"requestId":id,"expectedRevision":job.revision,"policyDigest":saved["digest"]});
+    assert_eq!(
+        call(&app, &path, request.clone()).await.0,
+        StatusCode::ACCEPTED
+    );
+    // Saving a new version after queueing must not change the queued transform.
+    let mut revised = definition.clone();
+    revised["policy"]["blackPointCompensation"] = json!(true);
+    let (_, newer) = call(
+        &app,
+        "/api/v1/color/policies",
+        json!({"definition":revised,"reason":"new revision after queueing"}),
+    )
+    .await;
+    assert_ne!(saved["digest"], newer["digest"]);
+    let reopened = jrip_server::open(dir.path().into(), "admin-token".into())
+        .await
+        .unwrap();
+    assert!(jrip_server::color::tick(&reopened).await.unwrap());
+    let complete = reopened.repo.color_attempt(id).await.unwrap();
+    assert_eq!(complete["state"], "COMPLETED", "{complete}");
+    assert_eq!(complete["ticket"]["policyReference"], saved["digest"]);
+    assert_eq!(complete["result"]["policyReference"], saved["digest"]);
+    assert_eq!(complete["result"]["pageCount"], 2);
+    for report in complete["result"]["reports"].as_array().unwrap() {
+        assert_eq!(report["colorReport"]["policy"], definition["policy"]);
+        assert_eq!(report["colorReport"]["inputProfileSha256"], icc);
+        assert_eq!(report["colorReport"]["outputProfileSha256"], icc);
+        assert_eq!(
+            report["colorReport"]["policySha256"],
+            complete["result"]["policySha256"]
+        );
+    }
+    for page in 1..=2 {
+        let file = reopened
+            .root
+            .join("jobs")
+            .join(job.id.to_string())
+            .join("color")
+            .join(id.to_string())
+            .join(format!("page-{page:06}.tiff"));
+        let mut decoder = tiff::decoder::Decoder::new(std::fs::File::open(file).unwrap()).unwrap();
+        assert_eq!(decoder.dimensions().unwrap(), (2, 1));
+        match decoder.read_image().unwrap() {
+            tiff::decoder::DecodingResult::U8(pixels) => assert_eq!(pixels, [255, 0, 0, 0, 0, 255]),
+            _ => panic!("expected 8-bit identity conversion"),
+        }
+    }
+    let descriptor_url =
+        format!("/api/v1/color/attempts/{id}/artifacts/page-000001.tiff/descriptor");
+    let response = preview_get(&reopened, &descriptor_url, Some("admin-token")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let descriptor: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(descriptor["kind"], "ColorManagedArtifact");
+    assert_eq!(descriptor["raster"]["profileSha256"], icc);
+    assert_eq!(descriptor["raster"]["resolution"]["x"], json!([300, 1]));
+    assert_eq!(descriptor["provenance"]["policyReference"], saved["digest"]);
+    assert_eq!(
+        descriptor["provenance"]["policySha256"],
+        complete["result"]["policySha256"]
+    );
+    assert_eq!(reopened.repo.artifacts(job.id).await.unwrap(), originals);
+    assert_eq!(call(&reopened, &path, request).await.1, complete);
+    let restart = jrip_server::open(dir.path().into(), "admin-token".into())
+        .await
+        .unwrap();
+    assert_eq!(restart.repo.color_attempt(id).await.unwrap(), complete);
+    assert!(!jrip_server::color::tick(&restart).await.unwrap());
+}
+
+#[tokio::test]
 async fn input_profile_evidence_is_hash_verified_scoped_and_never_selects_implicitly() {
     let (_dir, mut app, job, icc) = seed().await;
     let path = format!("/api/v1/jobs/{}/color-input-profile", job.id);
@@ -711,6 +800,18 @@ async fn device_link_worker_reports_unassessed_gamut_instead_of_zero() {
             .iter()
             .any(|w| w["code"] == "GAMUT_NOT_ASSESSED")
     );
+    let url = format!("/api/v1/color/attempts/{id}/artifacts/page-000001.tiff/descriptor");
+    let response = preview_get(&app, &url, Some("admin-token")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let descriptor: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(descriptor["raster"]["colorSpace"], "cmyk");
+    assert_eq!(descriptor["raster"]["profileState"], "MISSING");
+    assert!(descriptor["raster"]["profileSha256"].is_null());
+    assert_eq!(
+        descriptor["provenance"]["inputProfileSha256"],
+        profile.sha256
+    );
 }
 
 async fn preview_get(
@@ -863,6 +964,24 @@ async fn color_stage_preview_pins_profile_authenticates_and_survives_restart() {
             )
             .await
             .unwrap();
+        let descriptor_url = url.replace("/preview", "/descriptor");
+        let described = preview_get(&app, &descriptor_url, Some("admin-token")).await;
+        assert_eq!(
+            described.status(),
+            if matches!(mode, "rgb" | "cmyk") {
+                StatusCode::OK
+            } else {
+                StatusCode::CONFLICT
+            },
+            "descriptor {mode}"
+        );
+        if matches!(mode, "rgb" | "cmyk") {
+            let described: Value =
+                serde_json::from_slice(&described.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            assert_eq!(described["raster"]["profileSha256"], digest);
+            assert_eq!(described["raster"]["colorSpace"], mode);
+        }
         let response = preview_get(&app, &url, Some("admin-token")).await;
         if mode != "rgb" && mode != "cmyk" {
             assert_eq!(

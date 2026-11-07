@@ -7,6 +7,52 @@
 
 ## 当面の優先順位：一般RIPの実用度
 
+🟢 [Done] 機器観測resourceのMCP購読をstdio／HTTP-SSEへ接続。stream変更・履歴欠落・解除／復旧・再接続・権限を検証。購読自体は機器をpollしない。[詳細](MCP-PRINTER-SUBSCRIPTIONS.md)。 / MCP printer observation subscriptions / MCP设备观察订阅。
+
+🟢 [Done] 機器／消耗品の照会結果と失敗・復旧を登録設定ごとに永続化。REST／MCPのカーソル履歴・個別snapshot検証、重複抑止・古い照会の上書き防止・1000件保持をテスト。[詳細](PRINTER-OBSERVATIONS.md)。 / Durable query-driven device observations / 持久化查询驱动设备观察。
+
+🟢 [Done] 操作画面に機器警告・受付／負荷・PWG／CUPS消耗品を3言語で表示。0／不明・単位・期限・失敗復旧・承認解除を実ブラウザーで検証。[詳細](CONSOLE-PRINTER-STATUS.md)。 / Console printer status and supplies / 操作界面设备状态与耗材。
+
+🟢 [Done] PWG printer-supply／descriptionをNative IPP／REST／共通モデル／MCPへ追加。単位・MIB特殊値・多言語description・容器の残り空間を保持し、CUPS情報と分離。[詳細](PWG-PRINTER-SUPPLIES.md)。 / PWG supply read support / PWG耗材读取支持。
+
+🟢 [Done] CUPS marker消耗品情報をNative IPP／REST／共通モデル／MCPへ追加。0％・不明値・未対応・廃棄容器・不正配列を区別し、残り印刷枚数へ換算しない。[詳細](PRINTER-SUPPLIES.md)。 / Optional CUPS marker supply telemetry / 可选CUPS marker耗材信息。
+
+🟢 [Done] 機器reasonの重大度・用紙／消耗品／ジャム等の分類・3言語復旧案をREST／共通モデル／MCPへ公開。未知値と矛盾を保持し、残量や再送可否は推測しない。[詳細](PRINTER-CONDITIONS.md)。 / Structured advisory printer conditions / 结构化设备状态建议。
+
+🟢 [Done] 共通Capability ModelのPrinter工程へ受付可否・機器負荷を公開。0／不明・受付不可・revision／期限をREST／MCPで検証。[詳細](PRINTER-LOAD.md)。 / Common capability device load / 通用能力设备负载。
+
+🟢 [Done] PDFページresourceのICC宣言対応を解析・保存・descriptorへ追加。共有／継承／Form／探索不足と役割を検証。実描画でのICC使用証明は未完了。[詳細](SOURCE-COLOR-PROFILES.md)。 / Page-resource ICC declarations / 页面resource的ICC声明。
+
+🟢 [Done] strict PDF検査で得た全原稿ページの表示寸法をhashに結び付く検証記録へ保存し、source descriptorへ公開。順序・寸法上限・再起動・PS／EPSの不明値をテスト。[詳細](SOURCE-DESCRIPTORS.md)。 / Persisted PDF source display geometry / 持久化PDF原稿显示尺寸。
+
+🟢 [Done] 色変換TIFFのMCP有界chunk取得を追加。複数chunkの再構成・改変検出・権限と範囲制限をテスト。[詳細](MCP-ARTIFACT-CHUNKS.md)。 / Bounded color-artifact MCP reads / 色转换产物MCP有界读取。
+
+🟢 [Done] DeliveryArtifactのPWG全体・保存ticket・ページ対応をREST／MCPで検証。取消・再起動・設定削除後の読取と色変換経由をテスト。[詳細](DELIVERY-ARTIFACT-DESCRIPTORS.md)。 / Verified delivery descriptors / 已验证投递描述。
+
+🟢 [Done] SourceDocument descriptorと認証付き原稿範囲取得をREST／MCPへ追加。hash同一性と構造検証証跡を区別し、改変・scope・quota・snapshot配信を検証。[SOURCE-DESCRIPTORS.md](SOURCE-DESCRIPTORS.md)。 / Verified source descriptors and bounded reads / 已验证原稿描述与有界读取。
+
+🟢 [Done] RIP／色変換TIFFの検証済みdescriptorをREST／MCPへ公開。hash・全画素・寸法・有理数DPI・ICC・生成元・保持参照を検証。[ARTIFACT-DESCRIPTORS.md](ARTIFACT-DESCRIPTORS.md)。 / Verified TIFF artifact descriptors / 已验证TIFF产物描述。
+
+🟢 [Done] RIP優先度aging規則を共通Capability Modelへ公開。REST／MCPの優先度交渉・commit・再要求・再起動・実キュー選択と実機PrintIntentの値保持を検証。[QUEUE-AGING.md](QUEUE-AGING.md)。 / Discoverable RIP scheduling and priority lifecycle / 可发现RIP调度与优先度生命周期。
+
+🟢 [Done] 機器照会失敗と前回の印刷状態を分離保存。REST／MCP・共通ticket・イベント・画面へ接続し、復旧・重複抑止・再送防止を検証。[DEVICE-QUERY-STATUS.md](DEVICE-QUERY-STATUS.md)。 / Durable query failure and recovery / 持久化查询失败与恢复。
+
+🟢 [Done] 操作画面の機器進捗カウンター表示。3言語・単位tooltip・0／不明／片方のみ・モバイル幅を実ブラウザーで検証。[DEVICE-PROGRESS.md](DEVICE-PROGRESS.md)。 / Console device counters / 界面设备计数器。
+
+🟢 [Done] 機器報告の完了impressions／用紙カウンターを永続化し、REST／MCP・共通実行状態・イベント・receiptへ接続。未対応と0を区別。[DEVICE-PROGRESS.md](DEVICE-PROGRESS.md)。 / Device-reported progress counters / 设备报告进度计数器。
+
+🟢 [Done] 機器報告の非終端ジョブ件数をREST／MCPへ公開。0と不明を区別し、不正属性を拒否。[PRINTER-LOAD.md](PRINTER-LOAD.md)。 / Live device queue count / 实时设备作业数。
+
+🟢 [Done] 単一ホストRIPキューの待機時間aging。優先度上限・FIFO・保留除外・再起動・時計逆行を検証。[QUEUE-AGING.md](QUEUE-AGING.md)。 / Starvation-resistant single-host RIP selection / 单机RIP防饥饿调度。
+
+🟢 [Done] 共通ticketのexecutionへ機器観測情報を接続。REST／MCP読取、未観測null、契約digest不変性を確認。[DEVICE-JOB-OBSERVATIONS.md](DEVICE-JOB-OBSERVATIONS.md)。 / Unified execution device observations / 统一执行设备观察记录。
+
+🟢 [Done] 機器ジョブ照会を状態4属性と進捗2属性に限定し、機器／ジョブ理由の形式・件数・容量を受信時に検査。[DEVICE-JOB-OBSERVATIONS.md](DEVICE-JOB-OBSERVATIONS.md)。 / Bounded targeted IPP polling / 有界定向IPP查询。
+
+🟢 [Done] 機器取消をpipelineのCANCELLEDへ反映し、中止／完了と区別。終端イベント・receipt・再操作拒否・送信1回を検証。[PIPELINE.md](PIPELINE.md#device-terminal-outcomes--機器の終了結果--设备终结结果)。 / Preserve device terminal outcomes / 保留设备终结结果。
+
+🟢 [Done] 機器受付後の印刷・停止・理由を永続化し、操作画面に3言語で表示。revision競合・再送防止・終端receiptを検証。[DEVICE-JOB-OBSERVATIONS.md](DEVICE-JOB-OBSERVATIONS.md)。 / Durable device job observations / 持久化设备作业状态。
+
 管理・Agent基盤の追加より、日常の原稿投入・印刷条件指定・結果確認・実機互換性を優先する。 / Prioritize everyday RIP usability over additional control-plane features / 优先日常RIP可用性而非继续扩展控制基盘。
 
 1. 🟢 [Done] 明示Delivery／後続pipelineの部数指定。機器能力照合・永続ticket・承認・送信直前再検査・MCP転送・再起動／再送試験。[PRINT-COPIES.md](PRINT-COPIES.md)。 / Explicit device copies / 显式设备输出份数。
@@ -34,7 +80,8 @@
    🟢 [Done] PDF事前検査でMuPDFのテキスト操作から使用名・字形ID標本・縦横・ページ件数を実測し、原稿別検証結果へ永続保存。宣言のみの未使用書体を除外。[FONT-USAGE-EVIDENCE.md](FONT-USAGE-EVIDENCE.md)。 / MuPDF inspection text-operation evidence / MuPDF预检文本操作证据。
    🟢 [Done] Noto CJK地域別サブセットの業務風3言語PDFを追加。複数FDのCID CFFを両エンジンのRGB／グレー・288dpiで独立輪郭検査し、誤CIDを検出。[多言語コーパス](../tests/corpus/multilingual/README.md)。 / Multilingual realistic font corpus / 多语言实际字体原稿回归。
    🟢 [Done] 1ページのファイル上限を最大ページ数から独立させ、通常設定でA4 RGB高解像度ページを許容。65MiB／総spool上限の小さい方、tmpfs・フレーム総量制限を維持。 / Independent bounded page file limit / 独立有界页面文件上限。
-   🟠 [Next] 実ラスタライズ時・Ghostscript／PS／EPSの使用書体記録、書体プログラム識別、実用原稿の比較、OpenType縦字形置換を拡充。 / Raster-stage and Ghostscript/PS/EPS font evidence, program identity, practical documents and OpenType shaping / 栅格阶段及Ghostscript/PS/EPS字体证据、程序身份、实际原稿及OpenType排版扩展。
+   🟢 [Done] PDF埋め込みFontFile系プログラムを復号SHA-256と格納SHA-256で識別。容量制限・共有参照・識別不能の明示・原稿別API／永続化を検証。[EMBEDDED-FONT-IDENTITY.md](EMBEDDED-FONT-IDENTITY.md)。 / Bounded embedded program identities / 有界内嵌程序标识。
+   🟠 [Next] 実ラスタライズ時・Ghostscript／PS／EPSの使用書体記録、実行字形とプログラムの対応、Type3識別、実用原稿の比較、OpenType縦字形置換を拡充。 / Raster-stage program/glyph association, Ghostscript/PS/EPS evidence, Type3 identities, practical documents and shaping / 栅格阶段程序与字形关联、Ghostscript/PS/EPS证据、Type3标识、实际原稿及排版扩展。
 6. ⭕️ [Pending] 実機1台で複数部、両面、色、取消、障害復旧、Mac／Windowsアプリ投入を通して受入確認。実機を使える検証環境が必要。 / Real-printer acceptance / 实体打印机验收。
 
 - 🟢 [Done] Agent向けジョブ状態履歴API：`GET /api/v1/jobs/{id}/events?after=0&limit=50`。Bearer認証、永続sequenceによる差分取得、最大100件、再起動・メタデータ削除後の履歴参照に対応。状態変更と実測したページ成果物検証進捗を記録する。 / Authenticated, persistent, resumable state history / 认证、持久化、可恢复的状态历史。
@@ -45,6 +92,8 @@
 - ⭕️ [Pending] 実機のページ進捗はbackendが確認できる場合だけ公開する。実機受入試験は未実施。 / Device page progress requires backend evidence and real-printer acceptance / 实机页级进度须有设备依据，尚待实机验收。
 
 最初の利用目標は、同じLANのMacからJ-RIPを選択してPDFジョブを投入し、RIP結果をファイルとして確認できること。その後、実機プリンターへ出力する。並行して、**Agentが印刷機を操作できるPrint Infrastructure**として、Agent → Print API → RIP → Color Management → Queue → Printerを標準化する。AIクライアントはMCP経由で各層の能力を発見し、印刷意図の指定、検証、投入、監視、成果物確認、取消、再実行まで一貫して操作できる。IPP受付、Print API、MCP制御、RIP、色管理、キュー、プリンターバックエンドは交換可能な境界として分離する。仕様書のMVP 1 / MVP 2はまだ完成していない。
+
+🟢 [Done] [定期プリンター観測worker](PRINTER-OBSERVER.md)：読取専用照会、永続lease・指数backoff、並列数制限、再起動復旧、MCP観測通知への接続。ローカルSQLiteと模擬IPPで検証。 / Periodic read-only observer with durable leases/backoff and MCP notifications, tested locally / 定期只读观察、持久lease与退避、并发限制及MCP通知，已在本地验证。
 
 ## 現在の基盤
 
@@ -156,7 +205,7 @@
 - 🟢 [Done] `POST /api/v1/print/resolve` でACX PrintIntentをTIFF出力用JobTicketへ能力照合する。必須条件の競合、推奨値の調整、実機出力・ICC・用紙・両面・期限など未対応設定を明示する。原稿取得・検証、認可、コミット、ジョブ投入は後続工程。
 - 🟢 [Done] ACX namespaced lifecycle discoveryと、公開経路を使うpreflight→主体／digest／原稿照合→同時commit重複排除→再起動後Receiptの統合検証。[ACX-LIFECYCLE.md](ACX-LIFECYCLE.md)。 / Discoverable settings lifecycle and durable acceptance integration / 可发现的设置生命周期及持久接收集成。
 - 🟢 [Done] 固定ACX Manifest／Receipt schemaとPython jsonschema・Node独立検証器で、受付／成功／失敗／取消Receiptの関連・digest・公開鍵署名を検証。再署名した契約不一致も拒否しCIへ組み込み。成功artifactは模擬metadataで、実描画・実機認証とは区別。[検証範囲](../tests/acx/README.md)。 / Independent schema and signed lifecycle evidence checks / 独立schema及已签名生命周期证据验证。
-- ⭕️ [Pending] Docker実interpreterを通す統合lifecycle受入試験（受入未実施）。 / Real interpreter lifecycle acceptance / 实际interpreter生命周期验收。
+- 🟢 [Done] Docker実interpreterと独立Python／Node checkerを通す統合lifecycle受入。MuPDF/PDF・Ghostscript/PSの成功／失敗、TIFF hash、署名receipt、再起動・再要求を検証。[ACX-LIFECYCLE.md](ACX-LIFECYCLE.md)。 / Real interpreter lifecycle acceptance / 实际interpreter生命周期验收。
 
 ```text
 Agent
@@ -178,6 +227,11 @@ Printer
 1. 🟠 [Next] **Print APIを正規の入口にする。** ACX側の実験的PrintIntent schemaとnamespaced capability extensionsは実装済み。次にREST、IPP、MCPから受けた要求を、共通の `PrintIntent` と `JobTicket` へ正規化する。原稿参照、部数、ページ範囲、用紙、面付け、片面／両面、解像度、色意図、品質、優先度、期限、出力先、承認条件を表現し、各フィールドを `required`、`preferred`、`automatic` のいずれかとして指定できるようにする。能力不足時は黙って変更せず、拒否または具体的な代替案を返す。
 2. 🟠 [Next] **共通Capability Modelを定義する。** RIP、Color Management、Queue、Printerが能力と制約を同じ形式で公開する。入力・出力MIME、最大寸法、DPI、色空間、ICC profile、レンダリングインテント、用紙、両面、部数、仕上げ、現在の利用可否を表し、`capability_revision` と有効期限を付ける。Print APIは全工程の交差部分を計算し、実行可能なticketと不一致理由をAgentへ返す。
 3. 🟠 [Next] **工程間artifact契約を固定する。** `SourceDocument`、`RasterArtifact`、`ColorManagedArtifact`、`DeliveryArtifact` をcontent-addressed artifactとして扱い、SHA-256、MIME、ページ数、寸法、色空間、profile、生成元、保持期限を必須メタデータにする。大容量データはサービス間メッセージへ埋め込まず、許可されたobject storeまたはローカルartifact storeの参照で渡す。
+   🟢 [Done] TIFFのRasterArtifact／ColorManagedArtifact descriptor。
+   🟢 [Done] DeliveryArtifact descriptor・認証付きPWG取得・MCP chunk。[詳細](DELIVERY-ARTIFACT-DESCRIPTORS.md)。
+   🟢 [Done] strict PDFの全ページ表示寸法（CropBox・回転・UserUnit）を検証記録とdescriptorへ公開。
+   🟢 [Done] SourceDocumentの検証済み読取descriptorと原稿参照。[SOURCE-DESCRIPTORS.md](SOURCE-DESCRIPTORS.md)。
+   🟠 [Next] 原稿のページ別寸法／ICC、公開時の共通envelope固定、object storeと保持契約を完了する。[詳細](ARTIFACT-DESCRIPTORS.md)。 / Complete publication envelopes and storage lifecycle / 完成源及投递envelope与存储生命周期。
 4. 🟠 [Next] **状態とイベントを工程単位にする。** ジョブ全体の状態に加えて `VALIDATING`、`RIPPING`、`COLOR_MANAGING`、`QUEUED_FOR_DEVICE`、`SENDING`、`PRINTING`、`COMPLETED`、`PARTIALLY_COMPLETED`、`CANCELED`、`FAILED` を標準化し、工程、進捗、ページ、reason code、再試行可否をイベントとして記録する。`COMPLETED` は実機から確認できた完了条件をticketへ記録し、現在のTIFF出力完了とは別に扱う。
 5. 🟠 [Next] **Color Managementを独立サービス境界にする。** ICC profile登録、入力profile判定、出力profile選択、レンダリングインテント、黒点補正、黒版保持、DeviceLink、TACを `ColorPolicy` として版管理する。変換結果には使用profileのhashと `ColorReport` を付け、Agentが再現性、警告、gamut、インキ制限を確認できるようにする。初期実装はLittleCMSを候補とし、RIPエンジン固有の暗黙変換を明示的に記録する。
 6. 🟠 [Next] **Queueを実機制御の責任境界にする。** 優先度、期限、依存関係、保留、取消、回数制限付き再試行、device affinity、fairnessを扱う。RIP再実行とプリンター再送を別attemptとして記録し、同じページの重複印刷を防ぐdelivery idempotency keyを導入する。用紙切れ、インク／トナー、カバー開放、オフライン、jamなどを構造化reason codeとして上位へ伝える。
@@ -220,7 +274,7 @@ Printer
 - 🟢 [Done] SHA-256で固定するICC profile registryと登録・照会CLI。重複登録は同じhashを返し、破損・シンボリックリンクを拒否する。 / Immutable ICC registry and CLI / 不可变ICC注册库及CLI。
 - 🟢 [Done] ICC登録API（settings:write）、永続Color attempt、隔離Docker Worker、ページ進捗、hash付きカラー成果物・レポート、profileを照合するDelivery接続、MCP色処理tool。 / Isolated color pipeline and scoped control / 隔离颜色流程及权限控制。
 - 🟢 [Done] 永続Color Policy/presetのJCS内容digest版管理、ICC hash固定、3言語名称、登録scope・理由・原子監査、cursor一覧・再起動復旧、保存版からの変換投入とticket／結果への参照。[COLOR-POLICIES.md](COLOR-POLICIES.md)。 / Persistent immutable color policies and reference-based submission / 持久不可变颜色策略及引用投入。
-- ⭕️ [Pending] 保存Color Policy参照を使うDocker実変換試験（受入未実施）。 / Saved-policy Docker conversion / 保存策略的Docker实际转换。
+- 🟢 [Done] 保存Color Policy参照を使うDocker実変換。2ページ画素・ICC／policy証跡、投入後の新版分離、再起動・再送を検証。[COLOR-POLICIES.md](COLOR-POLICIES.md)。 / Saved-policy Docker acceptance / 保存策略Docker实际转换验收。
 - 🟢 [Done] Color工程入力TIFFのICC証跡API。有界hash検証snapshot、未埋込／不正／色空間不一致／DeviceLink分類、登録照合・ページ間混在・manifest一致、JCS証跡digest。自動推定・投入は行わない。[COLOR-INPUT-PROFILE.md](COLOR-INPUT-PROFILE.md)。 / Bounded raster input-profile evidence / 有界光栅输入profile证据。
 - 🟢 [Done] 原稿PDFのICCBased／OutputIntentとPS/EPSの静的ICC DSC宣言を隔離workerで有界解析。原稿hash・run・lease拘束、JCS証跡、結果Receipt伝播、Python fixtureと実Docker通常worker試験。[SOURCE-COLOR-PROFILES.md](SOURCE-COLOR-PROFILES.md)。 / Bounded passive source ICC declarations and durable evidence / 有界被动原稿ICC声明及持久证据。
 - 🟢 [Done] 出力ICCへの全画素gamut診断、3言語警告、DeviceLink／proof失敗の未判定、ページ別証跡・集計・worker検証、CLI・実Docker・再起動／再送試験。[GAMUT-WARNINGS.md](GAMUT-WARNINGS.md)。 / Full-pixel ICC gamut warnings and persisted worker evidence / 全像素ICC色域警告及持久worker证据。

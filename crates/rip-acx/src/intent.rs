@@ -238,8 +238,8 @@ pub fn resolve(intent: PrintIntent) -> Value {
         "priority",
         intent.priority.map(Preference::requirement),
         50,
-        |v| *v <= 100,
-        json!({"minimum":0,"maximum":100,"default":50}),
+        |v| *v <= rip_core::print::RIP_PRIORITY_MAX,
+        json!({"minimum":0,"maximum":rip_core::print::RIP_PRIORITY_MAX,"default":50}),
     );
     let engine = n.select(
         "engine",

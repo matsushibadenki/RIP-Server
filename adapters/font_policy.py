@@ -3,6 +3,7 @@
 This inventories declared resources, not executed glyph use or shaping quality.
 """
 from pathlib import Path
+from font_identity import identify, PROFILE as IDENTITY_PROFILE, MAX_TOTAL
 from pypdf import PdfReader
 from pypdf.generic import ArrayObject, DictionaryObject, IndirectObject, StreamObject
 
@@ -22,6 +23,8 @@ def inspect_fonts(path):
         raise ValueError("font_policy_document_limit")
     seen, fonts, records = set(), set(), []
     visited = 0
+    programs = {}
+    total_program_bytes = 0
 
     def resolve(obj):
         nonlocal visited
@@ -34,6 +37,8 @@ def inspect_fonts(path):
         return (obj.idnum, obj.generation) if isinstance(obj, IndirectObject) else (id(obj),)
 
     def font(obj):
+        nonlocal total_program_bytes
+        program_identity = None
         identity = key(obj)
         if identity in fonts:
             return
@@ -84,6 +89,11 @@ def inspect_fonts(path):
                             allowed_subtypes = ('/OpenType', '/CIDFontType0C') if subtype == '/CIDFontType0' else (('/OpenType',) if subtype in ('/TrueType', '/CIDFontType2') else ('/Type1C', '/OpenType'))
                             if stream.get('/Subtype') not in allowed_subtypes:
                                 raise ValueError("font_policy_program_type_mismatch")
+                        program_key = key(descriptor.raw_get(field))
+                        if program_key not in programs:
+                            programs[program_key] = identify(stream, MAX_TOTAL-total_program_bytes)
+                            total_program_bytes += programs[program_key].charged_bytes
+                        program_identity = dict(programs[program_key], field=field[1:])
                         embedded.append(field)
             if len(embedded) > 1:
                 raise ValueError("font_policy_ambiguous_program")
@@ -93,7 +103,9 @@ def inspect_fonts(path):
                 state = 'STANDARD14_SUBSTITUTION'
             else:
                 raise ValueError("font_policy_unembedded_font")
-        records.append({'baseFont': name, 'subtype': kind[1:], 'state': state})
+        record = {'baseFont': name, 'subtype': kind[1:], 'state': state}
+        if program_identity is not None: record['programIdentity'] = program_identity
+        records.append(record)
 
     def walk(obj, depth=0):
         if depth > 48:
@@ -131,5 +143,5 @@ def inspect_fonts(path):
     acroform = reader.trailer['/Root'].get('/AcroForm')
     if acroform is not None:
         walk(acroform)
-    return {'profile': PROFILE, 'accepted': True, 'scope': 'declared-resources',
+    return {'profile': PROFILE, 'programIdentityProfile': IDENTITY_PROFILE, 'accepted': True, 'scope': 'declared-resources',
             'fonts': records, 'standard14Substitution': any(r['state'] == 'STANDARD14_SUBSTITUTION' for r in records)}

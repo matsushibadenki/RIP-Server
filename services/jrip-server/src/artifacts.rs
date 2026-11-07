@@ -199,6 +199,26 @@ pub(crate) async fn snapshot_file(
             "artifact_integrity_mismatch",
         ));
     }
+    let (file, guard, budget) =
+        content_snapshot(app, path, artifact.bytes, &artifact.sha256).await?;
+    Ok((file, guard, artifact, budget))
+}
+pub(crate) type ContentSnapshot = (tokio::fs::File, SnapshotFile, SnapshotBudget);
+pub(crate) async fn content_snapshot(
+    app: &App,
+    path: PathBuf,
+    expected_bytes: u64,
+    expected_sha256: &str,
+) -> Result<ContentSnapshot, ApiError> {
+    if expected_bytes == 0
+        || expected_bytes > 1024 * 1024 * 1024
+        || !rip_core::print::valid_digest(expected_sha256)
+    {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "artifact_integrity_mismatch",
+        ));
+    }
     let canonical = tokio::fs::canonicalize(&path)
         .await
         .map_err(|_| ApiError(StatusCode::NOT_FOUND, "not_found"))?;
@@ -210,20 +230,20 @@ pub(crate) async fn snapshot_file(
     }
     let mut source = tokio::fs::File::open(path).await.map_err(internal)?;
     let metadata = source.metadata().await.map_err(internal)?;
-    if !metadata.is_file() || metadata.len() != artifact.bytes {
+    if !metadata.is_file() || metadata.len() != expected_bytes {
         return Err(ApiError(
             StatusCode::CONFLICT,
             "artifact_integrity_mismatch",
         ));
     }
-    let permits = artifact.bytes.div_ceil(1024 * 1024).max(1) as u32;
+    let permits = expected_bytes.div_ceil(1024 * 1024).max(1) as u32;
     let permit = app
         .artifact_budget
         .clone()
         .try_acquire_many_owned(permits)
         .map_err(|_| ApiError(StatusCode::SERVICE_UNAVAILABLE, "artifact_budget_exhausted"))?;
     let root = app.root.clone();
-    let bytes = artifact.bytes;
+    let bytes = expected_bytes;
     let shared = tokio::task::spawn_blocking(move || reserve_shared(&root, bytes))
         .await
         .map_err(internal)?
@@ -250,7 +270,7 @@ pub(crate) async fn snapshot_file(
         return Err(internal("invalid snapshot root"));
     }
     let reservation = if let Some(coordinator) = &app.snapshot_coordinator {
-        Some(coordinator.reserve(artifact.bytes).await.map_err(|error| {
+        Some(coordinator.reserve(expected_bytes).await.map_err(|error| {
             tracing::warn!(%error,"distributed snapshot admission failed");
             ApiError(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -291,7 +311,7 @@ pub(crate) async fn snapshot_file(
             break;
         }
         size += n as u64;
-        if size > artifact.bytes {
+        if size > expected_bytes {
             return Err(ApiError(
                 StatusCode::CONFLICT,
                 "artifact_integrity_mismatch",
@@ -300,7 +320,7 @@ pub(crate) async fn snapshot_file(
         hash.update(&buffer[..n]);
         snapshot.write_all(&buffer[..n]).await.map_err(internal)?;
     }
-    if size != artifact.bytes || format!("{:x}", hash.finalize()) != artifact.sha256 {
+    if size != expected_bytes || format!("{:x}", hash.finalize()) != expected_sha256 {
         return Err(ApiError(
             StatusCode::CONFLICT,
             "artifact_integrity_mismatch",
@@ -308,7 +328,7 @@ pub(crate) async fn snapshot_file(
     }
     snapshot.flush().await.map_err(internal)?;
     snapshot.rewind().await.map_err(internal)?;
-    Ok((snapshot, guard, artifact, permit))
+    Ok((snapshot, guard, permit))
 }
 
 pub async fn download(
@@ -324,7 +344,31 @@ pub(crate) async fn snapshot_response(
     headers: HeaderMap,
     snapshot: Snapshot,
 ) -> Result<Response, ApiError> {
-    let (mut file, guard, artifact, permit) = snapshot;
+    let (file, guard, artifact, budget) = snapshot;
+    content_response(
+        headers,
+        (file, guard, budget),
+        ContentMetadata {
+            name: artifact.name,
+            media_type: "image/tiff".into(),
+            bytes: artifact.bytes,
+            sha256: artifact.sha256,
+        },
+    )
+    .await
+}
+pub(crate) struct ContentMetadata {
+    pub name: String,
+    pub media_type: String,
+    pub bytes: u64,
+    pub sha256: String,
+}
+pub(crate) async fn content_response(
+    headers: HeaderMap,
+    snapshot: ContentSnapshot,
+    artifact: ContentMetadata,
+) -> Result<Response, ApiError> {
+    let (mut file, guard, permit) = snapshot;
     let etag = format!("\"sha256:{}\"", artifact.sha256);
     let requested = if headers
         .get("if-range")
@@ -390,7 +434,10 @@ pub(crate) async fn snapshot_response(
                 .map_err(internal)?,
         );
     }
-    headers.insert("content-type", "image/tiff".parse().unwrap());
+    headers.insert(
+        "content-type",
+        artifact.media_type.parse().map_err(internal)?,
+    );
     headers.insert(
         "content-length",
         length.to_string().parse().map_err(internal)?,

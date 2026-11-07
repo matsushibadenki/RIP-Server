@@ -41,6 +41,7 @@ async fn default_worker_validates_all_supported_formats_and_rejects_late_errors(
         ("application/postscript", b"%!PS\nshowpage\n/JRIP_NoSuchFont_942 findfont 12 scalefont setfont\n10 10 moveto (TEST) show showpage\n".as_slice(), false),
         ("application/eps", b"%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 72 72\n/JRIP_NoSuchFont_942 findfont 12 scalefont setfont\n10 10 moveto (TEST) show showpage\n".as_slice(), false),
         ("application/pdf", pdf, true),
+        ("application/pdf", include_bytes!("../../../tests/corpus/source-icc.pdf").as_slice(), true),
         ("application/postscript", ps, true),
         ("application/eps", eps, true),
         ("application/pdf", b"%PDF-1.4\nbroken\n".as_slice(), false),
@@ -101,6 +102,22 @@ async fn default_worker_validates_all_supported_formats_and_rejects_late_errors(
                 .await
                 .unwrap()
         };
+        let response = jrip_server::router(app.clone())
+            .oneshot(
+                Request::get(format!("/api/v1/jobs/{}/source/descriptor", job.id))
+                    .header("authorization", "Bearer token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let before: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(before["structureVerified"], false);
+        assert!(before["pageCount"].is_null());
+        assert!(before["sourceGeometry"].is_null());
         let status = tokio::process::Command::new(env!("CARGO_BIN_EXE_jrip-worker"))
             .arg(job.id.to_string())
             .env("JRIP_DATA_ROOT", &root)
@@ -150,13 +167,111 @@ async fn default_worker_validates_all_supported_formats_and_rejects_late_errors(
                 );
                 assert_eq!(report["fontPolicy"]["accepted"], true);
                 let usage = &report["fontPolicy"]["runtimeEvidence"];
-                rip_core::font_usage::validate(usage, 2).unwrap();
+                rip_core::font_usage::validate(usage, report["pageCount"].as_u64().unwrap() as u32)
+                    .unwrap();
                 assert_eq!(usage["glyphCallbacks"], 0);
                 assert_eq!(usage["fonts"], serde_json::json!([]));
             } else {
                 assert!(report.get("fontPolicy").is_none());
             }
+            let response = jrip_server::router(app.clone())
+                .oneshot(
+                    Request::get(format!(
+                        "/api/v1/jobs/{}/artifacts/page-000001.tiff/descriptor",
+                        job.id
+                    ))
+                    .header("authorization", "Bearer token")
+                    .body(Body::empty())
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "descriptor {format}");
+            let descriptor: serde_json::Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            assert_eq!(descriptor["raster"]["samplesVerified"], true);
+            assert_eq!(
+                descriptor["raster"]["resolution"]["x"],
+                serde_json::json!([current.manifest.dpi, 1])
+            );
+            assert_eq!(
+                descriptor["provenance"]["sourceSha256"],
+                current.source_sha256
+            );
+            assert_eq!(
+                descriptor["provenance"]["engine"],
+                serde_json::to_value(current.selected_engine).unwrap()
+            );
+            assert_eq!(
+                descriptor["sha256"],
+                app.repo.artifacts(job.id).await.unwrap()[0]["sha256"]
+            );
+            let response = jrip_server::router(app.clone())
+                .oneshot(
+                    Request::get(format!("/api/v1/jobs/{}/source/descriptor", job.id))
+                        .header("authorization", "Bearer token")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let source: serde_json::Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            assert_eq!(source["contentId"], before["contentId"]);
+            assert_eq!(source["pageCount"], report["pageCount"]);
+            if format == "application/pdf" {
+                let expected = serde_json::json!([{"page":1,"widthPoints":20,"heightPoints":20},{"page":2,"widthPoints":20,"heightPoints":20}]);
+                if data == pdf {
+                    assert_eq!(source["sourceGeometry"]["pages"], expected);
+                }
+                assert_eq!(source["sourceGeometry"], report["sourceGeometry"]);
+                let reopened = jrip_server::open(root.clone(), "token".into())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    reopened.repo.source_validation(job.id).await.unwrap()["sourceGeometry"],
+                    source["sourceGeometry"]
+                );
+            } else {
+                assert!(source["sourceGeometry"].is_null());
+            }
+
+            assert_eq!(source["boundedInterpretationVerified"], true);
+            assert_eq!(source["structureVerified"], format == "application/pdf");
+            assert_eq!(
+                source["validation"]["reference"],
+                format!("/api/v1/jobs/{}/source-validation", job.id)
+            );
             let profiles = &report["colorProfileAnalysis"];
+            if format == "application/pdf" {
+                assert_eq!(
+                    source["pageProfileDeclarations"]["declarations"],
+                    profiles["analysis"]["pageProfileDeclarations"]
+                );
+                assert_eq!(
+                    source["pageProfileDeclarations"]["declarations"]["executedUseVerified"],
+                    false
+                );
+                if data == include_bytes!("../../../tests/corpus/source-icc.pdf") {
+                    let indices=source["pageProfileDeclarations"]["declarations"]["pages"][0]["profileIndices"].as_array().unwrap();
+                    assert_eq!(indices.len(), 1);
+                    let index = indices[0].as_u64().unwrap() as usize;
+                    assert_eq!(
+                        source["pageProfileDeclarations"]["profiles"][index]["kind"],
+                        "PDF_ICC_BASED"
+                    );
+                    assert_eq!(
+                        source["pageProfileDeclarations"]["profiles"][index]["state"],
+                        "VALIDATED_ENVELOPE"
+                    );
+                }
+            } else {
+                assert!(source["pageProfileDeclarations"].is_null());
+            }
+
             assert_eq!(profiles["analysis"]["sourceSha256"], current.source_sha256);
             assert_eq!(
                 profiles["analysis"]["profile"],
@@ -209,18 +324,18 @@ async fn default_worker_validates_all_supported_formats_and_rejects_late_errors(
                 assert_eq!(event["reasonCode"], "PAGE_RENDERED");
                 assert!(event["completionKind"].is_null());
                 if format == "application/pdf" {
-                    assert_eq!(event["totalPages"], 2);
-                    assert_eq!(event["progressPercent"], (index + 1) * 50);
+                    assert_eq!(event["totalPages"], report["pageCount"]);
+                    assert_eq!(
+                        event["progressPercent"],
+                        (index + 1) as u64 * 100 / report["pageCount"].as_u64().unwrap()
+                    );
                 } else {
                     assert!(event["totalPages"].is_null());
                     assert!(event["progressPercent"].is_null());
                 }
             }
             assert_eq!(report["sourceSha256"], job.source_sha256);
-            assert_eq!(
-                report["pageCount"],
-                if format == "application/pdf" { 2 } else { 1 }
-            );
+            assert_eq!(report["pageCount"], if data == pdf { 2 } else { 1 });
             assert_eq!(report["strictPdfInspection"], format == "application/pdf");
             if committed {
                 let result = app.repo.get_result_receipt(job.id).await.unwrap();
@@ -567,6 +682,12 @@ async fn selected_pdf_worker_publishes_source_mapping_and_measured_total() {
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
                 .unwrap();
         assert_eq!(report["pageCount"], 2);
+        assert_eq!(
+            report["sourceGeometry"]["pages"].as_array().unwrap().len(),
+            2
+        );
+        assert_eq!(report["sourceGeometry"]["pages"][0]["page"], 1);
+        assert_eq!(report["sourceGeometry"]["pages"][1]["page"], 2);
         let history = app.repo.events(job.id, 0, 100).await.unwrap();
         let rendering: Vec<_> = history["events"]
             .as_array()
@@ -644,6 +765,21 @@ async fn worker_persists_font_usage_with_inspection_provenance_for_both_engines(
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
                 .unwrap();
         assert_eq!(report["sourceSha256"], job.source_sha256);
+        rip_core::font_programs::validate(&report["fontPolicy"]).unwrap();
+        assert!(
+            report["fontPolicy"]["fonts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|font| font["programIdentity"]["status"] == "HASHED")
+        );
+        let programs: std::collections::HashSet<_> = report["fontPolicy"]["fonts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|font| font["programIdentity"]["sha256"].as_str().unwrap())
+            .collect();
+        assert_eq!(programs.len(), 2);
         let usage = &report["fontPolicy"]["runtimeEvidence"];
         rip_core::font_usage::validate(usage, 12).unwrap();
         assert_eq!(usage["glyphCallbacks"], 12);

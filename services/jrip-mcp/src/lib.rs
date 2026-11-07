@@ -13,6 +13,13 @@ pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 pub mod http;
 pub mod rate_limit;
 const MAX_SUBSCRIPTIONS: usize = 32;
+#[derive(Clone, Default)]
+struct ResourceCursor {
+    after: i64,
+    stream: Option<String>,
+    pruned: i64,
+    unavailable: bool,
+}
 pub struct Session {
     router: Router,
     audit: Option<rip_storage::Repository>,
@@ -22,7 +29,7 @@ pub struct Session {
     identity: String,
     scopes: Vec<String>,
     input_root: Option<PathBuf>,
-    subscriptions: BTreeMap<String, i64>,
+    subscriptions: BTreeMap<String, ResourceCursor>,
 }
 impl Session {
     pub fn new(router: Router, token: String) -> Self {
@@ -557,9 +564,18 @@ impl Session {
                     }
                 }
                 if self.allowed("artifacts:read") {
+                    templates.push(json!({"uriTemplate":"jrip://color/attempts/{colorAttemptId}/artifacts/{name}/chunks/{offset}/{length}","name":"Color artifact chunk / 色変換成果物の範囲取得 / 色转换产物分块读取","mimeType":"application/octet-stream"}));
                     templates.push(json!({"uriTemplate":"jrip://jobs/{jobId}/artifacts/{name}/chunks/{offset}/{length}","name":"Artifact chunk (1–32768 bytes) / 成果物の範囲取得 / 产物分块读取","mimeType":"application/octet-stream"}));
                 }
+                if self.allowed("jobs:read") && self.allowed("artifacts:read") {
+                    templates.push(json!({"uriTemplate":"jrip://deliveries/{deliveryId}/artifact/descriptor","name":"Verified delivery descriptor / 検証済み送信成果物 / 已验证投递描述","mimeType":"application/json"}));
+                    templates.push(json!({"uriTemplate":"jrip://deliveries/{deliveryId}/artifact/chunks/{offset}/{length}","name":"Delivery chunk (1–32768 bytes) / 送信成果物の範囲取得 / 投递产物分块读取","mimeType":"application/octet-stream"}));
+                    templates.push(json!({"uriTemplate":"jrip://jobs/{jobId}/source/descriptor","name":"Verified source descriptor / 検証済み原稿情報 / 已验证原稿描述","mimeType":"application/json"}));
+                    templates.push(json!({"uriTemplate":"jrip://jobs/{jobId}/source/chunks/{offset}/{length}","name":"Verified source chunk (1–32768 bytes) / 原稿の範囲取得 / 原稿分块读取","mimeType":"application/octet-stream"}));
+                }
                 if self.allowed("jobs:read") {
+                    templates.push(json!({"uriTemplate":"jrip://printers/{printerId}/observations","name":"Stored device history / 保存済み機器履歴 / 已保存设备历史","description":"Subscribe to stored changes; no device polling / 保存済み変化を購読、機器pollなし / 订阅已保存变化，不轮询设备","mimeType":"application/json"}));
+                    templates.push(json!({"uriTemplate":"jrip://printers/{printerId}/observations/{sequence}","name":"Stored device event / 保存済み機器イベント / 已保存设备事件","mimeType":"application/json"}));
                     templates.push(json!({"uriTemplate":"jrip://printers/{printerId}","name":"Printer / プリンター / 打印机","mimeType":"application/json"}));
                     templates.push(json!({"uriTemplate":"jrip://pipelines/{pipelineId}/timeline","name":"Unified timeline / 全工程履歴 / 统一阶段历史","mimeType":"application/json"}));
                 }
@@ -584,19 +600,48 @@ impl Session {
                         json!({"jsonrpc":"2.0","id":id,"result":{"contents":[{"uri":uri,"mimeType":"application/json","text":value.to_string()}]}}),
                     );
                 }
-                if uri.contains("/artifacts/") {
-                    let Some((job, name, offset, length)) = artifact_chunk(uri) else {
+                if uri.contains("/artifacts/")
+                    || uri.contains("/source/chunks/")
+                    || uri.contains("/artifact/chunks/")
+                {
+                    let (path, offset, length, source) = if let Some((job, name, offset, length)) =
+                        artifact_chunk(uri)
+                    {
+                        (
+                            format!("/api/v1/jobs/{job}/artifacts/{name}"),
+                            offset,
+                            length,
+                            false,
+                        )
+                    } else if let Some((attempt, name, offset, length)) = color_artifact_chunk(uri)
+                    {
+                        (
+                            format!("/api/v1/color/attempts/{attempt}/artifacts/{name}"),
+                            offset,
+                            length,
+                            false,
+                        )
+                    } else if let Some((job, offset, length)) = source_chunk(uri) {
+                        (format!("/api/v1/jobs/{job}/source"), offset, length, true)
+                    } else if let Some((delivery, offset, length)) = delivery_chunk(uri) {
+                        (
+                            format!("/api/v1/deliveries/{delivery}/artifact"),
+                            offset,
+                            length,
+                            true,
+                        )
+                    } else {
                         return Some(error(
                             id,
                             -32602,
-                            "Invalid artifact chunk URI / 成果物範囲URIが不正です / 产物分块URI无效",
+                            "Invalid content chunk URI / 範囲URIが不正です / 分块URI无效",
                         ));
                     };
-                    if !self.allowed("artifacts:read") {
+                    if !self.allowed("artifacts:read") || (source && !self.allowed("jobs:read")) {
                         return Some(error(id, -32001, "Insufficient permission"));
                     }
                     let request = match self
-                        .builder("GET", &format!("/api/v1/jobs/{job}/artifacts/{name}"))
+                        .builder("GET", &path)
                         .header("range", format!("bytes={offset}-{}", offset + length - 1))
                         .body(Body::empty())
                     {
@@ -646,6 +691,66 @@ impl Session {
                         json!({"jsonrpc":"2.0","id":id,"result":{"contents":[{"uri":uri,"mimeType":"application/json","text":value.to_string()}]}}),
                     );
                 }
+                if let Some(tail) = uri.strip_prefix("jrip://deliveries/") {
+                    let Some(delivery) = tail
+                        .strip_suffix("/artifact/descriptor")
+                        .and_then(|v| Uuid::parse_str(v).ok())
+                    else {
+                        return Some(error(id, -32602, "Invalid delivery resource URI"));
+                    };
+                    if !self.allowed("jobs:read") || !self.allowed("artifacts:read") {
+                        return Some(error(id, -32001, "Insufficient permission"));
+                    }
+                    let value = match self
+                        .get(&format!(
+                            "/api/v1/deliveries/{delivery}/artifact/descriptor"
+                        ))
+                        .await
+                    {
+                        Ok(value) => value,
+                        Err(_) => return Some(error(id, -32002, "Delivery artifact unavailable")),
+                    };
+                    return Some(
+                        json!({"jsonrpc":"2.0","id":id,"result":{"contents":[{"uri":uri,"mimeType":"application/json","text":value.to_string()}]}}),
+                    );
+                }
+                if let Some(tail) = uri.strip_prefix("jrip://printers/")
+                    && tail.split('/').nth(1) == Some("observations")
+                {
+                    if !self.allowed("jobs:read") {
+                        return Some(error(id, -32001, "Insufficient permission"));
+                    }
+                    let parts: Vec<_> = tail.split('/').collect();
+                    if !(2..=3).contains(&parts.len())
+                        || parts[0].is_empty()
+                        || parts[0].len() > 128
+                        || !parts[0]
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+                    {
+                        return Some(error(id, -32602, "Invalid printer observation URI"));
+                    }
+                    let mut path = format!("/api/v1/printers/{}/observations", parts[0]);
+                    if parts.len() == 3 {
+                        let Some(sequence) = parts[2]
+                            .parse::<i64>()
+                            .ok()
+                            .filter(|n| *n > 0 && n.to_string() == parts[2])
+                        else {
+                            return Some(error(id, -32602, "Invalid observation sequence"));
+                        };
+                        path.push_str(&format!("/{sequence}"));
+                    }
+                    let value = match self.get(&path).await {
+                        Ok(value) => value,
+                        Err(_) => {
+                            return Some(error(id, -32002, "Observation unavailable or forbidden"));
+                        }
+                    };
+                    return Some(
+                        json!({"jsonrpc":"2.0","id":id,"result":{"contents":[{"uri":uri,"mimeType":"application/json","text":value.to_string()}]}}),
+                    );
+                }
                 if let Some(printer) = uri.strip_prefix("jrip://printers/") {
                     if !self.allowed("jobs:read") {
                         return Some(error(id, -32001, "Insufficient permission"));
@@ -671,6 +776,9 @@ impl Session {
                 let Some((job, suffix)) = job_resource(uri) else {
                     return Some(error(id, -32602, "Invalid resource URI"));
                 };
+                if suffix == "source/descriptor" && !self.allowed("artifacts:read") {
+                    return Some(error(id, -32001, "Insufficient permission"));
+                }
                 let scope = if suffix == "artifacts" {
                     "artifacts:read"
                 } else {
@@ -707,15 +815,25 @@ impl Session {
                     self.subscriptions.remove(uri);
                     json!({})
                 } else {
-                    if self.get(&path).await.is_err() {
-                        return Some(error(id, -32002, "Resource not found or forbidden"));
-                    }
+                    let value = match self.get(&path).await {
+                        Ok(value) => value,
+                        Err(_) => {
+                            return Some(error(id, -32002, "Resource not found or forbidden"));
+                        }
+                    };
                     if self.subscriptions.len() >= MAX_SUBSCRIPTIONS
                         && !self.subscriptions.contains_key(uri)
                     {
                         return Some(error(id, -32000, "Subscription limit reached"));
                     }
-                    self.subscriptions.entry(uri.to_string()).or_insert(0);
+                    let mut cursor = ResourceCursor::default();
+                    if printer_observation_resource(uri).is_some() {
+                        let Some(stream) = observation_stream(&value) else {
+                            return Some(error(id, -32002, "Invalid observation resource"));
+                        };
+                        cursor.stream = stream;
+                    }
+                    self.subscriptions.entry(uri.to_string()).or_insert(cursor);
                     json!({})
                 }
             }
@@ -733,25 +851,100 @@ impl Session {
                 continue;
             }
             let (path, cursor_key) = event_resource(&uri).unwrap();
-            if let Ok(value) = self.get(&format!("{path}?after={cursor}&limit=100")).await
-                && value["events"]
-                    .as_array()
-                    .is_some_and(|events| !events.is_empty())
+            let printer = printer_observation_resource(&uri).is_some();
+            let mut value = match self
+                .get(&format!("{path}?after={}&limit=100", cursor.after))
+                .await
             {
-                self.subscriptions
-                    .insert(uri.clone(), value[cursor_key].as_i64().unwrap());
-                notifications.push(json!({"jsonrpc":"2.0","method":"notifications/resources/updated","params":{"uri":uri}}));
+                Ok(value) => value,
+                Err(value) => {
+                    if printer
+                        && value["error"]["code"] == "printer_not_configured"
+                        && !cursor.unavailable
+                    {
+                        let mut next = cursor.clone();
+                        next.unavailable = true;
+                        self.subscriptions.insert(uri.clone(), next);
+                        notifications.push(resource_updated(&uri));
+                    }
+                    continue;
+                }
+            };
+            let mut next = cursor.clone();
+            let mut changed = cursor.unavailable;
+            if printer {
+                let Some(stream) = observation_stream(&value) else {
+                    continue;
+                };
+                if stream != cursor.stream {
+                    value = match self.get(&format!("{path}?after=0&limit=100")).await {
+                        Ok(value) => value,
+                        Err(_) => continue,
+                    };
+                    next.after = 0;
+                }
+                let Some(stream) = observation_stream(&value) else {
+                    continue;
+                };
+                let Some(pruned) = value["prunedThrough"].as_i64().filter(|n| *n >= 0) else {
+                    continue;
+                };
+                changed |= stream != cursor.stream || pruned != cursor.pruned;
+                next.stream = stream;
+                next.pruned = pruned;
+            }
+            let Some(events) = value["events"].as_array() else {
+                continue;
+            };
+            let Some(after) = value[cursor_key].as_i64().filter(|n| *n >= 0) else {
+                continue;
+            };
+            if !events.is_empty() {
+                if after <= next.after {
+                    continue;
+                }
+                next.after = after;
+                changed = true;
+            }
+            next.unavailable = false;
+            self.subscriptions.insert(uri.clone(), next);
+            if changed {
+                notifications.push(resource_updated(&uri));
             }
         }
         notifications
     }
+}
+fn resource_updated(uri: &str) -> Value {
+    json!({"jsonrpc":"2.0","method":"notifications/resources/updated","params":{"uri":uri}})
+}
+fn observation_stream(value: &Value) -> Option<Option<String>> {
+    if value["profile"] != rip_storage::printer_observation::PROFILE {
+        return None;
+    }
+    match value.get("streamId")? {
+        Value::Null => Some(None),
+        Value::String(id) if Uuid::parse_str(id).is_ok() => Some(Some(id.clone())),
+        _ => None,
+    }
+}
+fn printer_observation_resource(uri: &str) -> Option<&str> {
+    let id = uri
+        .strip_prefix("jrip://printers/")?
+        .strip_suffix("/observations")?;
+    (!id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_')))
+    .then_some(id)
 }
 fn job_resource(uri: &str) -> Option<(Uuid, &str)> {
     let tail = uri.strip_prefix("jrip://jobs/")?;
     let (id, suffix) = tail.split_once('/').unwrap_or((tail, ""));
     if !matches!(
         suffix,
-        "" | "events" | "manifest" | "artifacts" | "source-validation"
+        "" | "events" | "manifest" | "artifacts" | "source-validation" | "source/descriptor"
     ) || tail.ends_with('/')
     {
         return None;
@@ -769,7 +962,9 @@ fn timeline_resource(uri: &str) -> Option<Uuid> {
     Uuid::parse_str(value).ok()
 }
 fn event_resource(uri: &str) -> Option<(String, &'static str)> {
-    if let Some(id) = inspection_resource(uri) {
+    if let Some(id) = printer_observation_resource(uri) {
+        Some((format!("/api/v1/printers/{id}/observations"), "nextAfter"))
+    } else if let Some(id) = inspection_resource(uri) {
         Some((
             format!("/api/v1/print/document-inspection-requests/{id}/events"),
             "nextAfter",
@@ -813,6 +1008,12 @@ fn scopes(name: &str) -> Vec<&'static str> {
         | "rip_cancel_job" => vec!["jobs:control"],
         "rip_retry_job" => vec!["jobs:control", "jobs:submit"],
         "rip_list_artifacts" => vec!["artifacts:read"],
+        "rip_describe_artifact"
+        | "color_describe_artifact"
+        | "print_describe_source"
+        | "print_describe_delivery_artifact" => {
+            vec!["jobs:read", "artifacts:read"]
+        }
         "rip_delete_job" | "print_revoke_receipt_key" => vec!["admin"],
         "print_deliver_job" => vec!["printers:print", "artifacts:read"],
         "print_preview_delivery" => vec!["jobs:read", "artifacts:read"],
@@ -860,6 +1061,10 @@ fn tools() -> Vec<Value> {
         ("print_get_capabilities","Get common stage capabilities / 共通工程能力を取得 / 获取通用阶段能力"),
         ("print_get_job_ticket","Get immutable job ticket / 保存済みJobTicketを取得 / 获取持久化JobTicket"),
         ("print_validate_ticket","Validate raster ticket settings / ラスター契約設定を検証 / 验证栅格契约设置"),
+        ("print_describe_delivery_artifact","Inspect staged output without resending / 再送せず送信成果物を検証 / 不重发地验证投递产物"),
+        ("print_describe_source","Verify source identity and recorded validation / 原稿の同一性と検証証跡を取得 / 验证原稿标识与验证证据"),
+        ("rip_describe_artifact","Inspect verified raster facts and provenance / 検証済みラスター情報と生成元 / 验证栅格信息与来源"),
+        ("color_describe_artifact","Inspect verified color artifact contract / 色成果物の検証済み契約 / 验证色彩产物契约"),
         ("color_get_capabilities","Get explicit ICC capabilities / ICC処理能力取得 / 获取ICC处理能力"),
         ("color_apply","Queue explicit ICC processing / ICC色処理を予約 / 排队显式ICC处理"),
         ("color_list_attempts","List bounded source-job color summaries / 原稿の色変換一覧 / 原稿色彩转换摘要列表"),
@@ -867,6 +1072,8 @@ fn tools() -> Vec<Value> {
         ("color_get_events","Resume color page progress / 色処理のページ進捗 / 恢复颜色页进度"),
         ("color_cancel_attempt","Cancel queued color attempt / 待機中の色処理取消 / 取消待处理颜色尝试"),
         ("color_get_profile","Describe registered ICC / 登録ICC照会 / 查询已注册ICC"),
+        ("print_get_printer_observations","Read stored printer observations and resumable change history; no device query / 保存済み機器観測と再開可能な履歴を取得、機器照会なし / 读取已保存设备观察与可恢复历史，不查询设备"),
+        ("print_get_printer_observation","Read one retained device event and its verified snapshot; no device query / 保持中の機器イベントと検証済みsnapshotを取得、機器照会なし / 读取保留设备事件及已验证snapshot，不查询设备"),
         ("print_get_printer","Get live printer capabilities / 実機能力照会 / 获取设备实时能力"),
         ("print_list_printers","List configured destinations / 出力先一覧 / 已配置目标"),
         ("print_list_deliveries","List source-job output history / 原稿の出力履歴 / 原稿输出记录"),
@@ -890,6 +1097,13 @@ fn tools() -> Vec<Value> {
         let mut properties=json!({});let mut required=vec![];
         let control=matches!(name,"rip_hold_job"|"rip_release_job"|"rip_cancel_job"|"rip_retry_job"|"rip_delete_job"|"print_deliver_job"|"print_cancel_delivery");
         if (control && name!="print_cancel_delivery") || matches!(name,"print_get_receipt"|"print_get_result_receipt"|"rip_get_job"|"rip_get_events"|"rip_list_artifacts"|"print_get_job_ticket"|"print_preview_delivery") {properties["jobId"]=json!({"type":"string","format":"uuid"});required.push("jobId");}
+        if name=="print_describe_delivery_artifact" {properties["deliveryId"]=json!({"type":"string","format":"uuid"});required.push("deliveryId");}
+        if name=="print_describe_source" {properties["jobId"]=json!({"type":"string","format":"uuid"});required.push("jobId");}
+        if matches!(name,"rip_describe_artifact"|"color_describe_artifact") {
+            let key=if name=="rip_describe_artifact" {"jobId"} else {"colorAttemptId"};
+            properties[key]=json!({"type":"string","format":"uuid"});required.push(key);
+            properties["name"]=json!({"type":"string","format":"artifact-name","minLength":16,"maxLength":16,"pattern":"^page-(?:00000[1-9]|0000[1-9][0-9]|000100)\\.tiff$"});required.push("name");
+        }
         if name=="print_submit_document_inspection" {properties["sourceName"]=json!({"type":"string","minLength":1});required.push("sourceName");}
         if name=="print_cancel_document_inspection" {properties["expectedRevision"]=json!({"type":"integer","minimum":0});required.push("expectedRevision");}
         if matches!(name,"print_get_document_inspection_events"|"print_cancel_document_inspection"|"print_get_document_inspection"|"print_get_document_inspection_request"|"print_submit_document_inspection") {properties["inspectionId"]=json!({"type":"string","format":"uuid"});required.push("inspectionId");}
@@ -916,7 +1130,8 @@ fn tools() -> Vec<Value> {
         if matches!(name,"rip_retry_job"|"print_deliver_job"|"print_preview_delivery") {properties["requestId"]=json!({"type":"string","format":"uuid"});required.push("requestId");}
         if matches!(name,"print_create_preflight"|"print_create_pipeline_preflight") {properties["digestProfile"]=json!({"type":"string","enum":["org.jrip.jcs-safe-v1","org.jrip.serde-json-v1"]});}
         if matches!(name,"print_create_preflight"|"print_resolve_intent") {properties["intent"]=json!({"type":"object","description":"ACX PrintIntent; validated by Print API / Print APIで検証 / 由Print API验证"});required.push("intent");}
-        if name=="print_get_printer" {properties["printerId"]=json!({"type":"string","minLength":1});required.push("printerId");}
+        if matches!(name,"print_get_printer"|"print_get_printer_observations"|"print_get_printer_observation") {properties["printerId"]=json!({"type":"string","minLength":1});required.push("printerId");}
+        if name=="print_get_printer_observation" {properties["sequence"]=json!({"type":"integer","minimum":1});required.push("sequence");}
         if name=="print_revoke_receipt_key" {properties["keyId"]=json!({"type":"string","pattern":"^sha256:[0-9a-f]{64}$"});properties["reason"]=json!({"type":"string","enum":["compromised","retired","operator-request"]});required.extend(["keyId","reason"]);}
         if name=="print_get_receipt_keys" {properties["after"]=json!({"type":"string","pattern":"^sha256:[0-9a-f]{64}$"});properties["limit"]=json!({"type":"integer","minimum":1,"maximum":100});}
         if name=="print_get_capabilities" {properties["printerId"]=json!({"type":"string","minLength":1,"maxLength":128,"pattern":"^[A-Za-z0-9_-]+$"});}
@@ -953,7 +1168,7 @@ fn tools() -> Vec<Value> {
                 properties[key]=json!({"type":"string","minLength":1});if format=="uuid" {properties[key]["format"]=json!(format);}required.push(key);
             }
         }
-        if matches!(name,"print_get_document_inspection_events"|"print_get_pipeline_timeline"|"print_get_pipeline_events"|"rip_list_jobs"|"rip_get_events"|"color_get_events") {
+        if matches!(name,"print_get_document_inspection_events"|"print_get_pipeline_timeline"|"print_get_pipeline_events"|"rip_list_jobs"|"rip_get_events"|"color_get_events"|"print_get_printer_observations") {
             properties["limit"]=json!({"type":"integer","minimum":1,"maximum":100,"default":50});
             properties[if name=="rip_list_jobs" {"offset"}else{"after"}]=json!({"type":"integer","minimum":0,"default":0});
         }
@@ -1016,6 +1231,18 @@ fn validate(name: &str, args: &Value) -> Result<(), &'static str> {
                         return Err("Invalid color cursor");
                     }
                 }
+                if property["format"] == "artifact-name"
+                    && !s
+                        .strip_prefix("page-")
+                        .and_then(|v| v.strip_suffix(".tiff"))
+                        .is_some_and(|page| {
+                            page.len() == 6
+                                && page.bytes().all(|b| b.is_ascii_digit())
+                                && page.parse::<u32>().is_ok_and(|n| (1..=100).contains(&n))
+                        })
+                {
+                    return Err("Invalid artifact name");
+                }
                 if key == "printerId"
                     && (s.len() > 128
                         || !s
@@ -1054,6 +1281,20 @@ fn validate(name: &str, args: &Value) -> Result<(), &'static str> {
 fn tool_path(name: &str, args: &Value) -> String {
     let id = args["jobId"].as_str().unwrap_or("");
     match name {
+        "print_describe_delivery_artifact" => format!(
+            "/api/v1/deliveries/{}/artifact/descriptor",
+            args["deliveryId"].as_str().unwrap()
+        ),
+        "print_describe_source" => format!("/api/v1/jobs/{id}/source/descriptor"),
+        "rip_describe_artifact" => format!(
+            "/api/v1/jobs/{id}/artifacts/{}/descriptor",
+            args["name"].as_str().unwrap()
+        ),
+        "color_describe_artifact" => format!(
+            "/api/v1/color/attempts/{}/artifacts/{}/descriptor",
+            args["colorAttemptId"].as_str().unwrap(),
+            args["name"].as_str().unwrap()
+        ),
         "color_get_capabilities" => "/api/v1/color/capabilities".into(),
         "color_list_attempts" | "print_list_deliveries" => {
             let mut path = format!(
@@ -1101,6 +1342,17 @@ fn tool_path(name: &str, args: &Value) -> String {
             .unwrap_or_else(|| "/api/v1/print/capabilities".into()),
         "print_get_job_ticket" => format!("/api/v1/jobs/{id}/ticket"),
         "print_list_printers" => "/api/v1/printers".into(),
+        "print_get_printer_observations" => format!(
+            "/api/v1/printers/{}/observations?after={}&limit={}",
+            args["printerId"].as_str().unwrap(),
+            args["after"].as_i64().unwrap_or(0),
+            args["limit"].as_i64().unwrap_or(50)
+        ),
+        "print_get_printer_observation" => format!(
+            "/api/v1/printers/{}/observations/{}",
+            args["printerId"].as_str().unwrap(),
+            args["sequence"].as_i64().unwrap()
+        ),
         "print_get_printer" => format!("/api/v1/printers/{}", args["printerId"].as_str().unwrap()),
         "print_get_delivery" => format!(
             "/api/v1/deliveries/{}",
@@ -1227,7 +1479,13 @@ pub async fn serve<R: tokio::io::AsyncBufRead + Unpin, W: tokio::io::AsyncWrite 
 
 /// Canonical decimal ranges and fixed TIFF names prevent path/query injection.
 fn artifact_chunk(uri: &str) -> Option<(Uuid, &str, u64, u64)> {
-    let parts: Vec<_> = uri.strip_prefix("jrip://jobs/")?.split('/').collect();
+    named_artifact_chunk(uri, "jrip://jobs/")
+}
+fn color_artifact_chunk(uri: &str) -> Option<(Uuid, &str, u64, u64)> {
+    named_artifact_chunk(uri, "jrip://color/attempts/")
+}
+fn named_artifact_chunk<'a>(uri: &'a str, prefix: &str) -> Option<(Uuid, &'a str, u64, u64)> {
+    let parts: Vec<_> = uri.strip_prefix(prefix)?.split('/').collect();
     if parts.len() != 6 || parts[1] != "artifacts" || parts[3] != "chunks" {
         return None;
     }
@@ -1250,4 +1508,28 @@ fn artifact_chunk(uri: &str) -> Option<(Uuid, &str, u64, u64)> {
         return None;
     }
     Some((job, name, offset, length))
+}
+
+fn source_chunk(uri: &str) -> Option<(Uuid, u64, u64)> {
+    content_chunk(uri, "jrip://jobs/", "source")
+}
+fn delivery_chunk(uri: &str) -> Option<(Uuid, u64, u64)> {
+    content_chunk(uri, "jrip://deliveries/", "artifact")
+}
+fn content_chunk(uri: &str, prefix: &str, kind: &str) -> Option<(Uuid, u64, u64)> {
+    let parts: Vec<_> = uri.strip_prefix(prefix)?.split('/').collect();
+    if parts.len() != 5 || parts[1] != kind || parts[2] != "chunks" {
+        return None;
+    }
+    let job = Uuid::parse_str(parts[0]).ok()?;
+    let offset = parts[3].parse::<u64>().ok()?;
+    let length = parts[4].parse::<u64>().ok()?;
+    if parts[3] != offset.to_string()
+        || parts[4] != length.to_string()
+        || !(1..=32768).contains(&length)
+        || offset.checked_add(length).is_none()
+    {
+        return None;
+    }
+    Some((job, offset, length))
 }
