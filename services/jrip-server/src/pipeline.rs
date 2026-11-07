@@ -300,7 +300,9 @@ pub async fn tick(app: &App) -> Result<bool, Box<dyn std::error::Error>> {
         let approval = value["approvalId"]
             .as_str()
             .and_then(|s| Uuid::parse_str(s).ok());
-        let result = advance(app, id, &value).await;
+        // Keep the preparation state machine off the caller's stack. A caller may
+        // await many ticks alongside color/delivery futures in one async frame.
+        let result = Box::pin(advance(app, id, &value)).await;
         let (state, reason) = match result {
             Ok(state) => (state, None),
             Err(ApiError(status, code)) if status == StatusCode::FORBIDDEN => (

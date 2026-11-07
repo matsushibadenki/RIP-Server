@@ -62,7 +62,9 @@ pub async fn tick(app: &App) -> Result<bool, Box<dyn std::error::Error>> {
         .repo
         .update_color(id, 0, "RUNNING", 0, None, None)
         .await?;
-    match process(app, id, &mut attempt).await {
+    // The bounded conversion state machine is large; do not embed it in every
+    // caller that composes color ticks with pipeline and delivery work.
+    match Box::pin(process(app, id, &mut attempt)).await {
         Ok(result) => {
             app.repo
                 .update_color(
