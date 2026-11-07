@@ -24,7 +24,7 @@ snapshotはstate、受付可否、機器ジョブ件数、reason、構造化cond
 
 各登録streamで直近1000変更イベントを保持し、同じcontentは共有する。リストは1〜100件の小さなイベントを返し、snapshot本体はlatestと個別イベント取得に含める。prunedThrough／historyTruncatedで保持範囲から外れたcursorを明示し、nextAfter／hasMoreで再開する。これは署名済み監査アーカイブや無期限保持ではない。旧登録stream全体の容量・期間ポリシーは未完了で、job成果物や印刷receiptの保持とは独立する。
 
-応答はprivate/no-store。read-only scopeのAgentも読めるが、機器の文字列はデータであり命令ではない。MCP購読通知は[MCP-PRINTER-SUBSCRIPTIONS.md](MCP-PRINTER-SUBSCRIPTIONS.md)を参照。REST直接SSEとConsoleの再起動後fallback表示は未接続。
+応答はprivate/no-store。read-only scopeのAgentも読めるが、機器の文字列はデータであり命令ではない。MCP購読通知は[MCP-PRINTER-SUBSCRIPTIONS.md](MCP-PRINTER-SUBSCRIPTIONS.md)を参照。Consoleの再起動後fallback表示は[接続済み](CONSOLE-PRINTER-STATUS.md)。REST直接SSEは未接続。
 
 ## English
 
@@ -34,7 +34,7 @@ Snapshots retain state, acceptance, device job count, canonical reason sets, int
 
 SQLite-issued request serials stop late older completions from overwriting newer completed results. Atomic updates and WAL read transactions keep heads, events and content consistent. Ordering relies on serials/sequences, not a monotonic wall clock. Streams bind to the exact printer and security configuration; changed registrations have independent UUID streamIds and do not expose URI/credentials/CA bytes. Pair cursors with streamId and restart at zero when it changes. Removed configurations cannot be read through this API; restoring the same configuration restores its stream.
 
-Each stream retains 1000 change events with shared snapshot content. Lists return compact pages of 1–100 events, latest full snapshot, nextAfter/hasMore and explicit pruning markers. Individual reads return the exact retained snapshot. This bounded cache is independent of print receipts/job retention and is not a signed audit archive. MCP subscriptions are covered in [MCP-PRINTER-SUBSCRIPTIONS.md](MCP-PRINTER-SUBSCRIPTIONS.md). Old-registration lifecycle/global quotas, direct REST SSE, comprehensive polling and console fallback integration remain unfinished. Responses are private/no-store.
+Each stream retains 1000 change events with shared snapshot content. Lists return compact pages of 1–100 events, latest full snapshot, nextAfter/hasMore and explicit pruning markers. Individual reads return the exact retained snapshot. This bounded cache is independent of print receipts/job retention and is not a signed audit archive. MCP subscriptions are covered in [MCP-PRINTER-SUBSCRIPTIONS.md](MCP-PRINTER-SUBSCRIPTIONS.md). Old-registration lifecycle/global quotas and direct REST SSE remain unfinished. Console fallback is [implemented](CONSOLE-PRINTER-STATUS.md). Responses are private/no-store.
 
 ## 简体中文
 
@@ -44,11 +44,11 @@ snapshot保留设备状态、接收能力、作业数、规范reason集合、结
 
 SQLite分配请求serial，防止较旧请求的延迟完成覆盖较新完成结果。更新原子化，读取使用一致WAL snapshot；按serial／sequence排序，不保证壁钟单调。stream绑定完整设备及安全配置，重新注册后使用独立UUID streamId，不暴露URI、token或CA正文。cursor应与streamId一起保存，变化后从after=0重新读取。移除配置后不能通过API读旧历史，恢复相同配置可恢复原stream。
 
-每个stream保留1000个变化事件并共享snapshot内容。列表按1至100条返回小型事件页及最新snapshot，通过nextAfter／hasMore恢复，以prunedThrough／historyTruncated明确缺失历史；单事件读取精确保留snapshot。该缓存不是签名审计档案，与作业成果物及打印receipt保留独立。MCP订阅见[MCP-PRINTER-SUBSCRIPTIONS.md](MCP-PRINTER-SUBSCRIPTIONS.md)。旧注册清理／全局配额、REST直接SSE、持续观察及Console fallback仍未完成。响应为private/no-store。
+每个stream保留1000个变化事件并共享snapshot内容。列表按1至100条返回小型事件页及最新snapshot，通过nextAfter／hasMore恢复，以prunedThrough／historyTruncated明确缺失历史；单事件读取精确保留snapshot。该缓存不是签名审计档案，与作业成果物及打印receipt保留独立。MCP订阅见[MCP-PRINTER-SUBSCRIPTIONS.md](MCP-PRINTER-SUBSCRIPTIONS.md)。旧注册清理／全局配额、REST直接SSE仍未完成。Console fallback已[实现](CONSOLE-PRINTER-STATUS.md)，定期观察见[worker](PRINTER-OBSERVER.md)。响应为private/no-store。
 
 Validation / 検証 / 验证: storage tests cover restart, deduplication, failure/recovery, late queries, exact historical content, integrity failure and 1002 transitions with pruning/content cleanup. Mock IPP + authenticated REST tests cover scopes, cursor bounds, security/destination isolation, no device access on stored reads, and unchanged job revisions/no sends. Dedicated MCP tests preserve the existing suite and check tools/resources, strict URIs, cursor bounds and one live query followed by stored-only reads.
 
-🟠 [Next] Direct REST SSE, console stored-state fallback, and old-registration/global retention policies / REST直接SSE・画面fallback・旧登録と全体の保持ポリシー / REST直接SSE、界面fallback及旧注册／整体保留策略。
+🟠 [Next] Direct REST SSE and old-registration/global retention policies / REST直接SSE・旧登録と全体の保持ポリシー / REST直接SSE及旧注册／整体保留策略。
 
 ⭕️ [Pending] Physical device observation cadence, hardware accuracy and multi-host deployment acceptance / 実機の観測周期・精度・複数ホスト運用受入 / 实机观察周期、精度及多主机部署验收。
 

@@ -7,6 +7,8 @@
 
 ## 当面の優先順位：一般RIPの実用度
 
+🟢 [Done] 操作画面で再起動後の保存済みプリンター状態を復元。前回観測時刻・期限・失敗を区別し、能力確認／承認へ流用しない。App再生成と実ブラウザー再読込、3言語・狭幅・復旧を検証。[詳細](CONSOLE-PRINTER-STATUS.md)。 / Console restores saved printer reports after restart without granting capabilities or approval / 操作界面重启后恢复保存设备报告，不授予能力或审批。
+
 🟢 [Done] 機器観測resourceのMCP購読をstdio／HTTP-SSEへ接続。stream変更・履歴欠落・解除／復旧・再接続・権限を検証。購読自体は機器をpollしない。[詳細](MCP-PRINTER-SUBSCRIPTIONS.md)。 / MCP printer observation subscriptions / MCP设备观察订阅。
 
 🟢 [Done] 機器／消耗品の照会結果と失敗・復旧を登録設定ごとに永続化。REST／MCPのカーソル履歴・個別snapshot検証、重複抑止・古い照会の上書き防止・1000件保持をテスト。[詳細](PRINTER-OBSERVATIONS.md)。 / Durable query-driven device observations / 持久化查询驱动设备观察。

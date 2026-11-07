@@ -24,8 +24,18 @@ Zero is visible; unknown, unsupported and absent values remain distinct. Only pe
 
 Validation / 検証 / 验证: real local Chrome + Playwright, isolated Rust HTTP server, mock IPP and actual Docker color conversion. EN/JA/zh-CN at 320/375/430/1440px; zero/unknown/units, localized recovery tooltips, malformed reports, expiry, failed-query recovery, long/HTML-like labels, input preservation, approval invalidation and read-only credentials are exercised alongside the existing print/cancel/reload/lost-response flow. Screenshots are QA artifacts outside the repository. Browser skill was unavailable; installed Chrome was used without installing browser dependencies.
 
-🟠 [Next] Stored-state fallback/subscriptions and a printer dashboard independent of a completed raster job / 保存済み状態の復元・購読・原稿出力欄に依存しない機器画面 / 保存状态fallback／订阅及独立于已完成光栅作业的设备界面。
+🟠 [Next] Subscriptions and a printer dashboard independent of a completed raster job / 購読・原稿出力欄に依存しない機器画面 / 订阅及独立于已完成光栅作业的设备界面。
 
 ⭕️ [Pending] Real-device labels, supply accuracy and vendor recovery procedures / 実機ラベル・残量精度・機種別復旧手順 / 实机标签、余量精度及厂商恢复步骤。
 
 🟢 [Done] Query-driven durable device observations and cursor history / 照会駆動の永続機器観測とカーソル履歴 / 查询驱动的持久设备观察与cursor历史：[PRINTER-OBSERVATIONS.md](PRINTER-OBSERVATIONS.md)。
+
+## Saved state after restart / 再起動後の保存状態 / 重启后保存状态
+
+🟢 [Done] プリンター選択・更新時に、認証付き観測履歴を先に取得して前回の状態・警告・消耗品・成功観測時刻を復元する。その後に最新能力を照会し、成功すれば最新表示へ置き換える。保存表示は「保存済みの報告」と明示し、期限切れと照会失敗を独立して表示する。履歴の読取では機器照会・期限延長・印刷を行わない。保存値から用紙・部数・両面の能力、出力確認、承認を復元しない。登録に保存状態がなければ空表示とし、選択解除・セッション変更で以前の表示を消す。履歴API障害時も最新照会は試行する。画面は引き続き完了済みジョブの実機出力欄にある。自動的なプリンター選択や機器状態の常時購読は含まない。
+
+🟢 [Done] Selection/refresh first reads authenticated stored observations, restoring status, notices, supplies and the last successful observation time before requesting live capabilities. Successful live queries replace the display. Saved reports are labelled explicitly; expiry and failed queries remain visible separately. Reading history never queries a device, renews expiry or prints. Cached data never populates media/copies/duplex capabilities, reviews or approvals. Missing evidence clears the display; deselection/session changes remove prior data. Cache API failure still allows a live query. This remains in the completed-job physical-output panel, without automatic destination selection or continuous subscriptions.
+
+🟢 [Done] 选择或刷新打印机时，先读取已认证的观察历史，恢复状态、通知、耗材及上次成功观察时间，再查询实时能力。成功后替换为实时显示。明确标记已保存报告，并分别显示过期和查询失败。读取历史不会查询设备、延长有效期或打印。缓存不会恢复纸张、份数、双面能力、输出确认或审批。没有保存证据时清空显示；取消选择或变更会话时移除旧数据。缓存API故障不阻止实时查询。仍位于已完成作业的实体输出面板，不包含自动选择设备或持续订阅。
+
+Tests reopen the Rust application/repository after persisting a fake-device report, reload the browser with failed live queries, and check EN/JA/zh-CN at 320/375/430/1440px. Expired/missing cache, cache failure with live recovery, disabled stale review and unchanged device-query counters are covered. / 模擬機器の状態保存後にAppとRepositoryを再生成し、ブラウザー再読込・3言語／各画面幅・期限切れ・履歴なし・履歴障害時の復旧・能力確認禁止・機器照会件数不変を検証する。 / 保存模拟设备报告后重建App与Repository，验证浏览器重载、三语言／各宽度、过期、无历史、缓存故障恢复、禁止缓存能力确认及设备查询计数不变。

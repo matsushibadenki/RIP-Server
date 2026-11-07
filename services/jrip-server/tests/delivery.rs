@@ -4344,6 +4344,32 @@ async fn operator_console_physical_delivery_is_reviewed_approved_recoverable_and
             validity: None,
         },
     ];
+    // Persist device evidence, then recreate the application/repository before
+    // the browser starts: the UI must not rely on a process-local last report.
+    fake.printer_state.store(5, Ordering::SeqCst);
+    *fake.printer_reasons.lock().unwrap() = vec!["media-jam-error".into()];
+    fake.marker_mode.store(1, Ordering::SeqCst);
+    fake.pwg_supply_mode.store(7, Ordering::SeqCst);
+    fake.queue_count.store(0, Ordering::SeqCst);
+    let response = jrip_server::router(app.clone())
+        .oneshot(
+            Request::get("/api/v1/printers/test")
+                .header("authorization", "Bearer token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    drop(response);
+    let mut reopened = jrip_server::open(app.root.clone(), "token".into())
+        .await
+        .unwrap();
+    reopened.printers = app.printers.clone();
+    reopened.credentials = app.credentials.clone();
+    reopened.require_print_approval = app.require_print_approval;
+    drop(app);
+    let app = reopened;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let worker_app = app.clone();
@@ -4407,6 +4433,14 @@ async fn operator_console_physical_delivery_is_reviewed_approved_recoverable_and
                 );
                 StatusCode::NO_CONTENT
             }
+        }),
+    );
+    let query_counter = fake.capability_queries.clone();
+    let test_router = test_router.route(
+        "/__test/queries",
+        axum::routing::get(move || {
+            let count = query_counter.load(Ordering::SeqCst);
+            async move { axum::Json(serde_json::json!({"count": count})) }
         }),
     );
     let server = tokio::spawn(async move { axum::serve(listener, test_router).await.unwrap() });

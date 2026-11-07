@@ -30,6 +30,6 @@ Notifications are advisory, may coalesce or replay, and are not exactly-once eve
 
 Validation / 検証 / 验证: session tests cover stream replacement/restoration, pruning, removal/recovery, malformed responses, permissions, URI bounds and unsubscribe. Stdio tests prove unsolicited push and unsubscribe without device calls. An actual MCP HTTP/SSE integration uses a real local mock IPP producer and persistent observation API to verify push, unchanged-report suppression, reconnect replay and unsubscribe. Existing MCP transport/authorization tests remain enabled.
 
-🟠 [Next] Console stored-state fallback and direct REST observation SSE / 画面fallback・REST直接SSE / 界面fallback及REST直接SSE。
+🟠 [Next] Direct REST observation SSE / REST直接SSE / REST直接SSE。
 
 ⭕️ [Pending] Real device change cadence and deployed-network disconnect behavior / 実機の変化周期と運用ネットワークの切断挙動 / 实机变化周期及部署网络断连行为。

@@ -28,6 +28,55 @@ try{
 
  await connect(token);if(screenshots)await page.screenshot({path:`${screenshots}/printer-first-viewport.png`,fullPage:false});await openOutput();
  const printerRoute=new URL('/api/v1/print/capabilities?printerId=test',url).href;
+ // The Rust fixture has reopened the repository after saving this report.
+ const savedPath='/api/v1/printers/test/observations?limit=1';
+ const saved=await api(savedPath);assert.equal(saved.latest.snapshot.state,5);
+ const countBefore=(await (await context.request.get(new URL('/__test/queries',url).href)).json()).count;
+ let releaseLive;const liveGate=new Promise(resolve=>{releaseLive=resolve;});
+ await page.route(printerRoute,async handler=>{await liveGate;await handler.fulfill({status:503,contentType:'application/json',body:JSON.stringify({error:{code:'printer_unavailable'}})});});
+ await page.locator('#delivery-printer').selectOption('test');
+ await wait(()=>page.locator('#printer-live').getAttribute('data-source').then(v=>v==='stored'),'saved report appears before live query finishes');
+ assert.equal(await page.locator('#printer-live').getAttribute('aria-busy'),'true');
+ releaseLive();
+ await wait(()=>page.locator('#printer-refresh').isEnabled(),'saved fallback finishes');
+ assert.equal(await page.locator('#printer-live').getAttribute('data-source'),'stored');
+ assert((await page.locator('#printer-query-state').innerText()).includes('Saved report'));
+ assert((await page.locator('#printer-conditions').innerText()).includes('Paper jam'));
+ assert((await page.locator('#printer-cups-supplies').innerText()).includes('0 %'));
+ assert.equal(await page.locator('#delivery-check').isDisabled(),true,'saved state cannot authorize a capability review');
+ // A full page reload loses all JS memory; the same report must still appear.
+ await page.reload();await connect(token);await openOutput();
+ await page.locator('#delivery-printer').selectOption('test');await wait(()=>page.locator('#printer-refresh').isEnabled(),'fallback after browser reload');
+ for(const [lang,label] of [['en','Saved report'],['ja','保存済みの報告'],['zh-CN','已保存报告']]){
+  await page.locator('#language').selectOption(lang);
+  assert((await page.locator('#printer-query-state').innerText()).includes(label));
+  for(const width of [320,375,430,1440]){await page.setViewportSize({width,height:1000});assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),`stored fallback fits ${lang}/${width}`);}
+ }
+ await page.locator('#language').selectOption('en');await page.setViewportSize({width:1440,height:1000});
+ assert.equal((await api(savedPath)).latest.lastObservedAt,saved.latest.lastObservedAt,'reading saved state does not renew observation time');
+ assert.equal((await (await context.request.get(new URL('/__test/queries',url).href)).json()).count,countBefore,'cache reads do not query the device');
+ if(screenshots)await page.locator('#printer-live').screenshot({path:`${screenshots}/printer-stored-after-restart.png`});
+ const savedRoute=new URL(savedPath,url).href;
+ await page.route(savedRoute,async handler=>{const response=await handler.fetch();const body=await response.json();body.latest.expiresAt=0;await handler.fulfill({response,json:body});});
+ await page.locator('#printer-refresh').click();await wait(()=>page.locator('#printer-refresh').isEnabled(),'expired saved refresh');
+ assert((await page.locator('#printer-query-state').innerText()).includes('Expired snapshot'));
+ assert((await page.locator('#printer-query-state').innerText()).includes('Query unavailable'));
+ assert((await page.locator('#printer-conditions').innerText()).includes('Paper jam'));
+ await page.unroute(savedRoute);
+ await page.route(savedRoute,handler=>handler.fulfill({status:200,contentType:'application/json',body:JSON.stringify({latest:null})}));
+ await page.locator('#printer-refresh').click();await wait(()=>page.locator('#printer-refresh').isEnabled(),'empty saved refresh');
+ assert.equal(await page.locator('#printer-snapshot-content').isHidden(),true,'a registration without saved evidence does not reuse another report');
+ assert.equal(await page.locator('#delivery-check').isDisabled(),true);
+ await page.unroute(savedRoute);
+ await page.route(savedRoute,handler=>handler.fulfill({status:503,contentType:'application/json',body:'{}'}));
+ await page.unroute(printerRoute);
+ await page.locator('#printer-refresh').click();await wait(()=>page.locator('#printer-refresh').isEnabled(),'cache outage still permits live query');
+ assert.equal(await page.locator('#printer-live').getAttribute('data-source'),'live');
+ assert.equal(await page.locator('#delivery-media').isEnabled(),true);
+ assert(!(await page.locator('#printer-query-state').innerText()).includes('Saved report'));
+ await page.unroute(savedRoute);
+ await page.locator('#delivery-printer').selectOption('');assert.equal(await page.locator('#printer-live').isHidden(),true);
+ assert.equal(await page.locator('#printer-cups-supplies').textContent(),'','clearing destination removes saved data');
  const setPrinter=async data=>{const response=await fetch(new URL('/__test/printer',url),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(data)});assert.equal(response.status,204);};
  const refreshPrinter=async()=>{await page.locator('#printer-refresh').click();await wait(()=>page.locator('#printer-refresh').isEnabled(),'printer refresh completed');};
  await setPrinter({state:5,reasons:['media-jam-error','toner-low-warning','vendor-needs-attention-report'],queuedJobs:0,markerMode:1,pwgMode:7});

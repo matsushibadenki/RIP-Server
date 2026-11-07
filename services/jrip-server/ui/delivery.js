@@ -37,16 +37,29 @@ window.JripDelivery=(()=>{
  function renderReview(){const r=state.review;$('delivery-review').hidden=!r;if(!r){controls();return;}const ticket=r.contract.ticket,body=r.body;rows('delivery-summary',[['printer',body.printerId],['media',body.media],['copies',body.copies],['sides',t({'one-sided':'oneSided','two-sided-long-edge':'longEdge','two-sided-short-edge':'shortEdge'}[body.sides])],['pageRanges',ticket.selectedSourcePages?.join(',')||rangesLabel(body.pageRanges)||t('allPages')],['colorResult',$('delivery-color').selectedOptions[0]?.textContent||t('originalRaster')],['resolution',ticket.delivery.dpi]]);$('delivery-grant').hidden=!ticket.approvalRequired;$('delivery-issuer').hidden=!allowed('admin')||state.ctx?.credentialSource!=='configured';controls();}
  async function load(){await work(async(s,v)=>{const [context,printers]=await Promise.all([json('/api/v1/session',{},s),json('/api/v1/printers',{},s)]);ensure(s,v);state.ctx=context;options('delivery-printer',printers.printers.map(p=>[p.id,p.id]),'choosePrinter');state.loaded=true;$('delivery-pages').placeholder=t('allRendered');await Promise.all([colors(s,v),history(s,v)]);ensure(s,v);if($('delivery-printer').value)await capabilities(s,v);if(state.uncertain)await recover(s,v,state.uncertain);});}
  function renderPrinter(){window.JripPrinterStatus.render({snapshot:state.printerSnapshot,error:state.printerError,loading:state.printerLoading,selected:$('delivery-printer').value});}
+ // Stored observations are display-only: never populate state.caps or approval.
+ async function storedPrinter(s,v,id,capVersion){
+  try{
+   const result=await json(`/api/v1/printers/${encodeURIComponent(id)}/observations?limit=1`,{},s);
+   ensure(s,v);if(capVersion!==state.capV||id!==$('delivery-printer').value)return;
+   const latest=result.latest,live=latest?.snapshot;
+   state.printerSnapshot=live?.profile==='org.jrip.printer-state-snapshot-v1'&&Number.isFinite(latest.lastObservedAt)
+    ?{id,live,observedAt:latest.lastObservedAt,expiresAt:latest.expiresAt,stored:true}:null;
+   state.printerError=Boolean(latest?.queryFailure);renderPrinter();
+  }catch(error){if(error instanceof Stale||error.status===401||error.status===403)throw error;/* A cache failure must not suppress a live query. */}
+ }
  async function capabilities(s,v,preserveCopies=false){
   invalidate();if(!preserveCopies)state.caps=null;
   const id=$('delivery-printer').value,capVersion=++state.capV;
   if(state.printerSnapshot?.id!==id)state.printerSnapshot=null;
   state.printerError=false;state.printerLoading=Boolean(id);renderPrinter();controls();if(!id)return;
   try{
+   await storedPrinter(s,v,id,capVersion);
+   ensure(s,v);if(capVersion!==state.capV||id!==$('delivery-printer').value)return;
    const result=await json(`/api/v1/print/capabilities?printerId=${encodeURIComponent(id)}`,{},s);
    ensure(s,v);if(capVersion!==state.capV||id!==$('delivery-printer').value)return;
    const live=result.stages.find(stage=>stage.capability.stage==='printer')?.capability.extensions['org.jrip.printer'];
-   state.printerSnapshot={id,live,observedAt:result.observedAt,expiresAt:result.expiresAt};
+   state.printerSnapshot={id,live,observedAt:result.observedAt,expiresAt:result.expiresAt};state.printerError=false;
    state.caps=result.deliveryIntersection;state.caps.target=live?.configuredColorTarget;
    const cap=state.caps;options('delivery-media',cap.media.map(m=>[m.name,`${m.widthMicrons/1000} × ${m.heightMicrons/1000} mm · ${m.name}`]),null);
    options('delivery-sides',cap.deliverySides.map(side=>[side,t({'one-sided':'oneSided','two-sided-long-edge':'longEdge','two-sided-short-edge':'shortEdge'}[side])]),null);
