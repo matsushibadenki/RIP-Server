@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {mkdir} from 'node:fs/promises';
 const url=process.env.JRIP_UI_URL;assert(url);
 const browser=await chromium.launch({headless:true,executablePath:process.env.JRIP_CHROMIUM_PATH||undefined});
-const context=await browser.newContext({viewport:{width:1440,height:1000}});const page=await context.newPage();const errors=[];const writes=[];
+const context=await browser.newContext({viewport:{width:1440,height:1000},locale:'en-US'});const page=await context.newPage();const errors=[];const writes=[];
 page.on('pageerror',e=>errors.push(e.message));page.on('console',m=>{if(['warning','error'].includes(m.type())&&!/Failed to load resource.*(400|503)/.test(m.text()))errors.push(m.text());});
 page.on('request',r=>{if(r.method()!=='GET')writes.push(r.url());});
 const wait=async f=>{for(let i=0;i<200;i++){if(await f())return;await page.waitForTimeout(50);}throw Error('state timeout');};
@@ -16,10 +16,10 @@ try{
  await page.locator('#printer-dashboard > summary').click();await wait(()=>page.locator('#dashboard-printer option').count().then(n=>n===3));
  assert.equal(await page.locator('header').count(),1);const initial=await queries();await select('p1');
  await wait(()=>page.locator('#dashboard-printer-live').getAttribute('data-source').then(v=>v==='stored'));
- assert((await page.locator('#dashboard-printer-conditions').innerText()).includes('紙詰まり'));
+ assert((await page.locator('#dashboard-printer-conditions').innerText()).includes('Paper jam'));
  assert.equal(await queries(),initial,'open/select only reads stored evidence');
- for(const [lang,label] of [['en','Saved report'],['ja','保存済みの報告'],['zh-CN','已保存报告']]){
-  await page.locator('#language').selectOption(lang);assert((await page.locator('#dashboard-printer-query-state').innerText()).includes(label));
+ for(const [lang,label,notice] of [['en','Saved report','Paper jam'],['ja','保存済みの報告','紙詰まり'],['zh-CN','已保存报告','卡纸']]){
+  await page.locator('#language').selectOption(lang);assert((await page.locator('#dashboard-printer-query-state').innerText()).includes(label));assert((await page.locator('#dashboard-printer-conditions').innerText()).includes(notice));
   for(const width of [320,375,430,1440]){await page.setViewportSize({width,height:1000});assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),`${lang}/${width}`);}
  }
  const screenshots=process.env.JRIP_UI_SCREENSHOTS;
