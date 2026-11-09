@@ -7,6 +7,8 @@
 
 ## 当面の優先順位：一般RIPの実用度
 
+🟢 [Done] ジョブ／原稿未選択でも使える独立プリンター状態パネル。保存情報の読取と明示的な最新照会を分離し、読取専用権限・機器切替の応答競合・切断／再接続・3言語と狭幅を検証。[詳細](CONSOLE-PRINTER-STATUS.md)。 / Independent no-job printer status panel / 无作业也可用的独立打印机状态面板。
+
 🟢 [Done] 操作画面で再起動後の保存済みプリンター状態を復元。前回観測時刻・期限・失敗を区別し、能力確認／承認へ流用しない。App再生成と実ブラウザー再読込、3言語・狭幅・復旧を検証。[詳細](CONSOLE-PRINTER-STATUS.md)。 / Console restores saved printer reports after restart without granting capabilities or approval / 操作界面重启后恢复保存设备报告，不授予能力或审批。
 
 🟢 [Done] 機器観測resourceのMCP購読をstdio／HTTP-SSEへ接続。stream変更・履歴欠落・解除／復旧・再接続・権限を検証。購読自体は機器をpollしない。[詳細](MCP-PRINTER-SUBSCRIPTIONS.md)。 / MCP printer observation subscriptions / MCP设备观察订阅。

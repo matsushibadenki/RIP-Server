@@ -24,7 +24,7 @@ Zero is visible; unknown, unsupported and absent values remain distinct. Only pe
 
 Validation / 検証 / 验证: real local Chrome + Playwright, isolated Rust HTTP server, mock IPP and actual Docker color conversion. EN/JA/zh-CN at 320/375/430/1440px; zero/unknown/units, localized recovery tooltips, malformed reports, expiry, failed-query recovery, long/HTML-like labels, input preservation, approval invalidation and read-only credentials are exercised alongside the existing print/cancel/reload/lost-response flow. Screenshots are QA artifacts outside the repository. Browser skill was unavailable; installed Chrome was used without installing browser dependencies.
 
-🟠 [Next] Subscriptions and a printer dashboard independent of a completed raster job / 購読・原稿出力欄に依存しない機器画面 / 订阅及独立于已完成光栅作业的设备界面。
+🟠 [Next] Push subscriptions / push購読 / push订阅。
 
 ⭕️ [Pending] Real-device labels, supply accuracy and vendor recovery procedures / 実機ラベル・残量精度・機種別復旧手順 / 实机标签、余量精度及厂商恢复步骤。
 
@@ -39,3 +39,15 @@ Validation / 検証 / 验证: real local Chrome + Playwright, isolated Rust HTTP
 🟢 [Done] 选择或刷新打印机时，先读取已认证的观察历史，恢复状态、通知、耗材及上次成功观察时间，再查询实时能力。成功后替换为实时显示。明确标记已保存报告，并分别显示过期和查询失败。读取历史不会查询设备、延长有效期或打印。缓存不会恢复纸张、份数、双面能力、输出确认或审批。没有保存证据时清空显示；取消选择或变更会话时移除旧数据。缓存API故障不阻止实时查询。仍位于已完成作业的实体输出面板，不包含自动选择设备或持续订阅。
 
 Tests reopen the Rust application/repository after persisting a fake-device report, reload the browser with failed live queries, and check EN/JA/zh-CN at 320/375/430/1440px. Expired/missing cache, cache failure with live recovery, disabled stale review and unchanged device-query counters are covered. / 模擬機器の状態保存後にAppとRepositoryを再生成し、ブラウザー再読込・3言語／各画面幅・期限切れ・履歴なし・履歴障害時の復旧・能力確認禁止・機器照会件数不変を検証する。 / 保存模拟设备报告后重建App与Repository，验证浏览器重载、三语言／各宽度、过期、无历史、缓存故障恢复、禁止缓存能力确认及设备查询计数不变。
+
+## Independent printer panel / 独立プリンターパネル / 独立打印机面板
+
+🟢 [Done] 接続後の「プリンター」パネルはジョブ0件・原稿未選択でも利用できる。パネルを開くと登録一覧を取得し、機器を選ぶと保存済み観測だけを読む。更新アイコンで選択機器の最新能力を明示照会し、失敗時は保存報告・時刻を残す。画面内タイマーは期限表示を更新するだけで、機器へ接続しない。一覧更新で登録変更を反映し、空登録・保存履歴なしは不明／未報告として扱う。プリンター切替・パネル閉鎖・切断をversionで区別し、遅い応答で別の機器やセッションを上書きしない。
+
+このパネルはjobs:readで利用でき、投入・取消・再送・承認・出力条件変更を行わない。実機出力欄のreview／approvalは所有しない。最新表示も印刷承認や消耗品充足の証明にはならない。既存の実機出力欄は独自の能力照合と承認を引き続き行う。表示rendererのみ共有し、機器選択と状態は独立する。登録一覧を横断して全機器へ自動照会することもない。
+
+🟢 [Done] After connecting, the Printers panel works with zero jobs and no selected document. Opening reads registrations; selection only reads stored observations. Its refresh icon explicitly queries the selected device and retains stored evidence/time on failure. The local timer only updates expiry labels. Reloading registrations reflects configuration changes; absent registrations/history remain unknown or unreported. Version guards fence late responses across device switches, panel closure and disconnects. The jobs:read view never submits, cancels, retries, approves or modifies delivery reviews. It shares the renderer, not delivery state. Current reports are not approval or proof of sufficient supplies; physical output retains its own capability checks and approval. No automatic fanout to devices is performed.
+
+🟢 [Done] 连接后可在零作业、未选择原稿时使用打印机面板。打开时读取注册列表，选择设备只读取保存观察；刷新图标明确查询所选设备，失败时保留保存报告及时间。界面定时器仅更新过期提示。刷新注册列表反映配置变化，无注册或历史时显示未知／未报告。版本检查防止切换设备、关闭面板及断开会话后被延迟响应覆盖。jobs:read界面不提交、取消、重试、审批或修改投递确认，只共享renderer，不共享输出状态。实时报告不代表审批或耗材充足；实体输出仍独立检查能力及审批。不自动查询所有设备。
+
+Validation: no-job Rust HTTP fixture with a fake IPP backend and a reopened repository; read-only credential; explicit query counters; failed response, device-switch race, disconnect/reconnect; EN/JA/zh-CN at 320/375/430/1440px. Real-printer accuracy remains Pending. / ジョブなし・Repository再生成・模擬IPP・読取専用資格情報で照会件数、失敗、切替競合、切断／再接続と3言語／各画面幅を検証。実機精度はPending。 / 无作业、重建Repository、模拟IPP与只读凭据下验证查询计数、失败、切换竞争、断开／重连及三语言／各宽度；实体设备精度仍为Pending。

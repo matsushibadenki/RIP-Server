@@ -36,3 +36,10 @@ pub async fn printer_status_script() -> Response {
         "text/javascript; charset=utf-8",
     )
 }
+
+pub async fn printer_dashboard_script() -> Response {
+    asset(
+        include_str!("../ui/printer-dashboard.js"),
+        "text/javascript; charset=utf-8",
+    )
+}

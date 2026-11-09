@@ -26,8 +26,8 @@ window.JripPrinterStatus=(()=>{
  function info(message){const button=element('button','icon printer-info','ⓘ');button.type='button';button.title=message;button.setAttribute('aria-label',message);return button;}
  function numeric(value){return Number.isInteger(value)&&value>=0;}
  function status(key){return Object.hasOwn(labels[language],`S_${key}`)?t(`S_${key}`):t('S_UNKNOWN');}
- function sourceList(id,source,report,items,pwg){
-  const root=$(id);root.replaceChildren();
+ function sourceList(id,source,report,items,pwg,prefix){
+  const root=document.getElementById(prefix+id);root.replaceChildren();
   if(report?.status!=='REPORTED'||!Array.isArray(items)||!items.length){const row=element('div','supply-empty');row.append(element('small','source-tag',source),element('span','muted',status(report?.status==='REPORTED'?'UNREPORTED':report?.status==='INVALID_RESPONSE'?'INVALID_RESPONSE':(pwg?report?.attributeState:report?.levelsAttributeState)||'UNREPORTED')));if(report?.status==='INVALID_RESPONSE')row.append(info(`${report.messages?.[language]||t('S_INVALID_RESPONSE')} · ${report.reasonCode||''}`));root.append(row);return;}
   for(const item of items){
    const name=(pwg?item.description?.text:item.name)||fallbackName(item);
@@ -44,11 +44,12 @@ window.JripPrinterStatus=(()=>{
    root.append(card);
   }
  }
- function render({snapshot,error,loading,selected}){
+ function render({snapshot,error,loading,selected,prefix=''}){
+  const $=id=>document.getElementById(prefix+id);
   const root=$('printer-live');root.hidden=!selected;if(!selected){for(const id of ['printer-facts','printer-conditions','printer-pwg-supplies','printer-cups-supplies'])$(id).replaceChildren();$('printer-query-state').textContent='';$('printer-snapshot-content').hidden=true;return;}
   const expired=Boolean(snapshot&&(!Number.isFinite(snapshot.expiresAt)||snapshot.expiresAt*1000<=Date.now()));
   const stale=Boolean(error||expired);
-  root.dataset.source=snapshot?.stored?'stored':'live';root.dataset.stale=String(stale);root.setAttribute('aria-busy',String(Boolean(loading)));
+  root.dataset.source=snapshot?(snapshot.stored?'stored':'live'):'none';root.dataset.stale=String(stale);root.setAttribute('aria-busy',String(Boolean(loading)));
   const date=Number.isFinite(snapshot?.observedAt)?new Date(snapshot.observedAt*1000).toLocaleString(language):'';
   const queryLabel=error?t(snapshot?'printerQueryFailed':'Q_UNAVAILABLE'):snapshot?t(stale?'printerSnapshotExpired':'printerSnapshotCurrent'):'';
   const parts=[snapshot?.stored?t('printerSnapshotStored'):null,queryLabel,error&&expired?t('printerSnapshotExpired'):null,date,loading?t('loading'):null].filter(Boolean);
@@ -62,8 +63,8 @@ window.JripPrinterStatus=(()=>{
   for(const condition of live.conditions?.conditions||[]){const severity=['error','warning','report'].includes(condition.severity)?condition.severity:'unknown';const row=element('li',`printer-condition condition-${severity}`);const label=condition.known&&reasonKeys[condition.reason]?t(reasonKeys[condition.reason]):`${t('C_unknown')} · ${condition.rawReason}`;row.append(element('span','condition-symbol',severity==='report'?'ⓘ':'!'),element('span','condition-label',label),info([condition.rawReason,condition.severity,condition.recovery?.messages?.[language]].filter(Boolean).join(' · ')));notices.append(row);}
   if(!notices.children.length)notices.append(element('li','muted printer-no-notices',t(live.conditions?.reasonEvidence==='NO_REASONS_REPORTED'?'printerNoNotices':'printerNoticesUnknown')));
   if(live.conditions?.inconsistencies?.length){const row=element('li','printer-condition condition-warning');row.append(element('span','condition-label',t('printerInconsistent')),info(live.conditions.inconsistencies.join(', ')));notices.append(row);}
-  sourceList('printer-pwg-supplies','PWG',live.printerSupplies,live.printerSupplies?.supplies,true);
-  sourceList('printer-cups-supplies','CUPS',live.markerSupplies,live.markerSupplies?.markers,false);
+  sourceList('printer-pwg-supplies','PWG',live.printerSupplies,live.printerSupplies?.supplies,true,prefix);
+  sourceList('printer-cups-supplies','CUPS',live.markerSupplies,live.markerSupplies?.markers,false,prefix);
  }
  return {render};
 })();

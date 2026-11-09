@@ -26,7 +26,7 @@ function translate() {
  $('preview-message').textContent=t(previewMessageKey);
  renderPageOptions();
  if(noticeKey) notify(noticeKey,noticeDetail);
- renderJobs(); renderDetails();window.JripDelivery?.translate();
+ renderJobs(); renderDetails();window.JripDelivery?.translate();window.JripPrinterDashboard?.translate();
 }
 function resetPreview(message='selectJob') {
  previewMessageKey=message;previewVersion++; if(previewURL) URL.revokeObjectURL(previewURL); previewURL=null;
@@ -35,7 +35,7 @@ function resetPreview(message='selectJob') {
 }
 function disconnect() {
  session?.abort.abort(); session=null; clearTimeout(timer); operation=false; refreshing=false;
- window.JripDelivery?.reset(true);jobs=[];selected=null;pages=[];pagesLoaded=false;offset=0;selectionVersion++;resetPreview();
+ window.JripDelivery?.reset(true);window.JripPrinterDashboard?.reset();jobs=[];selected=null;pages=[];pagesLoaded=false;offset=0;selectionVersion++;resetPreview();
  $('page').replaceChildren();$('page').disabled=true;$('token').value='';
  notify('');translate();controls();
 }

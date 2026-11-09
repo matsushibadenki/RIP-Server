@@ -103,6 +103,10 @@ pub fn router(app: App) -> Router {
         .route("/console/app.js", get(console::script))
         .route("/console/delivery.js", get(console::delivery_script))
         .route(
+            "/console/printer-dashboard.js",
+            get(console::printer_dashboard_script),
+        )
+        .route(
             "/console/printer-status.js",
             get(console::printer_status_script),
         )
