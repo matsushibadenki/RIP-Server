@@ -146,7 +146,3 @@ PDF-only IPP is not an AirPrint/IPP Everywhere conformance claim. LAN deployment
 - [MCP](docs/MCP-HTTP.md) · [ACX lifecycle](docs/ACX-LIFECYCLE.md)
 - [Retention / 保持期限 / 保留期限](docs/ARTIFACT-RETENTION.md) · [Maintenance / 清掃 / 清理](docs/MAINTENANCE.md)
 - [Development specification / 開発仕様 / 开发规格](docs/RIP-Server開発仕様書.md) · [ROADMAP](docs/ROADMAP.md)
-
-## スクリーンショット / Screenshots / 截图
-
-実ブラウザー・検証原稿・模擬プリンターによる操作画面です。 / Real-browser test captures with owned documents and a fake printer. / 使用测试原稿与模拟设备的真实浏览器截图。
