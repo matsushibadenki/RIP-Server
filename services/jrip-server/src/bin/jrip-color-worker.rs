@@ -3,6 +3,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .init();
+    let mut shutdown = jrip_server::shutdown::Signals::new()?;
     let app = jrip_server::open(
         std::env::var("JRIP_DATA_ROOT")
             .unwrap_or_else(|_| "data".into())
@@ -15,7 +16,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Err(error) = jrip_server::color::tick(&app).await {
             tracing::error!(%error,"color worker pass failed");
         }
-        tokio::select! { _=tokio::time::sleep(std::time::Duration::from_secs(1))=>{},_=tokio::signal::ctrl_c()=>break }
+        tokio::select! { _=tokio::time::sleep(std::time::Duration::from_secs(1))=>{},_=shutdown.wait()=>break }
     }
     Ok(())
 }

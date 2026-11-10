@@ -68,6 +68,26 @@ impl Repository {
         path: &Path,
         signer: Option<receipts::ReceiptSigner>,
     ) -> Result<Self, StorageError> {
+        // All services initialize the same schema at startup. Serialize that work
+        // across processes; SQLite busy_timeout cannot resolve competing read-to-
+        // write upgrades inside installation transactions.
+        let mut lock_path = path.as_os_str().to_os_string();
+        lock_path.push(".init.lock");
+        let initialization = tokio::task::spawn_blocking(move || {
+            let mut options = std::fs::OpenOptions::new();
+            options.create(true).read(true).write(true).truncate(false);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let file = options.open(std::path::PathBuf::from(lock_path))?;
+            file.lock()?;
+            Ok::<_, std::io::Error>(file)
+        })
+        .await
+        .map_err(|error| StorageError::Db(sqlx::Error::Io(std::io::Error::other(error))))?
+        .map_err(|error| StorageError::Db(sqlx::Error::Io(error)))?;
         let pool = SqlitePoolOptions::new()
             .max_connections(4)
             .connect_with(
@@ -165,6 +185,7 @@ impl Repository {
         retention::install(&pool).await?;
         receipts::install(&pool, signer.as_ref()).await?;
         unified::install(&pool).await?;
+        drop(initialization);
         Ok(Self {
             pool,
             receipt_signer: signer.map(std::sync::Arc::new),

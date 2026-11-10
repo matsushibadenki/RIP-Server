@@ -6,6 +6,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_writer(std::io::stderr)
         .init();
+    let mut shutdown = jrip_server::shutdown::Signals::new()?;
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args == ["--help"] {
         println!(
@@ -41,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         tracing::info!(printers=app.printers.len(),configuration=?config,"printer observer started");
         jrip_server::printer_observer::run_until(&app, config, async {
-            let _ = tokio::signal::ctrl_c().await;
+            shutdown.wait().await;
         })
         .await;
     }

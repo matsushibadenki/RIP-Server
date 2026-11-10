@@ -7,6 +7,8 @@
 
 ## 当面の優先順位：一般RIPの実用度
 
+🟢 [Done] ローカル基本運用向け一括起動・事前診断・worker自動連携。既定ファイル出力、明示的な承認付き実機モード、異常時の全停止・処理passの終了待ち・再起動を整備。[詳細](LOCAL-RUNTIME.md)。 / Managed local RIP runtime and preflight / 本地RIP统一运行与预检。
+
 🟢 [Done] 独立プリンターパネルの保存状態をREST SSEで自動更新。Bearer認証、cursor再接続、通知経路と機器照会失敗の区別、切替／切断時の解放を3言語・狭幅と実ブラウザーで検証。[詳細](CONSOLE-PRINTER-SUBSCRIPTIONS.md)。 / Automatic console printer subscriptions / 操作界面打印机自动订阅。
 
 🟢 [Done] 保存済み機器状態の認証付きREST SSE。最新snapshot集約、照会時刻更新、stream／cursorの再開、認可失効、共有接続上限、実HTTPと切断解放を検証。購読自体は機器へ接続しない。[詳細](PRINTER-OBSERVATION-STREAM.md)。 / Authenticated coalesced printer observation SSE / 认证合并设备观察SSE。

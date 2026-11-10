@@ -9,6 +9,7 @@ use uuid::Uuid;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().json().init();
+    let mut shutdown = jrip_server::shutdown::Signals::new()?;
     let once = match std::env::args().nth(1).as_deref() {
         None => false,
         Some("--once") => true,
@@ -52,7 +53,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         offset += 100;
     }
-    let mut shutdown = Box::pin(tokio::signal::ctrl_c());
     loop {
         for id in repo.recover_expired_leases(rip_storage::now()).await? {
             tracing::warn!(job_id=%id, "expired worker lease recovered as failed");
@@ -72,7 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut stop = false;
             let status = tokio::select! {
                 status = child.wait() => status?,
-                _ = &mut shutdown => {
+                _ = shutdown.wait() => {
                     stop = true;
                     tracing::info!(job_id=%job.id, "waiting for current worker before shutdown");
                     child.wait().await?
@@ -101,7 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(2)) => {},
-                _ = &mut shutdown => break,
+                _ = shutdown.wait() => break,
             }
         }
     }

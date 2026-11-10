@@ -8,6 +8,7 @@ jobs.sqlite3
 jobs.sqlite3-wal
 jobs.sqlite3-shm
 jobs.sqlite3-journal
+jobs.sqlite3.init.lock
 
 # Local environment and secrets (keep shareable configuration examples)
 .env

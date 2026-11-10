@@ -2,7 +2,9 @@
 use super::*;
 use serde_json::{Value, json};
 pub(crate) async fn install(pool: &SqlitePool) -> Result<(), StorageError> {
-    let mut tx = pool.begin().await?;
+    // Acquire the writer slot before schema reads; an existing worker can
+    // commit between no-op CREATEs and the migration INSERT during restart.
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     sqlx::query("CREATE TABLE IF NOT EXISTS print_event_log(sequence INTEGER PRIMARY KEY AUTOINCREMENT,kind TEXT NOT NULL,subject TEXT NOT NULL,origin_sequence INTEGER NOT NULL,historical INTEGER NOT NULL DEFAULT 0,UNIQUE(kind,origin_sequence))").execute(&mut *tx).await?;
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS print_event_subject ON print_event_log(kind,subject,sequence)",

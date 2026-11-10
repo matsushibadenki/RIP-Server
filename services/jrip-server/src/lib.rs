@@ -38,6 +38,8 @@ mod printer_observation_stream;
 pub mod printer_observer;
 mod retention;
 mod retry;
+pub mod runtime;
+pub mod shutdown;
 mod source_descriptor;
 pub mod source_validation;
 use authorization::authorize;
