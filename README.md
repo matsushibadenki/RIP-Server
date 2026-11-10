@@ -87,16 +87,16 @@ curl -H "Authorization: Bearer $JRIP_API_TOKEN" \
   http://127.0.0.1:8080/api/v1/jobs
 ```
 
-| 操作 / Operation / 操作 | Endpoint |
-|---|---|
-| ヘルスチェック / API liveness / API存活 | `GET /health` |
-| 投入・一覧 / Submit/list / 提交与列表 | `POST/GET /api/v1/jobs` |
-| 状態・revision / Job state / 作业状态 | `GET /api/v1/jobs/{id}` |
-| 成果物 / Artifacts / 成果物 | `GET /api/v1/jobs/{id}/artifacts` |
-| ダウンロード / Download / 下载 | `GET /api/v1/jobs/{id}/artifacts/{name}` |
-| プレビュー / Preview / 预览 | `GET /api/v1/jobs/{id}/artifacts/{name}/preview` |
-| 設定済み機器 / Destinations / 已配置设备 | `GET /api/v1/printers` |
-| 保存状態の通知 / Stored-state SSE / 保存状态通知 | `GET /api/v1/printers/{id}/observations/stream` |
+| 操作 / Operation / 操作                          | Endpoint                                         |
+| ------------------------------------------------ | ------------------------------------------------ |
+| ヘルスチェック / API liveness / API存活          | `GET /health`                                    |
+| 投入・一覧 / Submit/list / 提交与列表            | `POST/GET /api/v1/jobs`                          |
+| 状態・revision / Job state / 作业状态            | `GET /api/v1/jobs/{id}`                          |
+| 成果物 / Artifacts / 成果物                      | `GET /api/v1/jobs/{id}/artifacts`                |
+| ダウンロード / Download / 下载                   | `GET /api/v1/jobs/{id}/artifacts/{name}`         |
+| プレビュー / Preview / 预览                      | `GET /api/v1/jobs/{id}/artifacts/{name}/preview` |
+| 設定済み機器 / Destinations / 已配置设备         | `GET /api/v1/printers`                           |
+| 保存状態の通知 / Stored-state SSE / 保存状态通知 | `GET /api/v1/printers/{id}/observations/stream`  |
 
 原稿上限32 MiB、DPI 72〜2400、色はRGB／CMYK／Gray。PDFは既定MuPDF、PS／EPSはGhostscript、PDFのGhostscript明示指定も可能です。失敗時にエンジンを暗黙変更しません。workerは原稿hash・構造・サイズ・フォント情報を検査してから描画し、公開前にTIFFを検証します。成果物の取得も登録サイズ・SHA-256を再確認します。
 
@@ -124,11 +124,11 @@ Acceptance uses only private temporary data and a localhost fake printer: automa
 
 ## 範囲と運用資料 / Scope and guides / 范围及指南
 
-| 状態 / Status / 状态 | 内容 / Scope / 内容 |
-|---|---|
-| 🟢 [Done] | 自動RIP・TIFF・ICC・操作画面・キュー・承認・Native IPP配送・MCP／ACX基盤 / Automatic RIP, color, console, queue, approval and Native IPP delivery / 自动RIP、色彩、界面、队列、审批及Native IPP投递 |
-| ⭕️ [Pending] | 実プリンターの品質・両面・取消・障害復旧、Mac／Windowsドライバー受入 / Physical device and driver acceptance / 实体设备及驱动验收 |
-| 🔴 [Later] | 特色・DeviceN・Trapping・ハーフトーン・CMYK16等 / Advanced press features / 特色、DeviceN、补漏白、网点及CMYK16等 |
+| 状態 / Status / 状态 | 内容 / Scope / 内容                                                                                                                                                                                 |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 🟢 [Done]            | 自動RIP・TIFF・ICC・操作画面・キュー・承認・Native IPP配送・MCP／ACX基盤 / Automatic RIP, color, console, queue, approval and Native IPP delivery / 自动RIP、色彩、界面、队列、审批及Native IPP投递 |
+| ⭕️ [Pending]         | 実プリンターの品質・両面・取消・障害復旧、Mac／Windowsドライバー受入 / Physical device and driver acceptance / 实体设备及驱动验收                                                                   |
+| 🔴 [Later]           | 特色・DeviceN・Trapping・ハーフトーン・CMYK16等 / Advanced press features / 特色、DeviceN、补漏白、网点及CMYK16等                                                                                   |
 
 PDFだけのIPP受付をAirPrint／IPP Everywhere適合とは呼びません。LAN公開はTLS終端・認可を含めて配備し、IPPのLAN受付は明示許可が必要です。Windowsの一括起動・共有NFS・クラウド構成は別の受入範囲です。
 
@@ -150,9 +150,3 @@ PDF-only IPP is not an AirPrint/IPP Everywhere conformance claim. LAN deployment
 ## スクリーンショット / Screenshots / 截图
 
 実ブラウザー・検証原稿・模擬プリンターによる操作画面です。 / Real-browser test captures with owned documents and a fake printer. / 使用测试原稿与模拟设备的真实浏览器截图。
-
-![J-RIP operator console / 操作画面 / 操作界面](docs/images/operator-console-desktop.png)
-
-<details><summary>モバイル / Mobile / 移动端</summary>
-<p><img src="docs/images/physical-output-mobile-ja.png" alt="実機出力・日本語 / Physical output in Japanese / 日文实体输出" width="320"> <img src="docs/images/physical-output-mobile-zh-CN.png" alt="実機出力・简体中文 / Physical output in Simplified Chinese / 简体中文实体输出" width="320"></p>
-</details>
