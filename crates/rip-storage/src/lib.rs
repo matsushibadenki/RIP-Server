@@ -115,6 +115,7 @@ impl Repository {
         sqlx::query("CREATE INDEX IF NOT EXISTS job_events_cursor ON job_events(job_id,sequence)")
             .execute(&pool)
             .await?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS ipp_forward_routes(job_id TEXT PRIMARY KEY, payload TEXT NOT NULL, cancelled INTEGER NOT NULL DEFAULT 0)").execute(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS ipp_jobs (ipp_id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL UNIQUE)").execute(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS worker_leases (job_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, expires_at INTEGER NOT NULL)").execute(&pool).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS print_preflights (id TEXT PRIMARY KEY, payload TEXT NOT NULL, expires_at INTEGER NOT NULL)").execute(&pool).await?;
@@ -440,11 +441,65 @@ impl Repository {
         Ok(serde_json::from_str(row.get("payload"))?)
     }
     pub async fn register_ipp_job(&self, id: Uuid) -> Result<i32, StorageError> {
+        self.register_ipp_forward_job(id, None).await
+    }
+    pub async fn register_ipp_forward_job(
+        &self,
+        id: Uuid,
+        route: Option<&rip_core::ipp_forward::IppForward>,
+    ) -> Result<i32, StorageError> {
+        let mut tx = self.pool.begin().await?;
         let result = sqlx::query("INSERT INTO ipp_jobs(job_id) VALUES(?)")
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        let ipp_id =
+            i32::try_from(result.last_insert_rowid()).map_err(|_| StorageError::Conflict)?;
+        if let Some(route) = route {
+            sqlx::query("INSERT INTO ipp_forward_routes(job_id,payload) VALUES(?,?)")
+                .bind(id.to_string())
+                .bind(serde_json::to_string(route)?)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(ipp_id)
+    }
+    pub async fn ipp_forward_route(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<(rip_core::ipp_forward::IppForward, bool)>, StorageError> {
+        let row = sqlx::query("SELECT payload,cancelled FROM ipp_forward_routes WHERE job_id=?")
+            .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|row| {
+            Ok((
+                serde_json::from_str(row.get("payload"))?,
+                row.get::<i64, _>("cancelled") != 0,
+            ))
+        })
+        .transpose()
+    }
+    pub async fn pending_ipp_forwards(
+        &self,
+    ) -> Result<Vec<(Job, rip_core::ipp_forward::IppForward)>, StorageError> {
+        let rows=sqlx::query("SELECT jobs.payload AS job,ipp_forward_routes.payload AS route FROM ipp_forward_routes JOIN jobs ON jobs.id=ipp_forward_routes.job_id WHERE cancelled=0 AND json_extract(jobs.payload,'$.state') NOT IN ('FAILED','CANCELLED') AND NOT EXISTS(SELECT 1 FROM print_pipelines WHERE print_pipelines.id=ipp_forward_routes.job_id) LIMIT 100").fetch_all(&self.pool).await?;
+        rows.iter()
+            .map(|r| {
+                Ok((
+                    serde_json::from_str(r.get("job"))?,
+                    serde_json::from_str(r.get("route"))?,
+                ))
+            })
+            .collect()
+    }
+    pub async fn cancel_ipp_forward(&self, id: Uuid) -> Result<(), StorageError> {
+        sqlx::query("UPDATE ipp_forward_routes SET cancelled=1 WHERE job_id=?")
             .bind(id.to_string())
             .execute(&self.pool)
             .await?;
-        i32::try_from(result.last_insert_rowid()).map_err(|_| StorageError::Conflict)
+        Ok(())
     }
     pub async fn get_ipp_job(&self, ipp_id: i32) -> Result<Job, StorageError> {
         let row = sqlx::query("SELECT job_id FROM ipp_jobs WHERE ipp_id=?")
@@ -699,7 +754,7 @@ impl Repository {
         if !job.state.terminal() {
             return Err(StorageError::Conflict);
         }
-        let result = sqlx::query("DELETE FROM jobs WHERE id=? AND revision=? AND NOT EXISTS(SELECT 1 FROM print_pipelines p WHERE p.source_job=jobs.id AND p.state NOT IN ('COMPLETED','FAILED','CANCELLED')) AND NOT EXISTS(SELECT 1 FROM color_attempts c WHERE c.source_job=jobs.id AND (c.state IN ('QUEUED','RUNNING') OR EXISTS(SELECT 1 FROM color_cleanup cc WHERE cc.attempt_id=c.id)))")
+        let result = sqlx::query("DELETE FROM jobs WHERE id=? AND revision=? AND NOT EXISTS(SELECT 1 FROM print_pipelines p WHERE p.source_job=jobs.id AND p.state NOT IN ('COMPLETED','FAILED','CANCELLED')) AND NOT EXISTS(SELECT 1 FROM deliveries d WHERE json_extract(d.payload,'$.ticket.sourceJob')=jobs.id AND d.state NOT IN ('COMPLETED','CANCELLED','ABORTED','REJECTED')) AND NOT EXISTS(SELECT 1 FROM color_attempts c WHERE c.source_job=jobs.id AND (c.state IN ('QUEUED','RUNNING') OR EXISTS(SELECT 1 FROM color_cleanup cc WHERE cc.attempt_id=c.id)))")
             .bind(job.id.to_string())
             .bind(job.revision)
             .execute(&self.pool)

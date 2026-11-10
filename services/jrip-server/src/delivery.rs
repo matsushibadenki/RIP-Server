@@ -183,6 +183,8 @@ pub fn load() -> Result<Vec<Printer>, Box<dyn std::error::Error>> {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Request {
+    #[serde(default)]
+    placement: Option<rip_core::placement::Placement>,
     request_id: Uuid,
     #[serde(default = "rip_core::print::default_copies")]
     copies: u32,
@@ -332,6 +334,13 @@ async fn prepare_impl(
     if !(1..=rip_core::print::MAX_DELIVERY_COPIES).contains(&req.copies) {
         return Err(bad("invalid_copies"));
     }
+    if req
+        .placement
+        .as_ref()
+        .is_some_and(|p| p.validate().is_err())
+    {
+        return Err(bad("invalid_placement"));
+    }
     let job = app.repo.get(id).await?;
     if job.state != JobState::Completed || job.revision != req.expected_revision {
         return Err(ApiError(StatusCode::CONFLICT, "revision_conflict"));
@@ -358,12 +367,13 @@ async fn prepare_impl(
     } else {
         job.manifest.color_mode
     };
-    let (color, kind) = match selected_color {
+    let (mut color, mut kind) = match selected_color {
         rip_core::ColorMode::Rgb => (rip_raster::Color::DeviceRgb, "rgb_8"),
         rip_core::ColorMode::Cmyk => (rip_raster::Color::DeviceCmyk, "cmyk_8"),
         rip_core::ColorMode::Gray => (rip_raster::Color::Black, "black_8"),
     };
     let mut ticket = DeliveryTicket {
+        placement: req.placement,
         page_ranges: req.page_ranges,
         copies: req.copies,
         sides: req.sides,
@@ -406,7 +416,8 @@ async fn prepare_impl(
         None
     };
     if !preview && let Ok(existing) = app.repo.delivery(req.request_id).await {
-        if existing.ticket.sides == ticket.sides
+        if existing.ticket.placement == ticket.placement
+            && existing.ticket.sides == ticket.sides
             && existing.ticket.page_ranges == ticket.page_ranges
             && existing.ticket.copies == ticket.copies
             && existing.ticket.source_job == id
@@ -427,6 +438,28 @@ async fn prepare_impl(
         }
         return Err(ApiError(StatusCode::CONFLICT, "delivery_request_conflict"));
     }
+    let capabilities = backend(&app, printer)
+        .map_err(|_| bad("invalid_printer"))?
+        .capabilities()
+        .await
+        .map_err(|_| bad("printer_unavailable"))?;
+    // MuPDF RGB output uses its standard sRGB device profile. Never relabel a
+    // color-managed artifact: its registered output ICC must remain explicit.
+    if selected_color == rip_core::ColorMode::Rgb
+        && (job.selected_engine == Some(rip_core::EngineKind::MuPdf)
+            || app.repo.ipp_forward_route(id).await?.is_some())
+        && color_result.is_none()
+        && capabilities
+            .check_pwg(ticket.dpi, "rgb_8", &ticket.media)
+            .is_err()
+        && capabilities
+            .check_pwg(ticket.dpi, "srgb_8", &ticket.media)
+            .is_ok()
+    {
+        color = rip_raster::Color::Srgb;
+        kind = "srgb_8";
+    }
+    ticket.document_type = kind.into();
     let approval = if preview {
         None
     } else {
@@ -439,11 +472,6 @@ async fn prepare_impl(
         )
         .await?
     };
-    let capabilities = backend(&app, printer)
-        .map_err(|_| bad("invalid_printer"))?
-        .capabilities()
-        .await
-        .map_err(|_| bad("printer_unavailable"))?;
     capabilities
         .check_pwg(ticket.dpi, kind, &ticket.media)
         .map_err(|_| bad("unsupported_printer_profile"))?;
@@ -487,7 +515,7 @@ async fn prepare_impl(
         .iter()
         .map(|&index| &artifacts[index])
         .try_fold(0u64, |sum, a| sum.checked_add(a.bytes))
-        .is_none_or(|sum| sum > 32 * 1024 * 1024)
+        .is_none_or(|sum| sum > 64 * 1024 * 1024)
     {
         return Err(bad("delivery_input_too_large"));
     }
@@ -506,6 +534,8 @@ async fn prepare_impl(
             artifacts::verified_snapshot(&app, id, &a.name).await?
         });
     }
+    let placement = ticket.placement;
+    let media_dimensions = [media.width_microns, media.height_microns];
     let sides = ticket.sides;
     let sheet_back = ticket.sheet_back;
     let dpi = ticket.dpi;
@@ -518,33 +548,56 @@ async fn prepare_impl(
             .collect();
         let mut bytes = Vec::new();
         let options = rip_raster::Options { dpi, color };
-        match sides {
-            rip_core::print::Sides::OneSided => rip_raster::convert_registered(
-                &paths,
-                &options,
-                expected_icc.as_deref(),
-                &mut bytes,
-            ),
-            rip_core::print::Sides::TwoSidedLongEdge => rip_raster::convert_duplex(
-                &paths,
-                &options,
-                expected_icc.as_deref(),
-                rip_raster::DuplexLayout {
+        if let Some(placement) = placement {
+            let duplex = match sides {
+                rip_core::print::Sides::OneSided => None,
+                rip_core::print::Sides::TwoSidedLongEdge => Some(rip_raster::DuplexLayout {
                     binding: rip_raster::DuplexBinding::LongEdge,
                     sheet_back,
-                },
-                &mut bytes,
-            ),
-            rip_core::print::Sides::TwoSidedShortEdge => rip_raster::convert_duplex(
+                }),
+                rip_core::print::Sides::TwoSidedShortEdge => Some(rip_raster::DuplexLayout {
+                    binding: rip_raster::DuplexBinding::ShortEdge,
+                    sheet_back,
+                }),
+            };
+            rip_raster::convert_positioned(
                 &paths,
                 &options,
                 expected_icc.as_deref(),
-                rip_raster::DuplexLayout {
-                    binding: rip_raster::DuplexBinding::ShortEdge,
-                    sheet_back,
-                },
+                &placement,
+                media_dimensions,
+                duplex,
                 &mut bytes,
-            ),
+            )
+        } else {
+            match sides {
+                rip_core::print::Sides::OneSided => rip_raster::convert_registered(
+                    &paths,
+                    &options,
+                    expected_icc.as_deref(),
+                    &mut bytes,
+                ),
+                rip_core::print::Sides::TwoSidedLongEdge => rip_raster::convert_duplex(
+                    &paths,
+                    &options,
+                    expected_icc.as_deref(),
+                    rip_raster::DuplexLayout {
+                        binding: rip_raster::DuplexBinding::LongEdge,
+                        sheet_back,
+                    },
+                    &mut bytes,
+                ),
+                rip_core::print::Sides::TwoSidedShortEdge => rip_raster::convert_duplex(
+                    &paths,
+                    &options,
+                    expected_icc.as_deref(),
+                    rip_raster::DuplexLayout {
+                        binding: rip_raster::DuplexBinding::ShortEdge,
+                        sheet_back,
+                    },
+                    &mut bytes,
+                ),
+            }
         }
         .map_err(|e| e.to_string())?;
         for p in raster_pages(&bytes, sides, sheet_back).map_err(|e| e.to_string())? {
@@ -564,6 +617,9 @@ async fn prepare_impl(
         "delivery":ticket,"printerConfigSha256":format!("{:x}",Sha256::digest(serde_json::to_vec(printer).map_err(internal)?)),
         "copies":ticket.copies,"sides":ticket.sides,"pageSelection":ticket.page_ranges.label(),"numberUp":1,"imposition":"none",
         "completionMeaning":"device-confirmed","approvalRequired":app.require_print_approval});
+    if let Some(placement) = ticket.placement {
+        physical["placement"] = serde_json::json!(placement);
+    }
     if !ticket.sides.is_simplex() {
         physical["sheetBack"] = serde_json::json!(ticket.sheet_back);
     }
@@ -779,7 +835,7 @@ pub async fn tick(app: &App) -> Result<(), StorageError> {
                 let (printer, media) = registered(app, &d)
                     .await
                     .map_err(|_| rip_printer::Error::InvalidInput)?;
-                let bytes = read(app, d.id, "pwg", 32 * 1024 * 1024)
+                let bytes = read(app, d.id, "pwg", 64 * 1024 * 1024)
                     .await
                     .map_err(|_| rip_printer::Error::InvalidInput)?;
                 validate(&bytes, &d.ticket, &media)

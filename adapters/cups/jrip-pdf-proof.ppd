@@ -39,7 +39,7 @@
 *DefaultPaperDimension: A4.Fullbleed
 *PaperDimension A4.Fullbleed: "595.28 841.89"
 *PaperDimension Letter.Fullbleed: "612 792"
-*DefaultResolution: 600dpi
+*DefaultResolution: 300dpi
 *OpenUI *Resolution/Resolution: PickOne
 *OrderDependency: 20 AnySetup *Resolution
 *Resolution 300dpi/300 dpi: ""

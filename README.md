@@ -1,5 +1,7 @@
 # RIP-Server / J-RIP
 
+<img src="docs/images/rip-server-image.png">
+
 PDF・PostScript・EPSを受け取り、MuPDF／Ghostscriptで描画し、TIFF出力・ICC色変換・結果確認・承認付きプリンター配送まで扱う、ローカル／エッジ向けRIPサーバーです。操作画面は **`/console`**。SQLiteへジョブと証跡を保存します。
 
 Local/edge RIP server: PDF/PS/EPS → isolated MuPDF/Ghostscript → TIFF → explicit ICC processing → reviewed/approved printer delivery. Jobs and evidence persist in SQLite; the operator console supports English, Japanese and Simplified Chinese.

@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DeliveryTicket {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<rip_core::placement::Placement>,
     pub source_job: Uuid,
     #[serde(
         default = "rip_core::print::default_copies",
@@ -210,6 +212,13 @@ impl Repository {
         approval: Option<Uuid>,
         contract: Option<serde_json::Value>,
     ) -> Result<Delivery, StorageError> {
+        if ticket
+            .placement
+            .as_ref()
+            .is_some_and(|p| p.validate().is_err())
+        {
+            return Err(StorageError::Conflict);
+        }
         if (ticket.sides.is_simplex() && !ticket.sheet_back.is_normal())
             || !(1..=rip_core::print::MAX_DELIVERY_COPIES).contains(&ticket.copies)
             || ticket.printer_id.is_empty()
@@ -224,11 +233,11 @@ impl Repository {
                 .bytes()
                 .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
             || ticket.artifact_bytes == 0
-            || ticket.artifact_bytes > 32 * 1024 * 1024
+            || ticket.artifact_bytes > 64 * 1024 * 1024
             || !(72..=2400).contains(&ticket.dpi)
             || !matches!(
                 ticket.document_type.as_str(),
-                "rgb_8" | "cmyk_8" | "black_8"
+                "rgb_8" | "srgb_8" | "cmyk_8" | "black_8"
             )
             || ticket.media.is_empty()
             || ticket.media.len() > 128
@@ -701,6 +710,7 @@ mod tests {
         };
         repo.insert(&source).await.unwrap();
         let ticket = DeliveryTicket {
+            placement: None,
             page_ranges: Default::default(),
             sides: Default::default(),
             sheet_back: Default::default(),

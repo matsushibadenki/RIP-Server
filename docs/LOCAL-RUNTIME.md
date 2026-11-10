@@ -61,3 +61,39 @@ Ready只验证启动时HTTP响应及进程存活，不保证持续Docker／设�
 ```sh
 cargo test -p jrip-server --test runtime managed_stack --locked -- --ignored --nocapture
 ```
+
+MacからRICOHへの自動印刷は[専用手順](MAC-RICOH-PRINT.md)を参照してください。 / See the dedicated Mac physical forwarding guide. / Mac实体自动打印参见专用指南。
+
+
+## Job list actions / ジョブ一覧の操作 / 任务列表操作
+
+🟢 [Done] ジョブ見出しの下に原本プレビューと情報、その下に一覧を配置。各行のフォルダーアイコンで登録済みTIFFをFinderで選択し、ごみ箱アイコンで終了済みジョブを削除できます。削除は確認とrevision照合を伴い、原稿・ラスターは保存期限の管理まで保持します。実行中の色変換・pipeline・実機配送（UNKNOWNを含む）があるジョブは削除できません。削除承認を必須にしている場合は確認画面で承認IDを入力してください。
+
+FinderはmacOSサーバー側で開きます。このMacのloopback APIで明示的に`JRIP_LOCAL_FINDER=1`を設定した管理者のみ利用できます。`POST /api/v1/jobs/{id}/reveal` はクライアント指定パスを受け付けず、登録済み成果物と実パスを照合して`open -R`します。LAN APIでは有効にできません。`GET /api/v1/console/actions` はログイン主体に許可された操作を返します。
+
+English: The original preview and metadata sit between the Jobs heading and table. Folder buttons reveal registered TIFF output in Finder; trash buttons remove terminal jobs after confirmation and revision checking. Source/raster files remain for explicit retention cleanup. Active color, pipeline or physical deliveries (including UNKNOWN) prevent deletion. Required deletion approvals are entered in the dialog. Finder opens on the macOS server, requires explicit `JRIP_LOCAL_FINDER=1`, admin authentication and a loopback API/peer; client paths are never accepted.
+
+简体中文: 原稿预览和信息位于任务标题与列表之间。文件夹按钮在Finder中选中已登记的TIFF；垃圾桶按钮在确认及版本检查后删除已结束任务。原稿／光栅保留供保留期限清理。存在活动色彩处理、流程或实体投递（含UNKNOWN）时禁止删除；若启用了删除审批，须输入审批ID。Finder在macOS服务器上打开，要求显式设置`JRIP_LOCAL_FINDER=1`、管理员认证及loopback API／连接，不接受客户端文件路径。
+
+## Workspace tabs / 操作タブ / 操作选项卡
+
+🟢 [Done] 左から「ジョブ」「実機出力」「プリンター」。初期表示と新規接続はジョブ。原稿投入はジョブタブ内に表示し、タブ間で選択ジョブと出力設定を保持します。左右矢印・Home・Endキーでも切替できます。実機出力にはラスター生成済みジョブを選択してください。
+
+Tabs are ordered Jobs, Physical output, Printers, defaulting to Jobs. Switching tabs preserves the selected job and output settings. Arrow/Home/End keyboard navigation is supported.
+
+选项卡依次为任务、实体输出、打印机，默认任务。切换时保留所选任务与输出设置，支持方向键、Home及End。
+
+
+## LAN console / LANからの接続 / 局域网访问
+
+`JRIP_LAN_LISTEN=192.168.200.14:8080` のように、このホストのプライベートIPとポートを明示すると、既存のloopback APIにLAN用HTTPリスナーを追加します。`JRIP_LISTEN=127.0.0.1:8080` は維持します。LAN側も同じデータ・認証・承認ポリシーを使用し、Finder操作だけを無効にします。再起動後も `.env.local` の設定を読み込んで起動してください。DHCPでIPが変わった場合はLAN設定を更新します。IPPの公開設定とは独立です。
+
+接続先は `http://<LAN-IP>:<port>/console`。APIトークンは接続画面へ入力します。URLや共有リンクに含めません。認証なしのジョブ・成果物取得は拒否します。サーバーの待受・HTTP応答の確認と、別端末からの到達確認は区別します。
+
+English: Set `JRIP_LAN_LISTEN` to a specific private address assigned to this host and a nonzero port to add a LAN HTTP console alongside the loopback API. It shares data, authentication and approval policies; desktop Finder actions are disabled on this listener. Open `/console` and enter an existing API token. IPP exposure is independent. Update the configured address if DHCP changes it.
+
+简体中文: 将`JRIP_LAN_LISTEN`设置为本机明确的私有IP及非零端口，保留loopback API并添加局域网HTTP界面。共用数据、认证及审批策略，LAN入口禁用Finder操作。访问`/console`并输入已有API令牌，勿将令牌放入URL。IPP公开设置独立；DHCP地址变化时须更新配置。
+
+⭕️ [Pending] 別端末からの到達確認。 / Connection acceptance from another device / 另一台设备的连接验收。
+
+右端のフォントタブは[実RIPフォント一覧](FONT-CATALOG.md)を表示します。 / The right-aligned Fonts tab shows the verified RIP font catalog. / 右侧字体选项卡显示已验证的RIP字体列表。

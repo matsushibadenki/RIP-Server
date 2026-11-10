@@ -290,6 +290,35 @@ pub async fn tick(app: &App) -> Result<bool, Box<dyn std::error::Error>> {
         Err(std::fs::TryLockError::WouldBlock) => return Ok(false),
         Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
     }
+    // Only intake-time routes are eligible; historical proof jobs have no route.
+    for (source, route) in app.repo.pending_ipp_forwards().await? {
+        if matches!(source.state, JobState::Failed | JobState::Cancelled) {
+            continue;
+        }
+        let Some(printer) = app
+            .printers
+            .iter()
+            .find(|p| p.id == route.printer_id && p.uri == route.printer_uri)
+        else {
+            tracing::warn!(job_id=%source.id,"IPP forward target changed or unavailable");
+            continue;
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", format!("Bearer {}", app.token).parse()?);
+        let req = Request {
+            request_id: source.id,
+            copies: 1,
+            sides: Default::default(),
+            page_ranges: Default::default(),
+            expected_revision: source.revision,
+            printer_id: printer.id.clone(),
+            media: route.media,
+            color: None,
+        };
+        if let Err(error) = create(State(app.clone()), headers, Path(source.id), Json(req)).await {
+            tracing::warn!(job_id=%source.id,?error,"IPP forward registration deferred");
+        }
+    }
     let ids = app.repo.active_pipelines().await?;
     let worked = !ids.is_empty();
     for id in ids {

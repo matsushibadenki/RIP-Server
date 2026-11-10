@@ -1,9 +1,9 @@
 'use strict';
 const $ = id => document.getElementById(id);
 const texts = {
- en:{sourcePreview:'Source preview',pageRanges:'Page range',allPages:'All pages',pageRangesHelp:'PDF source pages, for example 2-3,5. Leave blank for all. Use ascending, non-overlapping ranges from 1 to 100. Other formats require all pages.',rangesInvalid:'Use ascending, non-overlapping page ranges from 1 to 100, for example 2-3,5.',rangesPdfOnly:'Page ranges require a PDF. Clear the range to submit PS or EPS.',sourcePage:'Source page',sourcePages:'Source pages',emptySelection:'No source pages matched the requested range.',connect:'Connect',disconnect:'Disconnect',newJob:'New job',file:'File',choose:'Choose a file or drop it here',resolution:'Resolution · dpi',color:'Color',gray:'Gray',engine:'Engine',automatic:'Automatic',priority:'Priority',submit:'Submit',jobs:'Jobs',name:'Name',state:'State',updated:'Updated',refresh:'Refresh',previous:'Previous',next:'Next',preview:'Preview',previewHelp:'Screen preview, not a color proof. CMYK requires a matching embedded ICC. Completed means raster export, not physical printing.',selectJob:'Select a job',page:'Page',hold:'Hold',release:'Release',cancel:'Cancel',close:'Close',tokenHelp:'Token stays in memory only. Disconnect or reload to clear it.',disconnected:'Connect to view jobs',empty:'No jobs',loading:'Loading…',noPreview:'Preview is available after raster export',unsupported:'This page cannot be previewed. Check its ICC and raster format.',fileInvalid:'Choose a PDF, PS or EPS document, up to 32 MiB.',ambiguous:'Submission was not confirmed. Refresh the queue before submitting again.',submitted:'Job submitted',cancelled:'Job cancelled',held:'Job held',released:'Job released',rejected:'The server rejected this request. Check settings.',network:'Connection failed. Check the server and refresh.',expired:'Session expired. Connect again.',denied:'Your credential does not allow this operation.',conflict:'Job changed. Refresh and try again.',id:'ID',pages:'Pages',error:'Error',unknown:'—',QUEUED:'Queued',RIPPING:'Rendering',COMPLETED:'Raster exported',CANCELLED:'Cancelled',FAILED:'Failed',HELD:'Held',RECEIVED:'Received',VALIDATING:'Validating',PREFLIGHT:'Preflight',SPOOLING:'Spooling',COLOR_PROCESSING:'Color processing',HALFTONING:'Halftoning',PRINTING:'Printing'},
- ja:{sourcePreview:'原本プレビュー',pageRanges:'ページ範囲',allPages:'全ページ',pageRangesHelp:'PDFの原稿ページを2-3,5のように指定します。空欄は全ページ。1〜100の昇順・重複なしで指定してください。PS・EPSは全ページです。',rangesInvalid:'1〜100の昇順・重複なしで指定してください（例：2-3,5）。',rangesPdfOnly:'ページ範囲にはPDFが必要です。PS・EPSは範囲を空欄にしてください。',sourcePage:'原稿ページ',sourcePages:'原稿ページ数',emptySelection:'指定範囲に該当する原稿ページはありません。',connect:'接続',disconnect:'切断',newJob:'原稿を投入',file:'原稿',choose:'原稿を選択・ドロップ',resolution:'解像度 · dpi',color:'色空間',gray:'グレー',engine:'エンジン',automatic:'自動',priority:'優先度',submit:'投入',jobs:'ジョブ',name:'原稿名',state:'状態',updated:'更新',refresh:'更新',previous:'前へ',next:'次へ',preview:'プレビュー',previewHelp:'配置確認用です。色校正ではありません。CMYKには一致する埋め込みICCが必要です。完了はラスター出力を表し、実機印刷の完了ではありません。',selectJob:'ジョブを選択',page:'ページ',hold:'保留',release:'再開',cancel:'取消',close:'閉じる',tokenHelp:'トークンはメモリ内だけに保持します。切断・再読み込みで消去します。',disconnected:'接続するとジョブを表示します',empty:'ジョブはありません',loading:'読み込み中…',noPreview:'ラスター出力後に表示できます',unsupported:'このページは表示できません。ICCとラスター形式を確認してください。',fileInvalid:'32 MiB以下のPDF・PS・EPS原稿を選択してください。',ambiguous:'投入の完了を確認できませんでした。キューを更新してから再投入してください。',submitted:'投入しました',cancelled:'取り消しました',held:'保留しました',released:'再開しました',rejected:'要求が拒否されました。設定を確認してください。',network:'接続できません。サーバーを確認して更新してください。',expired:'認証が失効しました。再接続してください。',denied:'この操作の権限がありません。',conflict:'ジョブが更新されています。再確認してください。',id:'ID',pages:'ページ数',error:'エラー',unknown:'—',QUEUED:'待機中',RIPPING:'描画中',COMPLETED:'ラスター出力済み',CANCELLED:'取消済み',FAILED:'失敗',HELD:'保留中',RECEIVED:'受付済み',VALIDATING:'検証中',PREFLIGHT:'プリフライト',SPOOLING:'保存中',COLOR_PROCESSING:'色変換中',HALFTONING:'網点処理中',PRINTING:'印刷中'},
- 'zh-CN':{sourcePreview:'原稿预览',pageRanges:'页码范围',allPages:'全部页面',pageRangesHelp:'指定PDF原稿页，例如2-3,5。留空表示全部。请按升序指定1至100内不重叠的范围。PS及EPS需要全部页。',rangesInvalid:'请按升序指定1至100内不重叠的范围，例如2-3,5。',rangesPdfOnly:'页码范围需要PDF。提交PS或EPS时请清空范围。',sourcePage:'原稿页',sourcePages:'原稿页数',emptySelection:'指定范围没有匹配的原稿页。',connect:'连接',disconnect:'断开',newJob:'提交原稿',file:'原稿',choose:'选择或拖入原稿',resolution:'分辨率 · dpi',color:'色彩空间',gray:'灰度',engine:'引擎',automatic:'自动',priority:'优先级',submit:'提交',jobs:'任务',name:'原稿名',state:'状态',updated:'更新',refresh:'刷新',previous:'上一页',next:'下一页',preview:'预览',previewHelp:'仅供版面检查，不用于色彩校样。CMYK需要匹配的嵌入ICC。完成表示光栅导出，不表示实机打印完成。',selectJob:'选择任务',page:'页码',hold:'暂停',release:'恢复',cancel:'取消',close:'关闭',tokenHelp:'令牌仅保存在内存中。断开或刷新页面后清除。',disconnected:'连接后显示任务',empty:'没有任务',loading:'加载中…',noPreview:'光栅导出后可预览',unsupported:'无法预览此页，请检查ICC及光栅格式。',fileInvalid:'请选择不超过32 MiB的PDF、PS或EPS原稿。',ambiguous:'未确认提交结果，请刷新队列后再提交。',submitted:'已提交',cancelled:'已取消',held:'已暂停',released:'已恢复',rejected:'请求被拒绝，请检查设置。',network:'连接失败，请检查服务器并刷新。',expired:'认证已失效，请重新连接。',denied:'没有执行此操作的权限。',conflict:'任务已更新，请刷新确认。',id:'ID',pages:'页数',error:'错误',unknown:'—',QUEUED:'排队中',RIPPING:'渲染中',COMPLETED:'光栅已导出',CANCELLED:'已取消',FAILED:'失败',HELD:'已暂停',RECEIVED:'已接收',VALIDATING:'验证中',PREFLIGHT:'预检',SPOOLING:'保存中',COLOR_PROCESSING:'色彩转换中',HALFTONING:'加网中',PRINTING:'打印中'}
+ en:{busy:'Preview processing is busy. Please try again shortly.',sourcePreview:'Source preview',pageRanges:'Page range',allPages:'All pages',pageRangesHelp:'PDF source pages, for example 2-3,5. Leave blank for all. Use ascending, non-overlapping ranges from 1 to 100. Other formats require all pages.',rangesInvalid:'Use ascending, non-overlapping page ranges from 1 to 100, for example 2-3,5.',rangesPdfOnly:'Page ranges require a PDF. Clear the range to submit PS or EPS.',sourcePage:'Source page',sourcePages:'Source pages',emptySelection:'No source pages matched the requested range.',connect:'Connect',disconnect:'Disconnect',newJob:'New job',file:'File',choose:'Choose a file or drop it here',resolution:'Resolution · dpi',color:'Color',gray:'Gray',engine:'Engine',automatic:'Automatic',priority:'Priority',submit:'Submit',jobs:'Jobs',name:'Name',state:'State',updated:'Updated',refresh:'Refresh',previous:'Previous',next:'Next',preview:'Preview',previewHelp:'Screen preview, not a color proof. CMYK requires a matching embedded ICC. Completed means raster export, not physical printing.',selectJob:'Select a job',page:'Page',hold:'Hold',release:'Release',cancel:'Cancel',close:'Close',tokenHelp:'Token stays in memory only. Disconnect or reload to clear it.',disconnected:'Connect to view jobs',empty:'No jobs',loading:'Loading…',noPreview:'Preview is available after raster export',unsupported:'This page cannot be previewed. Check its ICC and raster format.',fileInvalid:'Choose a PDF, PS or EPS document, up to 32 MiB.',ambiguous:'Submission was not confirmed. Refresh the queue before submitting again.',submitted:'Job submitted',cancelled:'Job cancelled',held:'Job held',released:'Job released',rejected:'The server rejected this request. Check settings.',network:'Connection failed. Check the server and refresh.',expired:'Session expired. Connect again.',denied:'Your credential does not allow this operation.',conflict:'Job changed. Refresh and try again.',id:'ID',pages:'Pages',error:'Error',unknown:'—',QUEUED:'Queued',RIPPING:'Rendering',COMPLETED:'Raster exported',CANCELLED:'Cancelled',FAILED:'Failed',HELD:'Held',RECEIVED:'Received',VALIDATING:'Validating',PREFLIGHT:'Preflight',SPOOLING:'Spooling',COLOR_PROCESSING:'Color processing',HALFTONING:'Halftoning',PRINTING:'Printing'},
+ ja:{busy:'プレビュー処理が混み合っています。少し待って再試行してください。',sourcePreview:'原本プレビュー',pageRanges:'ページ範囲',allPages:'全ページ',pageRangesHelp:'PDFの原稿ページを2-3,5のように指定します。空欄は全ページ。1〜100の昇順・重複なしで指定してください。PS・EPSは全ページです。',rangesInvalid:'1〜100の昇順・重複なしで指定してください（例：2-3,5）。',rangesPdfOnly:'ページ範囲にはPDFが必要です。PS・EPSは範囲を空欄にしてください。',sourcePage:'原稿ページ',sourcePages:'原稿ページ数',emptySelection:'指定範囲に該当する原稿ページはありません。',connect:'接続',disconnect:'切断',newJob:'原稿を投入',file:'原稿',choose:'原稿を選択・ドロップ',resolution:'解像度 · dpi',color:'色空間',gray:'グレー',engine:'エンジン',automatic:'自動',priority:'優先度',submit:'投入',jobs:'ジョブ',name:'原稿名',state:'状態',updated:'更新',refresh:'更新',previous:'前へ',next:'次へ',preview:'プレビュー',previewHelp:'配置確認用です。色校正ではありません。CMYKには一致する埋め込みICCが必要です。完了はラスター出力を表し、実機印刷の完了ではありません。',selectJob:'ジョブを選択',page:'ページ',hold:'保留',release:'再開',cancel:'取消',close:'閉じる',tokenHelp:'トークンはメモリ内だけに保持します。切断・再読み込みで消去します。',disconnected:'接続するとジョブを表示します',empty:'ジョブはありません',loading:'読み込み中…',noPreview:'ラスター出力後に表示できます',unsupported:'このページは表示できません。ICCとラスター形式を確認してください。',fileInvalid:'32 MiB以下のPDF・PS・EPS原稿を選択してください。',ambiguous:'投入の完了を確認できませんでした。キューを更新してから再投入してください。',submitted:'投入しました',cancelled:'取り消しました',held:'保留しました',released:'再開しました',rejected:'要求が拒否されました。設定を確認してください。',network:'接続できません。サーバーを確認して更新してください。',expired:'認証が失効しました。再接続してください。',denied:'この操作の権限がありません。',conflict:'ジョブが更新されています。再確認してください。',id:'ID',pages:'ページ数',error:'エラー',unknown:'—',QUEUED:'待機中',RIPPING:'描画中',COMPLETED:'ラスター出力済み',CANCELLED:'取消済み',FAILED:'失敗',HELD:'保留中',RECEIVED:'受付済み',VALIDATING:'検証中',PREFLIGHT:'プリフライト',SPOOLING:'保存中',COLOR_PROCESSING:'色変換中',HALFTONING:'網点処理中',PRINTING:'印刷中'},
+ 'zh-CN':{busy:'预览处理繁忙，请稍后重试。',sourcePreview:'原稿预览',pageRanges:'页码范围',allPages:'全部页面',pageRangesHelp:'指定PDF原稿页，例如2-3,5。留空表示全部。请按升序指定1至100内不重叠的范围。PS及EPS需要全部页。',rangesInvalid:'请按升序指定1至100内不重叠的范围，例如2-3,5。',rangesPdfOnly:'页码范围需要PDF。提交PS或EPS时请清空范围。',sourcePage:'原稿页',sourcePages:'原稿页数',emptySelection:'指定范围没有匹配的原稿页。',connect:'连接',disconnect:'断开',newJob:'提交原稿',file:'原稿',choose:'选择或拖入原稿',resolution:'分辨率 · dpi',color:'色彩空间',gray:'灰度',engine:'引擎',automatic:'自动',priority:'优先级',submit:'提交',jobs:'任务',name:'原稿名',state:'状态',updated:'更新',refresh:'刷新',previous:'上一页',next:'下一页',preview:'预览',previewHelp:'仅供版面检查，不用于色彩校样。CMYK需要匹配的嵌入ICC。完成表示光栅导出，不表示实机打印完成。',selectJob:'选择任务',page:'页码',hold:'暂停',release:'恢复',cancel:'取消',close:'关闭',tokenHelp:'令牌仅保存在内存中。断开或刷新页面后清除。',disconnected:'连接后显示任务',empty:'没有任务',loading:'加载中…',noPreview:'光栅导出后可预览',unsupported:'无法预览此页，请检查ICC及光栅格式。',fileInvalid:'请选择不超过32 MiB的PDF、PS或EPS原稿。',ambiguous:'未确认提交结果，请刷新队列后再提交。',submitted:'已提交',cancelled:'已取消',held:'已暂停',released:'已恢复',rejected:'请求被拒绝，请检查设置。',network:'连接失败，请检查服务器并刷新。',expired:'认证已失效，请重新连接。',denied:'没有执行此操作的权限。',conflict:'任务已更新，请刷新确认。',id:'ID',pages:'页数',error:'错误',unknown:'—',QUEUED:'排队中',RIPPING:'渲染中',COMPLETED:'光栅已导出',CANCELLED:'已取消',FAILED:'失败',HELD:'已暂停',RECEIVED:'已接收',VALIDATING:'验证中',PREFLIGHT:'预检',SPOOLING:'保存中',COLOR_PROCESSING:'色彩转换中',HALFTONING:'加网中',PRINTING:'打印中'}
 };
 let language = navigator.language.startsWith('ja') ? 'ja' : navigator.language.startsWith('zh') ? 'zh-CN' : 'en';
 let session = null, jobs = [], selected = null, offset = 0, timer, refreshing = false, operation = false;
@@ -14,7 +14,7 @@ const t = key => texts[language][key] || key;
 const engineName = job => ({mupdf:'MuPDF',ghostscript:'Ghostscript'})[job.selected_engine||job.manifest.engine]||t('automatic');
 const terminal = state => ['COMPLETED','CANCELLED','FAILED'].includes(state);
 class Stale extends Error {}
-function notify(key, detail='') { $('notice').className=['submitted','cancelled','held','released','outputChecked','outputApproved','outputQueued','outputCancelled','outputRecovered'].includes(key)?'success':'error'; noticeKey=key; noticeDetail=detail; $('notice').textContent=t(key); if(detail){const code=document.createElement('small');code.textContent=detail;$('notice').append(code);} }
+function notify(key, detail='') { $('notice').className=['deleted','revealed','submitted','cancelled','held','released','outputChecked','outputApproved','outputQueued','outputCancelled','outputRecovered'].includes(key)?'success':'error'; noticeKey=key; noticeDetail=detail; $('notice').textContent=t(key); if(detail){const code=document.createElement('small');code.textContent=detail;$('notice').append(code);} }
 function translate() {
  document.documentElement.lang=language; $('language').value=language;
  document.querySelectorAll('[data-i18n]').forEach(el=>{el.textContent=t(el.dataset.i18n);});
@@ -26,7 +26,7 @@ function translate() {
  $('preview-message').textContent=t(previewMessageKey);
  renderPageOptions();
  if(noticeKey) notify(noticeKey,noticeDetail);
- renderJobs(); renderDetails();window.JripDelivery?.translate();window.JripPrinterDashboard?.translate();
+ renderJobs(); renderDetails();window.JripDelivery?.translate();window.JripPrinterDashboard?.translate();window.JripFonts?.translate();window.JripTabs?.sync();
 }
 function resetPreview(message='selectJob') {
  previewMessageKey=message;previewVersion++; if(previewURL) URL.revokeObjectURL(previewURL); previewURL=null;
@@ -34,8 +34,9 @@ function resetPreview(message='selectJob') {
  $('preview-message').hidden=false; $('preview-message').textContent=t(message);
 }
 function disconnect() {
+ window.JripTabs?.reset();
  session?.abort.abort(); session=null; clearTimeout(timer); operation=false; refreshing=false;
- window.JripDelivery?.reset(true);window.JripPrinterDashboard?.reset();jobs=[];selected=null;pages=[];pagesLoaded=false;offset=0;selectionVersion++;resetPreview();
+ window.JripJobActions?.reset();window.JripDelivery?.reset(true);window.JripPrinterDashboard?.reset();jobs=[];selected=null;pages=[];pagesLoaded=false;offset=0;selectionVersion++;resetPreview();
  $('page').replaceChildren();$('page').disabled=true;$('token').value='';
  notify('');translate();controls();
 }
@@ -68,7 +69,7 @@ async function json(path, options={}, s=session){ return (await request(path,opt
 function report(error, submission=false) {
  if(error instanceof Stale) return;
  if(error.status===401)return;
- notify(error.status===403?'denied':error.status===409?'conflict':submission&&!error.status?'ambiguous':error.status?'rejected':'network', error.status ? `${error.status}${error.code?` · ${error.code}`:''}` : '');
+ notify(error.status===503&&error.code==='artifact_budget_exhausted'?'busy':error.status===403?'denied':error.status===409?'conflict':submission&&!error.status?'ambiguous':error.status?'rejected':'network', error.status ? `${error.status}${error.code?` · ${error.code}`:''}` : '');
 }
 function renderJobs() {
  $('jobs').replaceChildren();
@@ -77,6 +78,7 @@ function renderJobs() {
   const name=document.createElement('td'), button=document.createElement('button');button.className='job-select';button.textContent=job.manifest.name;button.title=job.manifest.name;button.setAttribute('aria-pressed',String(selected?.id===job.id));button.onclick=()=>selectJob(job);name.append(button);row.append(name);
   const state=document.createElement('td'), badge=document.createElement('span');badge.className=`badge ${job.state}`;badge.textContent=t(job.state);state.append(badge);row.append(state);
   for(const value of [engineName(job),new Date(job.updated_at*1000).toLocaleString(language)]){const td=document.createElement('td');td.textContent=value;row.append(td);}
+  row.append(window.JripJobActions?.cell(job)||document.createElement('td'));
   $('jobs').append(row);
  }
  $('empty').hidden=jobs.length>0;$('empty').textContent=t(session?'empty':'disconnected');
@@ -124,7 +126,15 @@ async function showPage(){
  if(!selected||!$('page').value)return;
  const s=session,id=selected.id,name=$('page').value;resetPreview('loading');const version=previewVersion;
  try{
-  const response=await request(`/api/v1/jobs/${encodeURIComponent(id)}/artifacts/${encodeURIComponent(name)}/preview`,{},s);
+  let response;
+  for(let attempt=0;attempt<4;attempt++){
+   if(s!==session||version!==previewVersion)return;
+   try{response=await request(`/api/v1/jobs/${encodeURIComponent(id)}/artifacts/${encodeURIComponent(name)}/preview`,{},s);break;}
+   catch(error){
+    if(error.status!==503||error.code!=='artifact_budget_exhausted'||attempt===3)throw error;
+    await new Promise(resolve=>setTimeout(resolve,250*2**attempt));
+   }
+  }
   const blob=await response.blob();if(s!==session||version!==previewVersion)return;
   previewURL=URL.createObjectURL(blob);$('preview-image').src=previewURL;$('preview-image').hidden=false;$('preview-message').hidden=true;
  }catch(error){if(s===session&&version===previewVersion){resetPreview('unsupported');if(error.status!==422)report(error);}}
@@ -190,7 +200,7 @@ $('login-form').onsubmit=async event=>{
  const token=$('token').value.trim();$('token').value='';if(!token)return;
  session={token,abort:new AbortController()};const s=session;
  const button=$('login-form').querySelector('[type=submit]');button.disabled=true;
- try{jobs=await json('/api/v1/jobs?limit=50&offset=0',{},s);if(s!==session)return;$('login').close();notify('');translate();controls();schedule();}
+ try{jobs=await json('/api/v1/jobs?limit=50&offset=0',{},s);if(s!==session)return;await window.JripJobActions?.load(s);if(s!==session)return;$('login').close();notify('');translate();controls();schedule();}
  catch(error){if(s===session)disconnect();report(error);}
  finally{button.disabled=false;}
 };

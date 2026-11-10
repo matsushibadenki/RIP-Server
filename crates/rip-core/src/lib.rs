@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 pub mod font_programs;
 pub mod font_usage;
+pub mod ipp_forward;
 pub mod pages;
+pub mod placement;
 pub mod print;
 pub mod printer_conditions;
 

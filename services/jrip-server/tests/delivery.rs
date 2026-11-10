@@ -224,6 +224,7 @@ async fn color_managed_delivery_requires_matching_target_and_binds_attempt() {
 }
 #[derive(Clone)]
 struct Fake {
+    srgb_only: Arc<AtomicUsize>,
     document: Arc<std::sync::Mutex<Vec<u8>>>,
     copies: Arc<AtomicUsize>,
     copies_max: Arc<AtomicUsize>,
@@ -339,7 +340,15 @@ async fn handle(
                 _=>{},
             }
             r.resolution_dpi("pwg-raster-document-resolution-supported", 72);
-            r.text(0x44, "pwg-raster-document-type-supported", "rgb_8");
+            r.text(
+                0x44,
+                "pwg-raster-document-type-supported",
+                if f.srgb_only.load(Ordering::SeqCst) > 0 {
+                    "srgb_8"
+                } else {
+                    "rgb_8"
+                },
+            );
             r.text(0x44, "media-supported", "custom_square_25.4x25.4mm");
         }
         rip_ipp::PRINT_JOB => {
@@ -501,6 +510,7 @@ async fn fixture_with_source_hash(
         .await
         .unwrap();
     let f = Fake {
+        srgb_only: Arc::new(AtomicUsize::new(0)),
         document: Arc::new(std::sync::Mutex::new(Vec::new())),
         copies: Arc::new(AtomicUsize::new(0)),
         copies_max: Arc::new(AtomicUsize::new(5)),
@@ -2163,6 +2173,7 @@ async fn unified_ticket_rejects_unrelated_attempt_with_same_id() {
         .enqueue_approved_delivery(
             id,
             rip_storage::delivery::DeliveryTicket {
+                placement: None,
                 page_ranges: Default::default(),
                 sides: Default::default(),
                 sheet_back: Default::default(),
@@ -4461,4 +4472,187 @@ async fn operator_console_physical_delivery_is_reviewed_approved_recoverable_and
     assert_eq!(fake.prints.load(Ordering::SeqCst), 3);
     assert_eq!(fake.copies.load(Ordering::SeqCst), 1);
     drop(dir);
+}
+
+#[tokio::test]
+async fn ipp_forward_routes_create_one_pipeline_send_srgb_and_survive_restart() {
+    let (dir, app, job, f, task) = fixture(false).await;
+    f.srgb_only.store(1, Ordering::SeqCst);
+    // A historical proof job must never be automatically forwarded.
+    jrip_server::pipeline::tick(&app).await.unwrap();
+    assert!(app.repo.pipeline(job.id).await.is_err());
+    let route = rip_core::ipp_forward::IppForward {
+        printer_id: "test".into(),
+        printer_uri: app.printers[0].uri.clone(),
+        media: app.printers[0].media[0].name.clone(),
+        dpi: 72,
+    };
+    app.repo
+        .register_ipp_forward_job(job.id, Some(&route))
+        .await
+        .unwrap();
+    jrip_server::pipeline::tick(&app).await.unwrap();
+    let d = app.repo.delivery(job.id).await.unwrap();
+    assert_eq!(d.ticket.document_type, "srgb_8");
+    jrip_server::delivery::tick(&app).await.unwrap();
+    assert_eq!(f.prints.load(Ordering::SeqCst), 1);
+    let pages = rip_raster::inspect(&f.document.lock().unwrap()).unwrap();
+    assert_eq!(pages[0].document_type, "srgb_8");
+    let mut reopened = jrip_server::open(dir.path().into(), "token".into())
+        .await
+        .unwrap();
+    reopened.printers = app.printers.clone();
+    jrip_server::pipeline::tick(&reopened).await.unwrap();
+    jrip_server::delivery::tick(&reopened).await.unwrap();
+    assert_eq!(f.prints.load(Ordering::SeqCst), 1);
+    f.state.store(9, Ordering::SeqCst);
+    jrip_server::delivery::tick(&reopened).await.unwrap();
+    jrip_server::pipeline::tick(&reopened).await.unwrap();
+    assert_eq!(
+        reopened.repo.pipeline(job.id).await.unwrap()["state"],
+        "COMPLETED"
+    );
+    assert_eq!(f.prints.load(Ordering::SeqCst), 1);
+    task.abort();
+}
+
+#[tokio::test]
+async fn job_deletion_waits_for_active_physical_delivery() {
+    let (_dir, app, job, _f, task) = fixture(false).await;
+    let id = Uuid::new_v4();
+    assert_eq!(prepare(&app, &job, id).await, StatusCode::ACCEPTED);
+    assert!(matches!(
+        app.repo.delete(job.clone()).await,
+        Err(rip_storage::StorageError::Conflict)
+    ));
+    let d = app.repo.delivery(id).await.unwrap();
+    app.repo
+        .request_delivery_cancel(id, d.revision)
+        .await
+        .unwrap();
+    app.repo.delete(job).await.unwrap();
+    task.abort();
+}
+
+#[tokio::test]
+async fn placement_is_approved_hashed_persisted_and_sent_without_changing_source() {
+    let (dir, mut app, job, f, task) = fixture(false).await;
+    app.require_print_approval = true;
+    app.credentials = vec![jrip_server::Credential {
+        token: "token".into(),
+        identity: "operator".into(),
+        scopes: vec!["admin".into()],
+        validity: None,
+    }];
+    let source = app.repo.artifacts(job.id).await.unwrap();
+    let id = Uuid::new_v4();
+    let placement = serde_json::json!({"scaleMode":"custom","scaleBasisPoints":5000,"rotation":90,"alignX":1,"alignY":1,"offsetXMicrons":1000,"offsetYMicrons":-1000});
+    let mut body = serde_json::json!({"requestId":id,"expectedRevision":job.revision,"printerId":"test","media":"custom_square_25.4x25.4mm","placement":placement});
+    async fn post(
+        app: &jrip_server::App,
+        path: String,
+        body: &serde_json::Value,
+        grant: Option<Uuid>,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut builder = Request::post(path)
+            .header("authorization", "Bearer token")
+            .header("content-type", "application/json");
+        if let Some(grant) = grant {
+            builder = builder.header("x-jrip-approval-id", grant.to_string());
+        }
+        let response = jrip_server::router(app.clone())
+            .oneshot(builder.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+    let (status, preview) = post(
+        &app,
+        format!("/api/v1/jobs/{}/delivery-preview", job.id),
+        &body,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let mut baseline_body = body.clone();
+    baseline_body.as_object_mut().unwrap().remove("placement");
+    let (baseline_status, baseline) = post(
+        &app,
+        format!("/api/v1/jobs/{}/delivery-preview", job.id),
+        &baseline_body,
+        None,
+    )
+    .await;
+    assert_eq!(baseline_status, StatusCode::OK);
+    assert_ne!(
+        preview["contract"]["ticket"]["delivery"]["artifactSha256"],
+        baseline["contract"]["ticket"]["delivery"]["artifactSha256"]
+    );
+    assert_eq!(
+        preview["contract"]["ticket"]["delivery"]["placement"],
+        placement
+    );
+    assert_eq!(f.prints.load(Ordering::SeqCst), 0);
+    let grant_body = serde_json::json!({"jobId":job.id,"identity":"operator","reason":"Review placed page", "requestId":id,"expectedRevision":job.revision,"printerId":"test","media":"custom_square_25.4x25.4mm","placement":placement});
+    let (status, grant) = post(&app, "/api/v1/approvals".into(), &grant_body, None).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let grant = Uuid::parse_str(grant["id"].as_str().unwrap()).unwrap();
+    body["placement"]["rotation"] = serde_json::json!(180);
+    assert_eq!(
+        post(
+            &app,
+            format!("/api/v1/jobs/{}/deliveries", job.id),
+            &body,
+            Some(grant)
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    body["placement"] = placement.clone();
+    body["expectedTicketSha256"] = preview["contract"]["ticketSha256"].clone();
+    assert_eq!(
+        post(
+            &app,
+            format!("/api/v1/jobs/{}/deliveries", job.id),
+            &body,
+            Some(grant)
+        )
+        .await
+        .0,
+        StatusCode::ACCEPTED
+    );
+    let mut reopened = jrip_server::open(dir.path().into(), "token".into())
+        .await
+        .unwrap();
+    reopened.printers = app.printers.clone();
+    let d = reopened.repo.delivery(id).await.unwrap();
+    assert_eq!(serde_json::to_value(d.ticket.placement).unwrap(), placement);
+    jrip_server::delivery::tick(&reopened).await.unwrap();
+    assert_eq!(f.prints.load(Ordering::SeqCst), 1);
+    let bytes = f.document.lock().unwrap().clone();
+    let pages = rip_raster::inspect(&bytes).unwrap();
+    assert_eq!((pages[0].width, pages[0].height), (72, 72));
+    use sha2::{Digest, Sha256};
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&bytes)),
+        d.ticket.artifact_sha256
+    );
+    assert_eq!(app.repo.artifacts(job.id).await.unwrap(), source);
+    body["placement"]["rotation"] = serde_json::json!(270);
+    assert_eq!(
+        post(
+            &app,
+            format!("/api/v1/jobs/{}/deliveries", job.id),
+            &body,
+            Some(grant)
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(f.prints.load(Ordering::SeqCst), 1);
+    task.abort();
 }

@@ -1,3 +1,5 @@
+import './output-layout.mjs';
+import './preview-retry.mjs';
 import { chromium } from 'playwright';
 import assert from 'node:assert/strict';
 import {mkdir} from 'node:fs/promises';
@@ -14,8 +16,18 @@ const sent=[];page.on('request',r=>{if(r.url().includes('/api/'))sent.push({url:
 const expect=async(fn,message)=>{for(let i=0;i<100;i++){if(await fn())return;await page.waitForTimeout(100);}throw new Error(message);};
 async function connect(value){await page.locator('#connection').click();await page.locator('#token').fill(value);await page.locator('#login-form button[type=submit]').click();}
 try{
+ // Exercise Finder UI without launching a desktop application in the fixture.
+ let reveals=0;
+ await page.route('**/api/v1/console/actions',async route=>{const response=await route.fetch();const data=await response.json();if(response.ok())data.finder=Boolean(data.delete);await route.fulfill({response,json:data});});
+ await page.route('**/api/v1/jobs/*/reveal',async route=>{reveals++;assert.equal(route.request().method(),'POST');await route.fulfill({status:204});});
  await page.goto(url);assert.equal(await page.title(),'J-RIP');
+ assert.deepEqual(await page.getByRole('tab').evaluateAll(tabs=>tabs.map(t=>t.id)),['tab-jobs','tab-output','tab-printers','tab-fonts']);
+ assert.equal(await page.locator('#tab-jobs').getAttribute('aria-selected'),'true');
+ await page.locator('#tab-jobs').focus();await page.keyboard.press('ArrowRight');assert.equal(await page.locator('#tab-output').getAttribute('aria-selected'),'true');assert(await page.locator('#output-tab-empty').isVisible());
+ await page.keyboard.press('End');assert.equal(await page.locator('#tab-fonts').getAttribute('aria-selected'),'true');await page.keyboard.press('Home');assert(await page.locator('#view-jobs').isVisible());
+
  assert.equal(await page.locator('#submit').isDisabled(),true);
+ assert(await page.locator('.queue').evaluate(q=>{const head=q.querySelector('.section-head'),preview=q.querySelector('.inspector'),table=q.querySelector('.table-scroll');return Boolean(head&&preview&&table&&(head.compareDocumentPosition(preview)&Node.DOCUMENT_POSITION_FOLLOWING)&&(preview.compareDocumentPosition(table)&Node.DOCUMENT_POSITION_FOLLOWING));}));
  await connect('invalid-test-token');await expect(async()=>!(await page.locator('#login-form button[type=submit]').isDisabled()),'login completed');
  assert.match(await page.locator('#notice').innerText(),/expired/i);
  await page.locator('#close-login').click();await connect(token);
@@ -112,6 +124,26 @@ try{
  await expect(()=>page.locator('#metadata').innerText().then(v=>v.includes('Queued')),'revision conflict refreshed');
 
 
+ // Font inventory is readable, searchable and names are never HTML.
+ let installedFonts=0;await page.route('**/api/v1/fonts',route=>{if(route.request().method()==='POST'){installedFonts++;assert.equal(route.request().postDataBuffer().toString(),'fixture-font');return route.fulfill({status:201,json:{installed:[{name:'Fixture'}]}});}return route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({profile:'org.jrip.font-catalog-v1',observedAt:1700000000,engines:[{engine:'mupdf',status:'available',fonts:[{name:'Helvetica',resolvedName:null,engine:'mupdf',formats:['PDF'],pdfSubstitution:true}]},{engine:'ghostscript',status:'available',fonts:[{name:'NimbusSans-Regular',resolvedName:'NimbusSans-Regular',engine:'ghostscript',formats:['PS','EPS'],pdfSubstitution:false},{name:'<img src=x onerror=alert(1)>',resolvedName:'Safe',engine:'ghostscript',formats:['PS'],pdfSubstitution:false}]}]})});});
+ assert(await page.locator('#view-fonts').evaluate(e=>e.parentElement.classList.contains('workspace')));
+ await page.locator('#tab-fonts').click();await expect(()=>page.locator('#font-list tr').count().then(n=>n===3),'font catalog loaded');
+ assert(await page.locator('#font-install').isVisible());
+ await page.locator('#font-file').setInputFiles({name:'fixture.ttf',mimeType:'font/ttf',buffer:Buffer.from('fixture-font')});
+ await expect(()=>page.locator('#font-upload-status').innerText().then(v=>v.includes('Installed')),'font upload completed');assert.equal(installedFonts,1);
+ await page.locator('#font-drop').evaluate(el=>{const data=new DataTransfer();data.items.add(new File(['fixture-font'],'drop.otf',{type:'font/otf'}));el.dispatchEvent(new DragEvent('drop',{bubbles:true,dataTransfer:data}));});
+ await expect(async()=>installedFonts===2&&await page.locator('#font-file').isEnabled(),'font drop completed');
+ assert.equal(await page.locator('#font-list img').count(),0);assert((await page.locator('#font-list').textContent()).includes('<img src=x'));
+ await page.locator('#font-search').fill('Nimbus');assert.equal(await page.locator('#font-list tr').count(),1);
+ await page.locator('#font-search').fill('');await page.locator('#font-engine').selectOption('mupdf');assert.equal(await page.locator('#font-list tr').count(),1);assert.match(await page.locator('#font-list').innerText(),/standard substitution/);
+ await page.locator('#font-search').fill('missing-font');assert(await page.locator('#font-empty').isVisible());
+ await page.locator('#font-search').fill('');await page.locator('#font-engine').selectOption('');
+ for(const lang of ['en','ja','zh-CN']){await page.locator('#language').selectOption(lang);for(const width of [320,430,1440]){await page.setViewportSize({width,height:1000});assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),`font tab fits ${lang}/${width}`);}}
+ await page.locator('#language').selectOption('en');await page.setViewportSize({width:1440,height:900});
+ const fontsBox=await page.locator('#tab-fonts').boundingBox(),bar=await page.locator('[role=tablist]').boundingBox();assert(Math.abs(fontsBox.x+fontsBox.width-bar.x-bar.width)<2,'font tab is right aligned');
+ await page.locator('#tab-jobs').click();
+ // Changing views retains the selected job and page.
+ await page.locator('#tab-output').click();await page.locator('#tab-printers').click();await page.locator('#tab-jobs').click();
  // Desktop visual reference with mapped source page 5 selected.
  await page.getByRole('button',{name:'selected-proof.pdf',exact:true}).click();await expect(()=>page.locator('#preview-image').evaluate(img=>img.complete&&img.naturalWidth>0),'preview');
  await page.locator('#page').selectOption('page-000002.tiff');
@@ -132,9 +164,20 @@ try{
  if(screenshots){await page.screenshot({path:`${screenshots}/mobile.png`,fullPage:true});}
  const storage=await page.evaluate(()=>({local:localStorage.length,session:sessionStorage.length,cookie:document.cookie}));assert.deepEqual(storage,{local:0,session:0,cookie:''});
  assert(sent.every(r=>!r.url.includes(token)));
+ await page.setViewportSize({width:1440,height:900});await page.locator('#language').selectOption('en');
+ const actionRow=page.locator('#jobs tr').filter({has:page.getByRole('button',{name:'ready-proof.pdf',exact:true})});
+ await actionRow.locator('.job-select').click();
+ await actionRow.locator('[data-job-action="reveal"]').click();assert.equal(reveals,1);
+ await actionRow.locator('[data-job-action="delete"]').click();assert(await page.locator('#delete-job-dialog').isVisible());
+ assert.match(await page.locator('#delete-job-dialog').innerText(),/retained/);
+ await page.locator('#delete-job-close').click();assert.equal(await actionRow.count(),1);
+ await actionRow.locator('[data-job-action="delete"]').click();await page.locator('#delete-job-confirm').click();
+ await expect(()=>page.getByRole('button',{name:'ready-proof.pdf',exact:true}).count().then(n=>n===0),'deleted job disappears');
+ assert.equal(await page.locator('#metadata').innerText(),'');assert(await page.locator('#preview-image').isHidden());
  await page.locator('#page-ranges').fill('');
  await page.locator('#connection').click();assert.equal(await page.locator('#jobs tr').count(),0);assert.equal(await page.locator('#submit').isDisabled(),true);assert.equal(await page.locator('#preview-image').isHidden(),true);
  await connect('console-readonly-test-token');await expect(()=>page.locator('#login').isVisible().then(v=>!v),'readonly login');
+ for(const b of await page.locator('[data-job-action]').all())assert(await b.isDisabled());
  await page.locator('#file').setInputFiles({name:'denied.pdf',mimeType:'application/pdf',buffer:Buffer.from('%PDF-1.4\n')});await page.locator('#submit').click();
  await expect(()=>page.locator('#notice').innerText().then(v=>v.includes('403')),'scope denied');
  await page.reload();assert.equal(await page.locator('#submit').isDisabled(),true);assert.equal(await page.locator('#jobs tr').count(),0);

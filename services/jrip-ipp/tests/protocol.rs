@@ -736,3 +736,109 @@ async fn malformed_ipp_ranges_are_rejected_before_spooling() {
         0
     );
 }
+
+#[tokio::test]
+async fn mac_application_advisory_options_are_reported_without_overriding_standard_controls() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = jrip_ipp::open(dir.path().into(), URI.into()).await.unwrap();
+    let app = jrip_ipp::router(state.clone());
+    for (copies, expected) in [(1i32, 0x0001), (2, ipp::ATTRIBUTES_NOT_SUPPORTED)] {
+        let mut req = message(ipp::VALIDATE_JOB, b"", Some("application/pdf"), None, false);
+        req.pop();
+        req.push(2);
+        attribute(
+            &mut req,
+            0x42,
+            "com.apple.print.JobInfo.PMApplicationName",
+            b"Test App",
+        );
+        attribute(
+            &mut req,
+            0x42,
+            "AP_ColorMatchingMode",
+            b"ApplicationColorMatching",
+        );
+        attribute(&mut req, 0x44, "media", b"iso_a4_210x297mm");
+        attribute(&mut req, 0x21, "copies", &copies.to_be_bytes());
+        req.push(3);
+        let (http, reply) = send(&app, req).await;
+        assert_eq!(http, StatusCode::OK);
+        assert_eq!(status(&reply), expected);
+    }
+    assert!(state.repo.list_ipp_jobs().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn physical_route_is_pinned_at_intake_survives_restart_and_waits_for_delivery() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = jrip_ipp::open(dir.path().into(), URI.into()).await.unwrap();
+    state.forward = Some(rip_core::ipp_forward::IppForward {
+        printer_id: "ricoh".into(),
+        printer_uri: "ipp://localhost:9999/ipp/print".into(),
+        media: "iso_a4_210x297mm".into(),
+        dpi: 360,
+    });
+    let router = jrip_ipp::router(state.clone());
+    let pdf = include_bytes!("../../../tests/corpus/colors.pdf");
+    let (_, reply) = send(
+        &router,
+        message(ipp::PRINT_JOB, pdf, Some("application/pdf"), None, false),
+    )
+    .await;
+    assert_eq!(status(&reply), ipp::OK);
+    let id = IppRequest::parse(&reply)
+        .unwrap()
+        .integer(2, "job-id")
+        .unwrap();
+    let mut job = state.repo.get_ipp_job(id).await.unwrap();
+    assert_eq!(job.manifest.dpi, 360);
+    assert_eq!(job.manifest.color_mode, rip_core::ColorMode::Rgb);
+    let reopened = jrip_ipp::open(dir.path().into(), URI.into()).await.unwrap();
+    assert_eq!(
+        reopened
+            .repo
+            .ipp_forward_route(job.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .0
+            .printer_id,
+        "ricoh"
+    );
+    for next in [
+        rip_core::JobState::Ripping,
+        rip_core::JobState::Spooling,
+        rip_core::JobState::Completed,
+    ] {
+        job = state.repo.transition(job, next, None).await.unwrap();
+    }
+    let (_, reply) = send(
+        &router,
+        message(ipp::GET_JOB_ATTRIBUTES, b"", None, Some(id), false),
+    )
+    .await;
+    assert_eq!(
+        IppRequest::parse(&reply)
+            .unwrap()
+            .enumeration(2, "job-state"),
+        Some(5)
+    );
+    let (_, reply) = send(
+        &router,
+        message(ipp::CANCEL_JOB, b"", None, Some(id), false),
+    )
+    .await;
+    assert_eq!(status(&reply), ipp::OK);
+    assert!(state.repo.pending_ipp_forwards().await.unwrap().is_empty());
+    let (_, reply) = send(
+        &router,
+        message(ipp::GET_JOB_ATTRIBUTES, b"", None, Some(id), false),
+    )
+    .await;
+    assert_eq!(
+        IppRequest::parse(&reply)
+            .unwrap()
+            .enumeration(2, "job-state"),
+        Some(7)
+    );
+}

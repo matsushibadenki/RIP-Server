@@ -13,6 +13,7 @@ sys.path.append("/usr/local/lib/jrip")
 from stream_pages import stream_pages
 from page_selection import selection, empty_stream
 from font_policy import inspect_fonts
+from font_prepare import prepare_pdf
 
 
 def pam_to_tiff(source, destination, dpi, mode):
@@ -87,7 +88,8 @@ def pam_to_tiff(source, destination, dpi, mode):
 
 def main():
     # Keep direct interpreter calls consistent with the trusted worker gate.
-    inspect_fonts("/input/document")
+    source=prepare_pdf("/input/document")
+    inspect_fonts(source)
     dpi, mode, last_page = int(sys.argv[1]), sys.argv[2], int(sys.argv[3])
     if not 72 <= dpi <= 2400 or mode not in ("rgb", "cmyk", "gray") or not 2 <= last_page <= 10001:
         raise ValueError("invalid render options")
@@ -108,7 +110,7 @@ def main():
     stream_pages([
         "mutool", "draw", "-q", "-F", "pam", "-c", mode,
         "-r", str(dpi), "-B", "128", "-o", "/output/page-%06d.pam",
-        "/input/document", ",".join(map(str, chosen)) if chosen else "1-" + str(last_page),
+        source, ",".join(map(str, chosen)) if chosen else "1-" + str(last_page),
     ], "pam", len(chosen) if chosen else last_page - 1, prepare, total, chosen)
 
 

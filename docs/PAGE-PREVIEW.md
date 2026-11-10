@@ -13,7 +13,7 @@ Unsupported or malformed TIFF: HTTP 422 `preview_unsupported` (EN/JA/zh message)
 Integrity mismatch: HTTP 409 `artifact_integrity_mismatch`.
 At most two decoders per server process; saturation returns HTTP 503
 `artifact_budget_exhausted`. Each decode is bounded to 64 MiB pixel data and
-8 MiB intermediate buffers; existing shared snapshot disk quotas also apply.
+64 MiB intermediate buffers; existing shared snapshot disk quotas also apply.
 Preview decoding runs off the asynchronous executor. Output is under 4 MiB.
 
 🟢 [Done] Embedded ICC-aware RGB/CMYK/gray screen conversion. / 埋め込みICC対応RGB／CMYK／グレー画面変換。 / 嵌入ICC感知的RGB／CMYK／灰度屏幕转换。
@@ -40,3 +40,16 @@ Additional response headers:
 
 Both endpoints share the two-decoder process limit and existing shared snapshot quota.
 No printer is contacted; paper/ink simulation and physical proof acceptance remain Pending.
+
+The console retries only preview GET requests on `503 artifact_budget_exhausted`, up to three times with bounded backoff; other errors and state-changing operations are not retried.
+日本語: 操作画面はプレビューGETの一時的な503だけを最大3回再試行します。単一stripのTIFFにも対応するため、一時バッファ上限は64 MiBです。
+简体中文: 操作界面仅对预览GET的临时503最多重试3次。为支持单strip TIFF，中间缓冲区上限为64 MiB。
+
+
+## Physical paper layout / 実機出力の用紙プレビュー / 实体输出纸张预览
+
+🟢 [Done] 用紙に合わせる拡縮、1〜400%の倍率指定、時計回り0／90／180／270度回転、9点の配置、±1000 mmの移動に対応。プレビューと出力に同じ画素量子化・座標規則を使います。実機の非印字領域や色校正のシミュレーションではありません。詳しくは[配置契約](RASTER-PLACEMENT.md)を参照してください。
+
+English: Preview and actual PWG output support fit-to-paper, 1–400% custom scaling, clockwise quarter-turn rotation, nine alignments and signed millimeter offsets. Geometry uses identical pixel quantization. This does not simulate device unprintable margins or physical color proofing. See the placement contract.
+
+简体中文: 预览与实际PWG输出均支持适合纸张、1–400%比例、顺时针直角旋转、九点对齐及毫米偏移。使用相同像素量化规则，不模拟设备不可打印边距或实体色彩校样。详见布局契约。

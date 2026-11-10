@@ -45,7 +45,7 @@ pub fn tiff(mut source: impl Read + Seek) -> Result<Facts, Error> {
     source.seek(SeekFrom::Start(0))?;
     let mut limits = Limits::default();
     limits.decoding_buffer_size = 64 * 1024 * 1024;
-    limits.intermediate_buffer_size = 8 * 1024 * 1024;
+    limits.intermediate_buffer_size = 64 * 1024 * 1024;
     let mut decoder = Decoder::new(source)?.with_limits(limits);
     let resolution = match decoder.find_tag_unsigned::<u16>(Tag::ResolutionUnit)? {
         Some(unit @ (2 | 3)) => match (

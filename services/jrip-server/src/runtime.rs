@@ -120,6 +120,24 @@ pub async fn prepare(mut config: Config) -> Result<Prepared, Error> {
     }
     let app: App = crate::open(config.root.clone(), token).await?;
     config.root = app.root.clone();
+    if let Ok(path) = std::env::var("JRIP_IPP_FORWARD_CONFIG") {
+        if !config.physical || config.ipp.is_none_or(|a| !a.ip().is_loopback()) {
+            return Err("IPP physical forwarding requires --with-printers and loopback IPP".into());
+        }
+        let route: rip_core::ipp_forward::IppForward =
+            serde_json::from_slice(&std::fs::read(path)?)?;
+        if route.dpi != 360
+            || route.media != "iso_a4_210x297mm"
+            || !app.printers.iter().any(|p| {
+                p.id == route.printer_id
+                    && p.uri == route.printer_uri
+                    && p.color_target.is_none()
+                    && p.media.iter().any(|m| m.name == route.media)
+            })
+        {
+            return Err("Invalid or changed IPP physical forward route".into());
+        }
+    }
     if config.physical && app.printers.is_empty() {
         return Err("Configure JRIP_PRINTER_CONFIG for physical dispatch / 実機出力にはJRIP_PRINTER_CONFIGが必要です / 实体输出需要JRIP_PRINTER_CONFIG".into());
     }
@@ -171,6 +189,11 @@ pub async fn prepare(mut config: Config) -> Result<Prepared, Error> {
         }
     }
     let mut ports = vec![std::net::TcpListener::bind(config.api)?];
+    if let Some(address) =
+        crate::network::lan_address(std::env::var("JRIP_LAN_LISTEN").ok().as_deref())?
+    {
+        ports.push(std::net::TcpListener::bind(address)?);
+    }
     if let Some(address) = config.ipp {
         ports.push(std::net::TcpListener::bind(address)?);
     }

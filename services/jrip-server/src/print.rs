@@ -64,7 +64,7 @@ pub async fn models(app: &App, printer_id: Option<&str>) -> Result<Value, ApiErr
             .pwg_types
             .into_iter()
             .filter_map(|kind| match kind.as_str() {
-                "rgb_8" => Some("rgb".into()),
+                "rgb_8" | "srgb_8" => Some("rgb".into()),
                 "cmyk_8" => Some("cmyk".into()),
                 "black_8" => Some("gray".into()),
                 _ => None,

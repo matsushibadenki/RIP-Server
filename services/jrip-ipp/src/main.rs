@@ -20,7 +20,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         None
     };
-    let app = jrip_ipp::open(root.into(), printer_uri).await?;
+    let mut app = jrip_ipp::open(root.into(), printer_uri).await?;
+    if let Ok(path) = std::env::var("JRIP_IPP_FORWARD_CONFIG") {
+        if !socket.ip().is_loopback() {
+            return Err("Automatic physical forwarding requires a loopback IPP listener".into());
+        }
+        let route: rip_core::ipp_forward::IppForward =
+            serde_json::from_slice(&std::fs::read(path)?)?;
+        if route.dpi != 360 || route.media != "iso_a4_210x297mm" {
+            return Err("Initial physical IPP route requires 360 dpi A4 sRGB".into());
+        }
+        app.forward = Some(route);
+    }
     let listener = tokio::net::TcpListener::bind(socket).await?;
     let mdns = if let Some(info) = discovery {
         let daemon = mdns_sd::ServiceDaemon::new()?;

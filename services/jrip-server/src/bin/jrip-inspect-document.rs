@@ -55,19 +55,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         engine: rip_core::EnginePreference::MuPdf,
     };
     let (job, _) = rip_jobs::prepare_staged(directory.path(), id, manifest, None).await?;
-    let mut report =
-        match rip_interpreter::inspect_pdf_attempt(&directory.path().join("document"), id).await {
-            Ok(value) => value,
-            Err(error) => {
-                if matches!(
-                    &error,
-                    rip_interpreter::InterpreterError::Rejected("container_cleanup_failed")
-                ) {
-                    eprintln!("snapshot retained: {}", directory.keep().display());
-                }
-                return Err(error.into());
+    let mut report = match rip_interpreter::inspect_pdf_attempt_with_fonts(
+        &directory.path().join("document"),
+        id,
+        "jrip-mupdf:local",
+        rip_font::store::current(&app.root)?,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            if matches!(
+                &error,
+                rip_interpreter::InterpreterError::Rejected("container_cleanup_failed")
+            ) {
+                eprintln!("snapshot retained: {}", directory.keep().display());
             }
-        };
+            return Err(error.into());
+        }
+    };
     report["inspectionId"] = serde_json::json!(id);
     report["sourceSha256"] = serde_json::json!(job.source_sha256);
     report["sourceBytes"] = serde_json::json!(bytes);

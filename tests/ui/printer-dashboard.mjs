@@ -13,7 +13,7 @@ const select=async id=>{await page.locator('#dashboard-printer').selectOption(id
 try{
  await page.goto(url);assert.equal(await page.title(),'J-RIP');assert.equal(new URL(page.url()).pathname,'/console');assert.equal(await page.locator('#printer-dashboard').isHidden(),true);
  await connect();assert.equal(await page.locator('#delivery-panel').isHidden(),true,'no completed job');
- await page.locator('#printer-dashboard > summary').click();await wait(()=>page.locator('#dashboard-printer option').count().then(n=>n===3));
+ await page.locator('#tab-printers').click();await wait(()=>page.locator('#dashboard-printer option').count().then(n=>n===3));
  assert.equal(await page.locator('header').count(),1);const initial=await queries();await select('p1');
  await wait(()=>page.locator('#dashboard-printer-live').getAttribute('data-source').then(v=>v==='stored'));
  assert((await page.locator('#dashboard-printer-conditions').innerText()).includes('Paper jam'));
@@ -47,15 +47,15 @@ try{
  await wait(()=>attempts.length>=3);await wait(()=>page.locator('#dashboard-updates').innerText().then(v=>v.includes('Following saved reports')));
  assert.equal(attempts[1]['last-event-id'],cursor);assert.equal(attempts[2]['last-event-id'],cursor);for(const attempt of attempts)assert.equal(attempt.authorization,'Bearer reader');
  await page.unroute(streamRoute);await producer(9);await wait(()=>page.locator('#dashboard-printer-facts').innerText().then(v=>v.includes('Device jobs: 9')));
- const beforeClose=await queries();await page.locator('#printer-dashboard > summary').click();await wait(async()=> (await status()).streams===0);
- await page.locator('#printer-dashboard > summary').click();await wait(()=>page.locator('#dashboard-updates').innerText().then(v=>v.includes('Following saved reports')));assert.equal(await queries(),beforeClose,'reopening does not probe');
+ const beforeClose=await queries();await page.locator('#tab-jobs').click();await wait(async()=> (await status()).streams===0);
+ await page.locator('#tab-printers').click();await wait(()=>page.locator('#dashboard-updates').innerText().then(v=>v.includes('Following saved reports')));assert.equal(await queries(),beforeClose,'reopening does not probe');
  // Delay an old device read: a later selection must win.
  const route=new URL('/api/v1/printers/p1/observations?limit=1',url).href;let release;const gate=new Promise(r=>release=r);let entered=false;
  await page.route(route,async h=>{const response=await h.fetch();entered=true;await gate;await h.fulfill({response});});
  await page.locator('#dashboard-printer').selectOption('p1');await wait(()=>entered);await select('p2');release();await page.waitForTimeout(150);assert.equal(await page.locator('#dashboard-printer-snapshot-content').isHidden(),true,'late old device response is ignored');await page.unroute(route);
  const listRoute=new URL('/api/v1/printers',url).href;await page.route(listRoute,h=>h.fulfill({status:200,contentType:'application/json',body:JSON.stringify({printers:[]})}));await page.locator('#dashboard-list-refresh').click();await wait(()=>page.locator('#dashboard-list-refresh').isEnabled());assert.equal(await page.locator('#dashboard-printer option').count(),1);assert.equal(await page.locator('#dashboard-printer-live').isHidden(),true,'removed registrations clear stored state');await page.unroute(listRoute);await page.locator('#dashboard-list-refresh').click();await wait(()=>page.locator('#dashboard-printer option').count().then(n=>n===3));
  await select('p1');await page.locator('#connection').click();assert.equal(await page.locator('#printer-dashboard').isHidden(),true);assert.equal(await page.locator('#dashboard-printer-conditions').textContent(),'');await wait(async()=> (await status()).streams===0);
- await connect();await page.locator('#printer-dashboard > summary').click();await wait(()=>page.locator('#dashboard-printer option').count().then(n=>n===3));assert.equal(await page.locator('#dashboard-printer').inputValue(),'','new session does not inherit selection');
+ await connect();await page.locator('#tab-printers').click();await wait(()=>page.locator('#dashboard-printer option').count().then(n=>n===3));assert.equal(await page.locator('#dashboard-printer').inputValue(),'','new session does not inherit selection');
  assert.deepEqual(writes,[],'dashboard never sends state-changing requests');assert.deepEqual(errors,[]);
  console.log(`PASS ${url}: no-job read-only dashboard, automatic SSE updates and cursor reconnect, saved state after restart, independent device selection, explicit live refresh, failed query, late response fencing, session reset, EN/JA/zh, 320/375/430/1440px; Browser skill unavailable, Playwright with installed Chrome`);
 }finally{await browser.close();}

@@ -12,7 +12,8 @@ use tiff::{
 pub fn bmp(reader: impl Read + Seek) -> Result<Vec<u8>, Error> {
     let mut limits = Limits::default();
     limits.decoding_buffer_size = 64 * 1024 * 1024;
-    limits.intermediate_buffer_size = 8 * 1024 * 1024;
+    // A valid single-strip page may require a full-page intermediate buffer.
+    limits.intermediate_buffer_size = 64 * 1024 * 1024;
     let mut decoder = Decoder::new(reader)?.with_limits(limits);
     let (w, h) = decoder.dimensions()?;
     if w == 0
@@ -95,6 +96,24 @@ mod tests {
     use std::io::Cursor;
     use tiff::encoder::{TiffEncoder, colortype};
     #[test]
+    fn preview_accepts_large_single_strip_within_pixel_budget() {
+        let mut file = Cursor::new(Vec::new());
+        {
+            let mut encoder = TiffEncoder::new(&mut file)
+                .unwrap()
+                .with_compression(tiff::encoder::Compression::Packbits);
+            let mut image = encoder.new_image::<colortype::RGB8>(3000, 1000).unwrap();
+            image.rows_per_strip(1000).unwrap();
+            image.write_data(&vec![127; 3000 * 1000 * 3]).unwrap();
+        }
+        file.set_position(0);
+        let facts = crate::describe::tiff(Cursor::new(file.get_ref().clone())).unwrap();
+        assert_eq!(facts.metadata.width, 3000);
+        let output = bmp(file).unwrap();
+        assert_eq!(&output[18..22], &1024i32.to_le_bytes());
+        assert_eq!(&output[54..57], &[127; 3]);
+    }
+    #[test]
     fn preview_keeps_orientation_channels_padding_and_bounds() {
         let mut file = Cursor::new(Vec::new());
         TiffEncoder::new(&mut file)
@@ -150,7 +169,9 @@ mod tests {
         let rgb_profile = lcms2::Profile::new_srgb().icc().unwrap();
         let mut file = Cursor::new(Vec::new());
         {
-            let mut encoder = TiffEncoder::new(&mut file).unwrap();
+            let mut encoder = TiffEncoder::new(&mut file)
+                .unwrap()
+                .with_compression(tiff::encoder::Compression::Packbits);
             let mut image = encoder.new_image::<colortype::RGB8>(1, 1).unwrap();
             image
                 .encoder()
@@ -165,7 +186,9 @@ mod tests {
         }
         let mut file = Cursor::new(Vec::new());
         {
-            let mut encoder = TiffEncoder::new(&mut file).unwrap();
+            let mut encoder = TiffEncoder::new(&mut file)
+                .unwrap()
+                .with_compression(tiff::encoder::Compression::Packbits);
             let mut image = encoder.new_image::<colortype::CMYK8>(2, 1).unwrap();
             image
                 .encoder()

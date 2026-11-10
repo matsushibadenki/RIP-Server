@@ -13,11 +13,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let address = std::env::var("JRIP_LISTEN").unwrap_or_else(|_| "127.0.0.1:8080".into());
     let app = jrip_server::open(root.into(), token).await?;
     let listener = tokio::net::TcpListener::bind(&address).await?;
-    tracing::info!(%address,"J-RIP API listening");
-    axum::serve(listener, jrip_server::router(app))
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await?;
+    if app.local_finder && !listener.local_addr()?.ip().is_loopback() {
+        return Err("Finder actions require a loopback API listener".into());
+    }
+    let lan_address =
+        jrip_server::network::lan_address(std::env::var("JRIP_LAN_LISTEN").ok().as_deref())?;
+    let lan_listener = if let Some(address) = lan_address {
+        Some(tokio::net::TcpListener::bind(address).await?)
+    } else {
+        None
+    };
+    let mut signals = jrip_server::shutdown::Signals::new()?;
+    let (stop, receive) = tokio::sync::watch::channel(false);
+    let signal = tokio::spawn(async move {
+        signals.wait().await;
+        let _ = stop.send(true);
+    });
+    tracing::info!(%address,?lan_address,"J-RIP API listening");
+    if let Some(lan_listener) = lan_listener {
+        let lan_app = jrip_server::network::lan_app(&app);
+        tokio::try_join!(
+            jrip_server::network::serve(listener, app, receive.clone()),
+            jrip_server::network::serve(lan_listener, lan_app, receive)
+        )?;
+    } else {
+        jrip_server::network::serve(listener, app, receive).await?;
+    }
+    signal.abort();
     Ok(())
 }

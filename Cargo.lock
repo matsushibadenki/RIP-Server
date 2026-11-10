@@ -890,6 +890,7 @@ dependencies = [
  "rip-ipp",
  "rip-jobs",
  "rip-storage",
+ "serde_json",
  "tempfile",
  "tokio",
  "tower",
@@ -938,6 +939,7 @@ dependencies = [
  "rip-color",
  "rip-core",
  "rip-digest",
+ "rip-font",
  "rip-interpreter",
  "rip-ipp",
  "rip-jobs",
@@ -1494,10 +1496,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "rip-font"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "ttf-parser",
+ "uuid",
+]
+
+[[package]]
 name = "rip-interpreter"
 version = "0.1.0"
 dependencies = [
  "rip-core",
+ "rip-font",
  "serde_json",
  "tempfile",
  "thiserror",
@@ -2327,6 +2342,12 @@ name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
+
+[[package]]
+name = "ttf-parser"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 
 [[package]]
 name = "typenum"

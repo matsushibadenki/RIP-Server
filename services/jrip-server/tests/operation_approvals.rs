@@ -451,3 +451,34 @@ async fn failed_business_action_does_not_restore_a_consumed_grant() {
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(response["error"]["code"], "approval_required");
 }
+
+#[tokio::test]
+async fn font_installation_is_admin_only_and_binds_exact_bytes() {
+    let (dir, state) = app().await;
+    let router = jrip_server::router(state);
+    let bytes = include_bytes!("../../../crates/rip-font/tests/data/shaping.ttf").to_vec();
+    for token in [READER, WRITER] {
+        assert_eq!(
+            call(&router, "POST", "/api/v1/fonts", token, bytes.clone(), None)
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+    }
+    let (status, challenge) =
+        call(&router, "POST", "/api/v1/fonts", AGENT, bytes.clone(), None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{challenge}");
+    let binding = &challenge["error"]["approvalRequest"]["binding"];
+    assert_eq!(binding["operation"], "font-install");
+    assert_eq!(
+        binding["requestDigest"],
+        format!("sha256:{}", rip_font::hash(&bytes))
+    );
+    assert!(
+        !binding["effect"]["after"]["fonts"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(rip_font::store::current(dir.path()).unwrap().is_none());
+}

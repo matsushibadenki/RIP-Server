@@ -25,8 +25,12 @@ pub mod delivery;
 mod delivery_artifact;
 pub mod dispatch;
 mod event_stream;
+mod font_install;
+mod fonts;
 pub mod inspection;
+mod job_files;
 pub mod maintenance;
+pub mod network;
 mod operation_approvals;
 pub mod pipeline;
 mod pipeline_preflight;
@@ -55,6 +59,7 @@ pub struct App {
     pub printers: Vec<delivery::Printer>,
     pub require_print_approval: bool,
     pub require_delete_approval: bool,
+    pub local_finder: bool,
     pub require_settings_approval: bool,
     pub printer_security: Vec<delivery::PrinterSecurity>,
     pub delivery_preparation: Arc<tokio::sync::Semaphore>,
@@ -82,6 +87,7 @@ pub async fn open(root: PathBuf, token: String) -> Result<App, Box<dyn std::erro
             _ => return Err("JRIP_REQUIRE_PRINT_APPROVAL must be 0 or 1".into()),
         },
         require_delete_approval: approval_flag("JRIP_REQUIRE_DELETE_APPROVAL")?,
+        local_finder: approval_flag("JRIP_LOCAL_FINDER")?,
         require_settings_approval: approval_flag("JRIP_REQUIRE_SETTINGS_APPROVAL")?,
         printer_security: delivery::load_security()?,
         delivery_preparation: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -104,6 +110,13 @@ pub fn router(app: App) -> Router {
         .route("/console", get(console::index))
         .route("/console/", get(console::index))
         .route("/console/app.js", get(console::script))
+        .route("/console/tabs.js", get(console::tabs_script))
+        .route("/console/fonts.js", get(console::fonts_script))
+        .route("/console/job-actions.js", get(console::job_actions_script))
+        .route(
+            "/console/output-layout.js",
+            get(console::output_layout_script),
+        )
         .route("/console/delivery.js", get(console::delivery_script))
         .route(
             "/console/printer-stream.js",
@@ -271,6 +284,14 @@ pub fn router(app: App) -> Router {
             "/api/v1/print/preflights/{id}/commit",
             post(preflight::commit),
         )
+        .route("/api/v1/console/actions", get(job_files::capabilities))
+        .route(
+            "/api/v1/fonts",
+            get(fonts::get)
+                .post(font_install::install)
+                .layer(DefaultBodyLimit::max(rip_font::MAX_BYTES)),
+        )
+        .route("/api/v1/jobs/{id}/reveal", post(job_files::reveal))
         .route("/api/v1/jobs/{id}", get(detail).delete(delete))
         .route("/api/v1/jobs/{id}/events", get(events))
         .route("/api/v1/jobs/{id}/retry", post(retry::retry))

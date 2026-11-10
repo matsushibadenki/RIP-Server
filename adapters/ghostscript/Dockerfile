@@ -6,6 +6,7 @@ ENV PATH="/opt/jrip-python/bin:$PATH"
 COPY adapters/ghostscript/resources/ /usr/local/lib/jrip/strict-resources/
 COPY adapters/ghostscript/render.py /usr/local/lib/jrip/render.py
 COPY adapters/font_identity.py /usr/local/lib/jrip/font_identity.py
+COPY adapters/font_prepare.py /usr/local/lib/jrip/font_prepare.py
 COPY adapters/font_policy.py /usr/local/lib/jrip/font_policy.py
 COPY adapters/page_selection.py /usr/local/lib/jrip/page_selection.py
 COPY adapters/stream_pages.py /usr/local/lib/jrip/stream_pages.py

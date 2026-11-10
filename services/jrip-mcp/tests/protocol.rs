@@ -763,6 +763,7 @@ async fn delivery_artifact_mcp_reads_and_chunks_require_read_scopes_without_prin
     bytes[4 + 1732..4 + 1736].copy_from_slice(b"test");
     let id = uuid::Uuid::new_v4();
     let ticket = rip_storage::delivery::DeliveryTicket {
+        placement: None,
         source_job: job.id,
         copies: 1,
         sides: Default::default(),

@@ -5,6 +5,7 @@ sys.path.append("/usr/local/lib/jrip")
 from stream_pages import stream_pages
 from page_selection import selection, empty_stream
 from font_policy import inspect_fonts
+from font_prepare import prepare_pdf, verify_postscript_registry
 
 # Do not silently fall back to the image's default substitution maps.
 for name in ("cidfmap", "FAPIcidfmap"):
@@ -18,8 +19,11 @@ formats = [arg.split("=", 1)[1] for arg in args if arg.startswith("--jrip-format
 if len(formats) != 1 or formats[0] not in ("pdf", "postscript", "eps"):
     raise ValueError("invalid_document_format")
 args = [arg for arg in args if not arg.startswith("--jrip-format=")]
+if verify_postscript_registry():args.insert(0,"-sFONTMAP=/jrip-fonts/Fontmap")
 if formats[0] == "pdf":
-    inspect_fonts("/input/document")
+    prepared=prepare_pdf("/input/document")
+    inspect_fonts(prepared)
+    args=[prepared if arg=="/input/document" else arg for arg in args]
 last = [int(arg.split("=", 1)[1]) for arg in args if arg.startswith("-dLastPage=")]
 if len(last) != 1 or not 2 <= last[0] <= 10001:
     raise ValueError("invalid page limit")

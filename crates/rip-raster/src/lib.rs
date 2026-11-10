@@ -1,5 +1,6 @@
 //! Bounded TIFF-to-PWG Raster encoder. Device colors are preserved; no ICC conversion.
 pub mod describe;
+mod placement;
 pub mod preview;
 use std::{
     io::{Read, Seek, Write},
@@ -24,6 +25,8 @@ pub enum Error {
 #[derive(Clone, Copy, Debug)]
 pub enum Color {
     DeviceRgb,
+    /// Samples are already in standard sRGB; no implicit color conversion.
+    Srgb,
     DeviceCmyk,
     Black,
 }
@@ -31,6 +34,7 @@ impl Color {
     fn layout(self) -> (usize, u32, ColorType) {
         match self {
             Self::DeviceRgb => (3, 1, ColorType::RGB(8)),
+            Self::Srgb => (3, 19, ColorType::RGB(8)),
             Self::DeviceCmyk => (4, 6, ColorType::CMYK(8)),
             Self::Black => (1, 3, ColorType::Gray(8)),
         }
@@ -71,6 +75,7 @@ impl DuplexLayout {
 #[derive(Clone, Copy)]
 struct PageLayout {
     total: u32,
+    placement: Option<(rip_core::placement::Placement, [u32; 2])>,
     duplex: Option<DuplexLayout>,
     backside: bool,
 }
@@ -89,7 +94,7 @@ struct Bounded<'a, W> {
 }
 impl<W: Write> Write for Bounded<'_, W> {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        if self.bytes + bytes.len() > 32 * 1024 * 1024 {
+        if self.bytes + bytes.len() > 64 * 1024 * 1024 {
             return Err(std::io::Error::other("PWG output exceeds 32 MiB"));
         }
         let n = self.writer.write(bytes)?;
@@ -118,7 +123,7 @@ pub fn convert_registered<W: Write>(
     expected_icc: Option<&str>,
     writer: &mut W,
 ) -> Result<(), Error> {
-    convert_layout(pages, options, expected_icc, None, writer)
+    convert_layout(pages, options, expected_icc, None, None, writer)
 }
 /// Encode duplex only in the native `normal` sheet-back coordinate system.
 /// The caller must verify the device's sheet-back mode before using this output.
@@ -150,13 +155,33 @@ pub fn convert_duplex<W: Write>(
     layout: DuplexLayout,
     writer: &mut W,
 ) -> Result<(), Error> {
-    convert_layout(pages, options, expected_icc, Some(layout), writer)
+    convert_layout(pages, options, expected_icc, Some(layout), None, writer)
+}
+pub fn convert_positioned<W: Write>(
+    pages: &[impl AsRef<Path>],
+    options: &Options,
+    expected_icc: Option<&str>,
+    placement: &rip_core::placement::Placement,
+    media: [u32; 2],
+    duplex: Option<DuplexLayout>,
+    writer: &mut W,
+) -> Result<(), Error> {
+    placement.validate().map_err(|_| Error::Unsupported)?;
+    convert_layout(
+        pages,
+        options,
+        expected_icc,
+        duplex,
+        Some((*placement, media)),
+        writer,
+    )
 }
 fn convert_layout<W: Write>(
     pages: &[impl AsRef<Path>],
     options: &Options,
     expected_icc: Option<&str>,
     duplex: Option<DuplexLayout>,
+    placement: Option<(rip_core::placement::Placement, [u32; 2])>,
     writer: &mut W,
 ) -> Result<(), Error> {
     if pages.is_empty() || pages.len() > 100 || !(72..=2400).contains(&options.dpi) {
@@ -172,6 +197,7 @@ fn convert_layout<W: Write>(
             expected_icc,
             PageLayout {
                 total: pages.len() as u32,
+                placement,
                 duplex,
                 backside: index % 2 == 1,
             },
@@ -192,7 +218,7 @@ fn page<R: Read + Seek, W: Write>(
 ) -> Result<(), Error> {
     let mut limits = Limits::default();
     limits.decoding_buffer_size = 64 * 1024 * 1024;
-    limits.intermediate_buffer_size = 8 * 1024 * 1024;
+    limits.intermediate_buffer_size = 64 * 1024 * 1024;
     let mut decoder = Decoder::new(reader)?.with_limits(limits);
     if decoder.more_images()
         || decoder
@@ -234,7 +260,7 @@ fn page<R: Read + Seek, W: Write>(
             return Err(Error::Unsupported);
         }
     }
-    let (width, height) = decoder.dimensions()?;
+    let (mut width, mut height) = decoder.dimensions()?;
     let (channels, space, color) = options.color.layout();
     if decoder.colortype()? != color || width == 0 || height == 0 {
         return Err(Error::Unsupported);
@@ -251,6 +277,29 @@ fn page<R: Read + Seek, W: Write>(
     if pixels.len() != size {
         return Err(Error::Unsupported);
     }
+    if let Some((placement, media)) = layout.placement {
+        let white = if matches!(options.color, Color::DeviceCmyk) {
+            0
+        } else {
+            255
+        };
+        (pixels, width, height) = placement::compose(
+            &pixels,
+            [width, height],
+            channels,
+            white,
+            &placement,
+            media,
+            options.dpi,
+        )?;
+    }
+    if layout.placement.is_some() {
+        *decoded = decoded.checked_add(pixels.len()).ok_or(Error::Limit)?;
+        if *decoded > 1024 * 1024 * 1024 {
+            return Err(Error::Limit);
+        }
+    }
+    let line = width as usize * channels;
     if matches!(options.color, Color::Black) {
         for value in &mut pixels {
             *value = 255 - *value;
@@ -368,7 +417,14 @@ fn publish_file(
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     let mut staging = tempfile::NamedTempFile::new_in(parent)?;
-    convert_layout(pages, options, expected_icc, duplex, staging.as_file_mut())?;
+    convert_layout(
+        pages,
+        options,
+        expected_icc,
+        duplex,
+        None,
+        staging.as_file_mut(),
+    )?;
     staging.as_file().sync_all()?;
     staging
         .persist_noclobber(output)
@@ -403,7 +459,7 @@ pub fn inspect_duplex(bytes: &[u8], layout: DuplexLayout) -> Result<Vec<PwgPage>
     inspect_layout(bytes, Some(layout))
 }
 fn inspect_layout(bytes: &[u8], duplex: Option<DuplexLayout>) -> Result<Vec<PwgPage>, Error> {
-    if bytes.len() > 32 * 1024 * 1024 || bytes.get(..4) != Some(b"RaS2") {
+    if bytes.len() > 64 * 1024 * 1024 || bytes.get(..4) != Some(b"RaS2") {
         return Err(Error::Unsupported);
     }
     let mut offset = 4usize;
@@ -417,6 +473,7 @@ fn inspect_layout(bytes: &[u8], duplex: Option<DuplexLayout>) -> Result<Vec<PwgP
         let dpi = u(276);
         let (channels, document_type) = match u(400) {
             1 => (3, "rgb_8"),
+            19 => (3, "srgb_8"),
             3 => (1, "black_8"),
             6 => (4, "cmyk_8"),
             _ => return Err(Error::Unsupported),

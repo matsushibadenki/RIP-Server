@@ -14,6 +14,8 @@ fn profile_hash(app: &App, id: &str) -> Result<String, ApiError> {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Request {
+    #[serde(default)]
+    placement: Option<rip_core::placement::Placement>,
     identity: String,
     #[serde(default = "rip_core::print::default_copies")]
     copies: u32,
@@ -44,6 +46,13 @@ pub(crate) async fn create(
     Json(req): Json<Request>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     authorize(&app, &headers, "admin")?;
+    if req
+        .placement
+        .as_ref()
+        .is_some_and(|p| p.validate().is_err())
+    {
+        return Err(bad("invalid_placement"));
+    }
     if !(1..=rip_core::print::MAX_DELIVERY_COPIES).contains(&req.copies)
         || req.reason.trim().is_empty()
         || req.reason.len() > 512
@@ -72,7 +81,7 @@ pub(crate) async fn create(
     let id = Uuid::new_v4();
     let expires = rip_storage::now() + 300;
     let payload = serde_json::json!({"id":id,"identity":req.identity,"jobId":req.job_id,
-        "copies":req.copies,"sides":req.sides,"pageRanges":req.page_ranges,"expectedRevision":req.expected_revision,"requestId":req.request_id,"printerId":req.printer_id,
+        "placement":req.placement,"copies":req.copies,"sides":req.sides,"pageRanges":req.page_ranges,"expectedRevision":req.expected_revision,"requestId":req.request_id,"printerId":req.printer_id,
         "profileHash":profile_hash(&app,&req.printer_id)?,"media":req.media,"colorAttemptId":req.color_attempt_id,"expiresAt":expires,"issuer":actor(&app,&headers)?,"reason":req.reason});
     app.repo.save_approval(id, &payload, expires).await?;
     Ok((StatusCode::CREATED, Json(payload)))
@@ -107,10 +116,15 @@ pub(crate) async fn check_delivery(
         .await
         .map_err(|_| ApiError(StatusCode::FORBIDDEN, "approval_required"))?;
     if approval
-        .get("pageRanges")
+        .get("placement")
         .cloned()
-        .unwrap_or(serde_json::json!([]))
-        != serde_json::json!(ticket.page_ranges)
+        .unwrap_or(serde_json::Value::Null)
+        != serde_json::json!(ticket.placement)
+        || approval
+            .get("pageRanges")
+            .cloned()
+            .unwrap_or(serde_json::json!([]))
+            != serde_json::json!(ticket.page_ranges)
         || approval["sides"].as_str().unwrap_or("one-sided") != ticket.sides.as_str()
         || approval["copies"].as_u64().unwrap_or(1) != u64::from(ticket.copies)
         || approval["identity"] != actor(app, headers)?

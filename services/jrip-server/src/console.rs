@@ -50,3 +50,31 @@ pub async fn printer_stream_script() -> Response {
         "text/javascript; charset=utf-8",
     )
 }
+
+pub async fn job_actions_script() -> Response {
+    asset(
+        include_str!("../ui/job-actions.js"),
+        "text/javascript; charset=utf-8",
+    )
+}
+
+pub async fn output_layout_script() -> Response {
+    asset(
+        include_str!("../ui/output-layout.js"),
+        "text/javascript; charset=utf-8",
+    )
+}
+
+pub async fn tabs_script() -> Response {
+    asset(
+        include_str!("../ui/tabs.js"),
+        "text/javascript; charset=utf-8",
+    )
+}
+
+pub async fn fonts_script() -> Response {
+    asset(
+        include_str!("../ui/fonts.js"),
+        "text/javascript; charset=utf-8",
+    )
+}

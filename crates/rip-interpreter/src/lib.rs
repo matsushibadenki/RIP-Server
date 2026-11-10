@@ -32,7 +32,9 @@ pub trait DocumentInterpreter: Send + Sync {
 }
 /// All interpretation runs in a resource-limited, networkless Linux container.
 /// Docker access belongs only to the trusted worker, never the HTTP process.
+#[derive(Clone)]
 pub struct SandboxConfig {
+    pub font_snapshot: Option<rip_font::store::Snapshot>,
     pub image: String,
     pub timeout: Duration,
     pub max_pages: u32,
@@ -41,6 +43,7 @@ pub struct SandboxConfig {
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
+            font_snapshot: None,
             image: "jrip-ghostscript:local".into(),
             timeout: Duration::from_secs(120),
             max_pages: 100,
@@ -121,6 +124,25 @@ impl SandboxConfig {
             ),
             self.image.clone(),
         ];
+        if let Some(snapshot) = &self.font_snapshot {
+            let directory = std::fs::canonicalize(&snapshot.path)?;
+            if directory != snapshot.path || !rip_core::print::valid_digest(&snapshot.digest) {
+                return Err(InterpreterError::Rejected("invalid_font_snapshot"));
+            }
+            let index = args.len() - 1;
+            args.splice(
+                index..index,
+                [
+                    "--mount".into(),
+                    format!(
+                        "type=bind,src={},dst=/jrip-fonts,readonly",
+                        directory.display()
+                    ),
+                    "--env".into(),
+                    format!("JRIP_FONT_MANIFEST_SHA256={}", snapshot.digest),
+                ],
+            );
+        }
         match engine {
             EngineKind::Ghostscript => args.extend([
                 "-dSAFER".into(),
@@ -247,10 +269,11 @@ impl SandboxConfig {
         result.map_err(|_| InterpreterError::Rejected("resource_limit_timeout"))?
     }
 }
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct GhostscriptInterpreter {
     pub sandbox: SandboxConfig,
 }
+#[derive(Clone)]
 pub struct MuPdfInterpreter {
     pub sandbox: SandboxConfig,
 }
@@ -296,7 +319,7 @@ impl DocumentInterpreter for MuPdfInterpreter {
             .await
     }
 }
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct HybridInterpreter {
     pub ghostscript: GhostscriptInterpreter,
     pub mupdf: MuPdfInterpreter,
@@ -435,7 +458,15 @@ pub async fn inspect_pdf_attempt_with_image(
     id: uuid::Uuid,
     image: &str,
 ) -> Result<serde_json::Value, InterpreterError> {
-    inspect_script(source, id, image, "inspect.py", true).await
+    inspect_pdf_attempt_with_fonts(source, id, image, None).await
+}
+pub async fn inspect_pdf_attempt_with_fonts(
+    source: &Path,
+    id: uuid::Uuid,
+    image: &str,
+    snapshot: Option<rip_font::store::Snapshot>,
+) -> Result<serde_json::Value, InterpreterError> {
+    inspect_script(source, id, image, "inspect.py", true, snapshot).await
 }
 /// Passive PDF/PS declarations only; uses the same isolated read-only source mount.
 pub async fn inspect_source_profiles(
@@ -443,7 +474,7 @@ pub async fn inspect_source_profiles(
     id: uuid::Uuid,
     image: &str,
 ) -> Result<serde_json::Value, InterpreterError> {
-    inspect_script(source, id, image, "source_profiles.py", false).await
+    inspect_script(source, id, image, "source_profiles.py", false, None).await
 }
 async fn inspect_script(
     source: &Path,
@@ -451,9 +482,11 @@ async fn inspect_script(
     image: &str,
     script: &str,
     strict_pdf: bool,
+    snapshot: Option<rip_font::store::Snapshot>,
 ) -> Result<serde_json::Value, InterpreterError> {
     let source = tokio::fs::canonicalize(source).await?;
     let config = SandboxConfig {
+        font_snapshot: snapshot,
         image: image.into(),
         timeout: Duration::from_secs(120),
         max_pages: 1,

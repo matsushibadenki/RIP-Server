@@ -16,6 +16,7 @@ pub struct App {
     pub repo: Repository,
     pub root: PathBuf,
     pub printer_uri: Arc<str>,
+    pub forward: Option<rip_core::ipp_forward::IppForward>,
     pub requests: Arc<tokio::sync::Semaphore>,
 }
 pub async fn open(root: PathBuf, printer_uri: String) -> Result<App, Box<dyn std::error::Error>> {
@@ -36,6 +37,7 @@ pub async fn open(root: PathBuf, printer_uri: String) -> Result<App, Box<dyn std
     Ok(App {
         repo,
         root,
+        forward: None,
         printer_uri: printer_uri.into(),
         requests: Arc::new(tokio::sync::Semaphore::new(4)),
     })
@@ -92,7 +94,7 @@ pub fn router(app: App) -> Router {
     Router::new()
         .route(
             "/",
-            get(|| async { axum::response::Html(include_str!("proof.html")) }),
+            get(|State(app):State<App>| async move { axum::response::Html(if app.forward.is_some() {"<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>J-RIP</title><h1>J-RIP</h1><p>Physical forwarding enabled · A4 · 360 dpi · sRGB</p><p>実機への自動配送が有効です · 已启用实体打印机自动投递</p><a href=\"http://127.0.0.1:8080/console\">Console / 操作画面 / 操作界面</a></html>"} else {include_str!("proof.html")}) }),
         )
         .route("/ipp/print", post(handle))
         .route("/ipp/print/jobs/{id}", post(handle_job_uri))
@@ -210,14 +212,23 @@ async fn handle_request(
         }
         None
     };
-    let mut response = Response::new(req.version, status.err().unwrap_or(ipp::OK), req.request_id);
+    let mut response = Response::new(
+        req.version,
+        status.err().unwrap_or(if req.has_advisory_settings() {
+            0x0001
+        } else {
+            ipp::OK
+        }),
+        req.request_id,
+    );
     response.text(0x47, "attributes-charset", "utf-8");
     response.text(0x48, "attributes-natural-language", "en");
     if status.is_ok() {
         let result = match req.operation {
             ipp::GET_PRINTER_ATTRIBUTES => printer_attributes(&mut response, &app, &req).await,
             ipp::PRINT_JOB => print_job(&app, &req, &mut response).await,
-            ipp::VALIDATE_JOB => validate_job(&req),
+            ipp::VALIDATE_JOB => manifest_for_app(&app, &req)
+                .and_then(|m| m.validate().map_err(|_| ipp::BAD_REQUEST)),
             ipp::GET_JOB_ATTRIBUTES => job_info(&app, &req, target_id, &mut response).await,
             ipp::GET_JOBS => list_jobs(&app, &req, &mut response).await,
             ipp::CANCEL_JOB => cancel(&app, &req, target_id).await,
@@ -256,6 +267,12 @@ async fn printer_attributes(
         .list_ipp_jobs()
         .await
         .map_err(|_| ipp::INTERNAL_ERROR)?;
+    let mut reported = Vec::new();
+    for (id, job) in jobs {
+        let (job, _) = reported_job(app, job).await?;
+        reported.push((id, job));
+    }
+    let jobs = reported;
     let processing = jobs.iter().any(|(_, j)| {
         matches!(
             j.state,
@@ -292,7 +309,15 @@ async fn printer_attributes(
     );
     attr!(
         "printer-name",
-        response.text(0x42, "printer-name", "J-RIP PDF Proof")
+        response.text(
+            0x42,
+            "printer-name",
+            if app.forward.is_some() {
+                "J-RIP RICOH"
+            } else {
+                "J-RIP PDF Proof"
+            }
+        )
     );
     attr!(
         "document-format-supported",
@@ -332,7 +357,15 @@ async fn printer_attributes(
     );
     attr!(
         "printer-info",
-        response.text(0x41, "printer-info", "PDF proof to TIFF file")
+        response.text(
+            0x41,
+            "printer-info",
+            if app.forward.is_some() {
+                "PDF to RIP to physical printer"
+            } else {
+                "PDF proof to TIFF file"
+            }
+        )
     );
     attr!(
         "printer-make-and-model",
@@ -416,15 +449,22 @@ async fn printer_attributes(
     );
     template_attr!(
         "printer-resolution-default",
-        response.resolution_dpi("printer-resolution-default", 600)
+        response.resolution_dpi(
+            "printer-resolution-default",
+            app.forward.as_ref().map_or(600, |r| r.dpi)
+        )
     );
     if req.wants("printer-resolution-supported", "job-template") {
-        response.resolution_dpi("printer-resolution-supported", 300);
-        let mut value = [0u8; 9];
-        value[0..4].copy_from_slice(&600u32.to_be_bytes());
-        value[4..8].copy_from_slice(&600u32.to_be_bytes());
-        value[8] = 3;
-        response.additional(0x32, &value);
+        if let Some(route) = &app.forward {
+            response.resolution_dpi("printer-resolution-supported", route.dpi);
+        } else {
+            response.resolution_dpi("printer-resolution-supported", 300);
+            let mut value = [0u8; 9];
+            value[..4].copy_from_slice(&600u32.to_be_bytes());
+            value[4..8].copy_from_slice(&600u32.to_be_bytes());
+            value[8] = 3;
+            response.additional(0x32, &value);
+        }
     }
     template_attr!(
         "print-color-mode-default",
@@ -432,7 +472,9 @@ async fn printer_attributes(
     );
     if req.wants("print-color-mode-supported", "job-template") {
         response.text(0x44, "print-color-mode-supported", "color");
-        response.additional(0x44, b"monochrome");
+        if app.forward.is_none() {
+            response.additional(0x44, b"monochrome");
+        }
     }
     Ok(())
 }
@@ -440,7 +482,7 @@ async fn print_job(app: &App, req: &Request<'_>, response: &mut Response) -> Res
     if req.document.len() as u64 > rip_jobs::MAX_DOCUMENT_BYTES {
         return Err(0x0408);
     }
-    let manifest = manifest_for(req)?;
+    let manifest = manifest_for_app(app, req)?;
     manifest.validate().map_err(|_| ipp::BAD_REQUEST)?;
     let job = rip_jobs::submit_bytes(&app.repo, &app.root, manifest, req.document)
         .await
@@ -452,16 +494,45 @@ async fn print_job(app: &App, req: &Request<'_>, response: &mut Response) -> Res
                 ipp::INTERNAL_ERROR
             }
         })?;
-    let ipp_id = app.repo.register_ipp_job(job.id).await.map_err(|e| {
-        tracing::error!(error=%e,"IPP job mapping failed");
-        ipp::INTERNAL_ERROR
-    })?;
+    let ipp_id = app
+        .repo
+        .register_ipp_forward_job(job.id, app.forward.as_ref())
+        .await
+        .map_err(|e| {
+            tracing::error!(error=%e,"IPP job mapping failed");
+            ipp::INTERNAL_ERROR
+        })?;
     response.group(2);
-    job_attributes(response, &job, ipp_id, &app.printer_uri, None, false);
+    job_attributes(
+        response,
+        &job,
+        ipp_id,
+        &app.printer_uri,
+        None,
+        false,
+        app.forward.is_some(),
+    );
     Ok(())
 }
-fn validate_job(req: &Request<'_>) -> Result<(), u16> {
-    manifest_for(req)?.validate().map_err(|_| ipp::BAD_REQUEST)
+fn manifest_for_app(app: &App, req: &Request<'_>) -> Result<Manifest, u16> {
+    let mut manifest = manifest_for(req)?;
+    if let Some(route) = &app.forward {
+        if req
+            .resolution_dpi(2, "printer-resolution")
+            .is_some_and(|dpi| dpi != route.dpi)
+            || req
+                .text(2, "print-color-mode", 0x44)
+                .is_some_and(|mode| mode != "color")
+            || req
+                .text(2, "media", 0x44)
+                .is_some_and(|media| media != route.media)
+        {
+            return Err(ipp::ATTRIBUTES_NOT_SUPPORTED);
+        }
+        manifest.dpi = route.dpi;
+        manifest.color_mode = ColorMode::Rgb;
+    }
+    Ok(manifest)
 }
 fn manifest_for(req: &Request<'_>) -> Result<Manifest, u16> {
     Ok(Manifest {
@@ -481,6 +552,44 @@ fn manifest_for(req: &Request<'_>) -> Result<Manifest, u16> {
         engine: EnginePreference::Auto,
     })
 }
+async fn reported_job(app: &App, mut job: Job) -> Result<(Job, bool), u16> {
+    let Some((_, cancelled)) = app
+        .repo
+        .ipp_forward_route(job.id)
+        .await
+        .map_err(map_storage)?
+    else {
+        return Ok((job, false));
+    };
+    if job.state == JobState::Completed {
+        use rip_storage::delivery::DeliveryState::*;
+        job.state = match app.repo.delivery(job.id).await {
+            Ok(delivery) => match delivery.state {
+                Completed => JobState::Completed,
+                Cancelled => JobState::Cancelled,
+                Aborted | Rejected => JobState::Failed,
+                Unknown => JobState::Held,
+                _ => JobState::Printing,
+            },
+            Err(StorageError::NotFound) => {
+                if cancelled {
+                    JobState::Cancelled
+                } else {
+                    match app.repo.pipeline(job.id).await {
+                        Ok(p) if p["state"] == "FAILED" => JobState::Failed,
+                        Ok(p) if p["state"] == "CANCELLED" => JobState::Cancelled,
+                        Ok(p) if p["state"] == "WAITING_APPROVAL" || p["state"] == "BLOCKED" => {
+                            JobState::Held
+                        }
+                        _ => JobState::Printing,
+                    }
+                }
+            }
+            Err(e) => return Err(map_storage(e)),
+        };
+    }
+    Ok((job, true))
+}
 async fn job_info(
     app: &App,
     req: &Request<'_>,
@@ -490,15 +599,32 @@ async fn job_info(
     let id = target_id
         .or_else(|| req.integer(1, "job-id"))
         .ok_or(ipp::BAD_REQUEST)?;
-    let job = app.repo.get_ipp_job(id).await.map_err(map_storage)?;
+    let (job, forwarded) =
+        reported_job(app, app.repo.get_ipp_job(id).await.map_err(map_storage)?).await?;
     response.group(2);
-    job_attributes(response, &job, id, &app.printer_uri, Some(req), false);
+    job_attributes(
+        response,
+        &job,
+        id,
+        &app.printer_uri,
+        Some(req),
+        false,
+        forwarded,
+    );
     Ok(())
 }
 async fn list_jobs(app: &App, req: &Request<'_>, response: &mut Response) -> Result<(), u16> {
     let completed = req.text(1, "which-jobs", 0x44) == Some("completed");
     let mut jobs = app.repo.list_ipp_jobs().await.map_err(map_storage)?;
-    jobs.retain(|(_, job)| job.state.terminal() == completed);
+    let mut reported = Vec::new();
+    for (id, job) in jobs {
+        let (job, forwarded) = reported_job(app, job).await?;
+        reported.push((id, job, forwarded));
+    }
+    reported.retain(|(_, job, _)| job.state.terminal() == completed);
+    let flags: std::collections::HashMap<_, _> =
+        reported.iter().map(|(id, _, f)| (*id, *f)).collect();
+    jobs = reported.into_iter().map(|(id, job, _)| (id, job)).collect();
     if completed {
         jobs.sort_by_key(|(id, job)| (std::cmp::Reverse(job.updated_at), std::cmp::Reverse(*id)));
     } else {
@@ -517,7 +643,15 @@ async fn list_jobs(app: &App, req: &Request<'_>, response: &mut Response) -> Res
         .any(|a| a.name == "requested-attributes");
     for (id, job) in jobs.into_iter().take(limit) {
         response.group(2);
-        job_attributes(response, &job, id, &app.printer_uri, Some(req), minimal);
+        job_attributes(
+            response,
+            &job,
+            id,
+            &app.printer_uri,
+            Some(req),
+            minimal,
+            flags[&id],
+        );
     }
     Ok(())
 }
@@ -526,6 +660,52 @@ async fn cancel(app: &App, req: &Request<'_>, target_id: Option<i32>) -> Result<
         .or_else(|| req.integer(1, "job-id"))
         .ok_or(ipp::BAD_REQUEST)?;
     let job = app.repo.get_ipp_job(id).await.map_err(map_storage)?;
+    if app
+        .repo
+        .ipp_forward_route(job.id)
+        .await
+        .map_err(map_storage)?
+        .is_some()
+    {
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(app.root.join("pipeline-worker.lock"))
+            .map_err(|_| ipp::INTERNAL_ERROR)?;
+        lock.try_lock().map_err(|_| ipp::NOT_POSSIBLE)?;
+        match app.repo.delivery(job.id).await {
+            Ok(delivery) => {
+                app.repo
+                    .request_delivery_cancel(job.id, delivery.revision)
+                    .await
+                    .map_err(map_storage)?;
+                return Ok(());
+            }
+            Err(StorageError::NotFound) => {}
+            Err(e) => return Err(map_storage(e)),
+        }
+        app.repo
+            .cancel_ipp_forward(job.id)
+            .await
+            .map_err(map_storage)?;
+        if let Ok(pipeline) = app.repo.pipeline(job.id).await {
+            app.repo
+                .update_pipeline(
+                    job.id,
+                    pipeline["revision"].as_i64().ok_or(ipp::INTERNAL_ERROR)?,
+                    "CANCELLED",
+                    Some("IPP_CANCELLED_BEFORE_DELIVERY"),
+                    None,
+                )
+                .await
+                .map_err(map_storage)?;
+        }
+        if job.state == JobState::Completed {
+            return Ok(());
+        }
+    }
     app.repo
         .transition(job, JobState::Cancelled, None)
         .await
@@ -574,6 +754,7 @@ fn job_attributes(
     uri: &str,
     req: Option<&Request<'_>>,
     minimal: bool,
+    forwarded: bool,
 ) {
     macro_rules! attr {
         ($name:literal, $emit:expr) => {
@@ -616,9 +797,17 @@ fn job_attributes(
             0x41,
             "job-state-message",
             match job.state {
+                JobState::Completed if forwarded => "Printer confirmed physical job completion",
+                JobState::Printing if forwarded => "RIP complete; physical delivery pending",
+                JobState::Held if forwarded =>
+                    "Physical delivery requires attention; check J-RIP console",
+                JobState::Failed if forwarded =>
+                    "RIP or physical delivery failed; check J-RIP console",
                 JobState::Completed => "TIFF file export completed; no paper output",
                 JobState::Failed => "TIFF export failed",
+                JobState::Cancelled if forwarded => "Physical delivery cancelled",
                 JobState::Cancelled => "TIFF export cancelled",
+                _ if forwarded => "PDF to RIP to physical printer",
                 _ => "Virtual PDF-to-TIFF job",
             }
         )

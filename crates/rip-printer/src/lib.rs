@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 use url::Url;
-const MAX_DOCUMENT: usize = 32 * 1024 * 1024;
+const MAX_DOCUMENT: usize = 64 * 1024 * 1024;
 const MAX_REPLY: usize = 64 * 1024;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

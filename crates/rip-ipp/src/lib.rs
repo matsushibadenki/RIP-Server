@@ -89,7 +89,7 @@ impl<'a> Request<'a> {
                         let value = std::str::from_utf8(bytes).map_err(|_| ParseError)?;
                         if !value
                             .bytes()
-                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
                         {
                             return Err(ParseError);
                         }
@@ -199,6 +199,44 @@ impl<'a> Request<'a> {
                 a.value == b"all" || a.value == group_name.as_bytes() || a.value == name.as_bytes()
             })
     }
+    fn cups_advisory(attribute: &Attribute) -> bool {
+        attribute.group == 2
+            && (attribute.name.starts_with("com.apple.print.")
+                || matches!(
+                    attribute.name.as_str(),
+                    "AP_ColorMatchingMode"
+                        | "AP_D_InputSlot"
+                        | "ARCMode"
+                        | "BLW"
+                        | "BRMonoColor"
+                        | "BRPrintQuality"
+                        | "CNColorMode"
+                        | "CNIJGrayScale"
+                        | "ColorMode"
+                        | "ColorModel"
+                        | "DestinationPrinterID"
+                        | "Duplex"
+                        | "EPIJ_Ink_"
+                        | "HPColorMode"
+                        | "HPPJLColorAsGray"
+                        | "Ink"
+                        | "OKControl"
+                        | "PageSize"
+                        | "PrintoutMode"
+                        | "Resolution"
+                        | "SelectColor"
+                        | "XROutputColor"
+                        | "XRXColor"
+                        | "collate"
+                        | "pserrorhandler-requested"
+                ))
+    }
+    /// File output preserves PDF geometry; legacy driver controls are not applied.
+    pub fn has_advisory_settings(&self) -> bool {
+        self.attributes
+            .iter()
+            .any(|a| Self::cups_advisory(a) || (a.group == 2 && a.name == "media"))
+    }
     pub fn validate_operation(&self) -> Result<(), u16> {
         if self
             .attributes
@@ -242,6 +280,11 @@ impl<'a> Request<'a> {
             return Err(ATTRIBUTES_NOT_SUPPORTED);
         }
         for a in &self.attributes {
+            // CUPS forwards application/PPD metadata alongside standard IPP settings.
+            // Never bypass a standard setting or an explicit fidelity request.
+            if Self::cups_advisory(a) && self.one(1, "ipp-attribute-fidelity").is_none() {
+                continue;
+            }
             let expected = match a.name.as_str() {
                 "attributes-charset" => 0x47,
                 "attributes-natural-language" => 0x48,
@@ -253,7 +296,7 @@ impl<'a> Request<'a> {
                 "job-uuid" => 0x45,
                 "finishings" => 0x23,
                 "number-up" | "copies" => 0x21,
-                "sides" => 0x44,
+                "sides" | "media" => 0x44,
                 "page-ranges" => 0x33,
                 "document-format" => 0x49,
                 "job-id" => 0x21,
@@ -322,6 +365,7 @@ impl<'a> Request<'a> {
                 }
                 if self.attributes.iter().any(|a| {
                     (a.group == 2
+                        && !Self::cups_advisory(a)
                         && !matches!(
                             a.name.as_str(),
                             "printer-resolution"
@@ -334,6 +378,7 @@ impl<'a> Request<'a> {
                                 | "copies"
                                 | "sides"
                                 | "page-ranges"
+                                | "media"
                         ))
                         || (a.group == 1
                             && !matches!(
@@ -351,7 +396,7 @@ impl<'a> Request<'a> {
                 if self.one(2, "printer-resolution").is_some()
                     && !matches!(
                         self.resolution_dpi(2, "printer-resolution"),
-                        Some(300 | 600)
+                        Some(300 | 360 | 600)
                     )
                 {
                     return Err(ATTRIBUTES_NOT_SUPPORTED);
@@ -512,6 +557,40 @@ impl Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cups_application_metadata_does_not_bypass_standard_settings() {
+        let mut message = Response::new([2, 0], VALIDATE_JOB, 7);
+        message.group(1);
+        message.text(0x47, "attributes-charset", "utf-8");
+        message.text(0x48, "attributes-natural-language", "en");
+        message.text(0x45, "printer-uri", "ipp://localhost/ipp/print");
+        message.text(0x49, "document-format", "application/pdf");
+        message.group(2);
+        message.text(
+            0x42,
+            "com.apple.print.JobInfo.PMApplicationName",
+            "Test App",
+        );
+        message.text(0x42, "AP_ColorMatchingMode", "ApplicationColorMatching");
+        let bytes = message.finish();
+        let mut request = Request::parse(&bytes).unwrap();
+        assert!(request.validate_operation().is_ok());
+        request.attributes.push(Attribute {
+            group: 2,
+            tag: 0x21,
+            name: "copies".into(),
+            value: 2i32.to_be_bytes().to_vec(),
+        });
+        assert_eq!(request.validate_operation(), Err(ATTRIBUTES_NOT_SUPPORTED));
+        request.attributes.pop();
+        request.attributes.push(Attribute {
+            group: 2,
+            tag: 0x42,
+            name: "unknown-setting".into(),
+            value: b"ignored?".to_vec(),
+        });
+        assert_eq!(request.validate_operation(), Err(ATTRIBUTES_NOT_SUPPORTED));
+    }
     #[test]
     fn parses_document_boundary_and_rejects_truncation() {
         let mut msg = vec![1, 1, 0, 2, 0, 0, 0, 7, 1];

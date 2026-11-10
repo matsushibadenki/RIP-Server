@@ -1,0 +1,16 @@
+{
+  "project": "/Users/Shared/Program/Tauri/Fonts",
+  "source": "crates/font-core/src/color_fonts.rs",
+  "sourceSha256": "f22b23ab49969a55d229c855809acde8bf91b7f74433451b3fd57f4be3fcf36b",
+  "license": "MIT",
+  "reused": [
+    "SFNT table assembly",
+    "directory checksum and head adjustment",
+    "standalone face extraction design"
+  ],
+  "adaptations": [
+    "16 MiB output bound",
+    "TTF/OTF static outline admission",
+    "preserve shaping, names, hinting and embedding flags; discard invalidated DSIG"
+  ]
+}

@@ -31,6 +31,7 @@ pub(crate) async fn issue(
             req.binding["operation"].as_str(),
             Some(
                 "job-delete"
+                    | "font-install"
                     | "icc-register"
                     | "color-policy-create"
                     | "retention-extend"
@@ -70,7 +71,7 @@ pub(crate) async fn policy(
 ) -> Result<Json<Value>, ApiError> {
     pipeline::actor(&app, &headers)?;
     Ok(Json(
-        json!({"profile":"org.jrip.operation-approval-policy-v1","deleteApprovalRequired":app.require_delete_approval,"settingsApprovalRequired":app.require_settings_approval,"lifetimeSeconds":300,"singleUse":true,"separateIssuerIdentity":true,"operations":["job-delete","icc-register","color-policy-create","retention-extend","receipt-key-revoke"],"grantEndpoint":"/api/v1/operation-approvals","approvalHeader":"x-jrip-approval-id"}),
+        json!({"profile":"org.jrip.operation-approval-policy-v1","deleteApprovalRequired":app.require_delete_approval,"settingsApprovalRequired":app.require_settings_approval,"lifetimeSeconds":300,"singleUse":true,"separateIssuerIdentity":true,"operations":["job-delete","font-install","icc-register","color-policy-create","retention-extend","receipt-key-revoke"],"grantEndpoint":"/api/v1/operation-approvals","approvalHeader":"x-jrip-approval-id"}),
     ))
 }
 pub(crate) async fn enforce(State(app): State<App>, request: Request, next: Next) -> Response {
@@ -88,6 +89,7 @@ async fn guard(app: &App, request: Request) -> Result<Request, Box<Response>> {
     let method = request.method().as_str();
     let operation = match (method, route) {
         ("DELETE", "/api/v1/jobs/{id}") if app.require_delete_approval => "job-delete",
+        ("POST", "/api/v1/fonts") if app.require_settings_approval => "font-install",
         ("POST", "/api/v1/color/profiles") if app.require_settings_approval => "icc-register",
         ("POST", "/api/v1/color/policies") if app.require_settings_approval => {
             "color-policy-create"
@@ -103,7 +105,10 @@ async fn guard(app: &App, request: Request) -> Result<Request, Box<Response>> {
     authorize(
         app,
         request.headers(),
-        if matches!(operation, "job-delete" | "receipt-key-revoke") {
+        if matches!(
+            operation,
+            "job-delete" | "font-install" | "receipt-key-revoke"
+        ) {
             "admin"
         } else {
             "settings:write"
@@ -113,6 +118,7 @@ async fn guard(app: &App, request: Request) -> Result<Request, Box<Response>> {
     let identity = pipeline::actor(app, request.headers()).map_err(IntoResponse::into_response)?;
     let (mut parts, body) = request.into_parts();
     let limit = match operation {
+        "font-install" => rip_font::MAX_BYTES,
         "icc-register" => 4 * 1024 * 1024,
         "color-policy-create" => 16384,
         "job-delete" => 0,
@@ -122,7 +128,7 @@ async fn guard(app: &App, request: Request) -> Result<Request, Box<Response>> {
         .await
         .map_err(|_| ApiError(StatusCode::PAYLOAD_TOO_LARGE, "invalid_approval").into_response())?;
     let path = parts.uri.path().to_owned();
-    let value = if matches!(operation, "icc-register" | "job-delete") {
+    let value = if matches!(operation, "font-install" | "icc-register" | "job-delete") {
         Value::Null
     } else {
         rip_digest::parse(&bytes).map_err(|_| bad("invalid_approval").into_response())?
@@ -130,7 +136,7 @@ async fn guard(app: &App, request: Request) -> Result<Request, Box<Response>> {
     let effect = effects(app, operation, &path, &parts.headers, &value, &bytes)
         .await
         .map_err(IntoResponse::into_response)?;
-    let request_digest = if operation == "icc-register" {
+    let request_digest = if matches!(operation, "font-install" | "icc-register") {
         format!("sha256:{:x}", Sha256::digest(&bytes))
     } else {
         rip_digest::digest(&value).map_err(|_| bad("invalid_approval").into_response())?
@@ -151,6 +157,16 @@ async fn guard(app: &App, request: Request) -> Result<Request, Box<Response>> {
     };
     if !approved {
         return Err(Box::new((StatusCode::FORBIDDEN, Json(json!({"error":{"code":"approval_required","messages":{"en":"A separate administrator must approve this exact operation","ja":"この操作内容に対する別の管理者の承認が必要です","zh-CN":"此操作需要另一管理员审批"},"retryable":false,"approvalRequest":{"binding":binding,"grantEndpoint":"/api/v1/operation-approvals","requiredScope":"admin","separateIssuerIdentity":true,"expiresInSeconds":300,"singleUse":true},"recovery":{"en":"Review the effect, obtain approval, then retry the identical request with x-jrip-approval-id","ja":"影響を確認して承認を取得し、同じ要求にx-jrip-approval-idを付けて再実行してください","zh-CN":"核对影响并取得审批后，携带x-jrip-approval-id重试相同请求"}}}))).into_response()));
+    }
+    if operation == "font-install" {
+        parts.headers.insert(
+            "x-jrip-font-snapshot",
+            effect["before"]
+                .as_str()
+                .unwrap_or("none")
+                .parse()
+                .map_err(|_| bad("invalid_approval").into_response())?,
+        );
     }
     // Bind optional legacy delete revision to the exact revision reviewed at admission.
     if operation == "job-delete" {
@@ -226,6 +242,12 @@ async fn effects(
             }
             Ok(
                 json!({"before":before,"after":value,"impact":{"en":"Extend minimum retention of the local job artifact family","ja":"ローカルのジョブ関連成果物の最低保持期限を延長します","zh-CN":"延长本地任务相关产物的最低保留期限"}}),
+            )
+        }
+        "font-install" => {
+            let fonts = crate::font_install::convert(bytes.to_vec()).await?;
+            Ok(
+                json!({"before":crate::font_install::catalog(app.root.clone()).await?.map(|s|s.digest),"after":{"sourceSha256":rip_font::hash(bytes),"fonts":fonts.iter().map(|f|&f.font).collect::<Vec<_>>()},"impact":{"en":"Install these exact font programs for subsequent RIP jobs","ja":"このフォントプログラムを登録し、以後のRIPジョブで使用します","zh-CN":"注册这些字体程序，供后续RIP作业使用"}}),
             )
         }
         "icc-register" => {

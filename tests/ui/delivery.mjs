@@ -12,14 +12,22 @@ page.on('request',request=>{if(request.method()==='POST'&&new URL(request.url())
 const wait=async(fn,label)=>{for(let n=0;n<200;n++){if(await fn())return;await page.waitForTimeout(100);}throw new Error(label);};
 const api=async path=>{const response=await context.request.get(new URL(path,url).href,{headers:{Authorization:`Bearer ${token}`}});assert.equal(response.status(),200);return response.json();};
 async function connect(value){await page.locator('#connection').click();await page.locator('#token').fill(value);await page.locator('#login-form button[type=submit]').click();await wait(()=>page.locator('#login').isVisible().then(v=>!v),'connected');}
-async function openOutput(){await page.getByRole('button',{name:'test.pdf',exact:true}).click();await wait(()=>page.locator('#delivery-panel').isVisible(),'physical controls visible');await page.locator('#delivery-panel > summary').click();await wait(()=>page.locator('#delivery-printer').isEnabled(),'destinations loaded');}
+async function openOutput(){await page.getByRole('button',{name:'test.pdf',exact:true}).click();await page.locator('#tab-output').click();await wait(()=>page.locator('#delivery-panel').isVisible(),'physical controls visible');await wait(()=>page.locator('#delivery-printer').isEnabled(),'destinations loaded');}
 async function configure(copies='3',ranges='2-3',sides='two-sided-long-edge'){
  await page.locator('#delivery-printer').selectOption('test');await wait(()=>page.locator('#delivery-media').isEnabled(),'live capabilities loaded');
  assert.equal(await page.locator('#delivery-media').inputValue(),'custom_square_25.4x25.4mm');
  assert.deepEqual(await page.locator('#delivery-sides option').evaluateAll(options=>options.map(o=>o.value)),['one-sided','two-sided-long-edge','two-sided-short-edge']);
  assert.equal(await page.locator('#delivery-copies').getAttribute('max'),'5');
  await page.locator('#delivery-color').selectOption(color);await page.locator('#delivery-copies').fill(copies);await page.locator('#delivery-pages').fill(ranges);await page.locator('#delivery-sides').selectOption(sides);
+ await page.locator('#placement-mode').selectOption('custom');await page.locator('#placement-percent').fill('50');await page.locator('#placement-rotation').selectOption('90');await page.locator('#placement-align').selectOption('1,1');await page.locator('#placement-x').fill('1');await page.locator('#placement-y').fill('-1');
  await page.locator('#delivery-check').click();await wait(()=>page.locator('#delivery-review').isVisible(),'verified output review');
+ assert.match(await page.locator('#delivery-summary').innerText(),/90°/);
+ await page.locator('#tab-jobs').click();await page.locator('#tab-output').click();assert.equal(await page.locator('#placement-rotation').inputValue(),'90');assert.equal(await page.locator('#placement-percent').inputValue(),'50');assert(await page.locator('#delivery-review').isVisible());
+ await wait(()=>page.locator('#output-layout-image').evaluate(i=>!i.hidden&&i.complete&&i.naturalWidth>0),'selected color artifact preview');
+ assert.deepEqual(await page.locator('#output-layout-page option').evaluateAll(options=>options.map(o=>o.textContent)),ranges==='2-3'?['2','3']:['3']);
+ const paper=await page.locator('#output-layout-paper').boundingBox();assert(Math.abs(paper.width-paper.height)<1,'paper preserves square media ratio');
+ assert(await page.locator('#output-layout-status').innerText().then(v=>!v.includes('Size mismatch')));
+
 }
 async function approve(){await page.locator('#delivery-reason').fill('Review of exact selected pages and media');await page.locator('#delivery-approve').click();await wait(()=>page.locator('#delivery-approval').inputValue().then(v=>v.length===36),'exact approval created');await wait(()=>page.locator('#delivery-send').isEnabled(),'approval finished');}
 try{
@@ -127,7 +135,7 @@ try{
  const job=(await api('/api/v1/jobs')).find(job=>job.manifest.name==='test.pdf');assert(job);
  assert.equal(writes.length,0);assert.deepEqual((await api(`/api/v1/jobs/${job.id}/deliveries`)).deliveries,[]);
  await page.locator('#delivery-send').click();await wait(()=>page.locator('#notice').innerText().then(v=>v.includes('approval')),'missing approval blocked');assert.equal(writes.length,0);
- await approve();await refreshPrinter();assert.equal(await page.locator('#delivery-review').isHidden(),true);assert.equal(await page.locator('#delivery-copies').inputValue(),'2');assert.equal(await page.locator('#delivery-color').inputValue(),color);assert.equal(await page.locator('#delivery-pages').inputValue(),'2-3');await page.locator('#delivery-check').click();await wait(()=>page.locator('#delivery-review').isVisible(),'review after printer refresh');await approve();const previousGrant=await page.locator('#delivery-approval').inputValue();
+ await approve();await refreshPrinter();assert.equal(await page.locator('#delivery-review').isHidden(),true);assert.equal(await page.locator('#delivery-copies').inputValue(),'2');assert.equal(await page.locator('#delivery-color').inputValue(),color);assert.equal(await page.locator('#delivery-pages').inputValue(),'2-3');await page.locator('#delivery-check').click();await wait(()=>page.locator('#delivery-review').isVisible(),'review after printer refresh');await approve();const previousGrant=await page.locator('#delivery-approval').inputValue();await page.locator('#placement-rotation').selectOption('180');assert(await page.locator('#delivery-review').isHidden());assert.equal(await page.locator('#delivery-approval').inputValue(),'');await page.locator('#placement-rotation').selectOption('90');
  await page.locator('#delivery-copies').fill('3');assert.equal(await page.locator('#delivery-review').isHidden(),true);assert.equal(await page.locator('#delivery-approval').inputValue(),'');assert.equal(await page.locator('#delivery-send').isDisabled(),true);
  await page.locator('#delivery-check').click();await wait(()=>page.locator('#delivery-review').isVisible(),'changed conditions rechecked');await approve();assert.notEqual(await page.locator('#delivery-approval').inputValue(),previousGrant);
  if(screenshots){await mkdir(screenshots,{recursive:true});await page.screenshot({path:`${screenshots}/delivery-desktop.png`,fullPage:true});await page.locator('#delivery-panel').screenshot({path:`${screenshots}/delivery-panel-desktop.png`});}
@@ -199,6 +207,17 @@ try{
  assert.deepEqual(await page.locator('#delivery-history option').evaluateAll(options=>options.map(option=>option.value).filter(Boolean)),expectedHistory,'polling retains creation order and latest revisions');
  await page.locator('#connection').click();await connect('reader');await openOutput();await configure('1','3','one-sided');
  assert.equal(await page.locator('#delivery-send').isDisabled(),true);assert.equal(await page.locator('#delivery-issuer').isHidden(),true);assert.equal(writes.length,3);
+ // A read-only capability fixture proves real-size placement without printing.
+ await page.route(printerRoute,async route=>{const response=await route.fetch();const data=await response.json();data.deliveryIntersection.media.push({name:'custom_wide_50.8x25.4mm',widthMicrons:50800,heightMicrons:25400});await route.fulfill({response,json:data});});
+ await page.locator('#printer-refresh').click();await wait(()=>page.locator('#printer-refresh').isEnabled(),'wide paper fixture loaded');
+ await page.locator('#placement-mode').selectOption('original');
+ await page.locator('#delivery-media').selectOption('custom_wide_50.8x25.4mm');
+ await wait(()=>page.locator('#output-layout-image').evaluate(i=>!i.hidden&&i.complete&&i.naturalWidth>0),'wide media preview');
+ const paperBox=await page.locator('#output-layout-paper').boundingBox(),imageBox=await page.locator('#output-layout-image').boundingBox();
+ assert(Math.abs(paperBox.width/paperBox.height-2)<.02);assert(Math.abs(imageBox.width/paperBox.width-.5)<.02);assert(Math.abs(imageBox.x-paperBox.x)<1&&Math.abs(imageBox.y-paperBox.y)<1);
+ assert.match(await page.locator('#output-layout-status').innerText(),/Size mismatch/);assert.equal(writes.length,3,'layout preview never queues output');
+ for(const lang of ['en','ja','zh-CN']){await page.locator('#language').selectOption(lang);for(const width of [320,430,1440]){await page.setViewportSize({width,height:1000});assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),`paper layout fits ${lang}/${width}`);}}
+ await page.unroute(printerRoute);
  assert.deepEqual(errors,[]);
  console.log(`PASS ${url}: real color output, live media/copies/duplex, structured printer notices, independent PWG/CUPS telemetry, zero/unknown/units/expiry/query-failure/text safety, non-queueing review, exact approval, invalidation, device state/cancel, reload recovery, lost-response recovery without repost, read-only scopes, EN/JA/zh 320/375/430px; Browser skill unavailable, Playwright with installed Chrome`);
 }catch(error){console.error('Output UI state',await page.evaluate(()=>({notice:document.getElementById('notice').textContent,review:document.getElementById('delivery-summary').textContent,status:document.getElementById('delivery-status').textContent,printer:document.getElementById('delivery-printer').value})));if(process.env.JRIP_UI_SCREENSHOTS){await mkdir(process.env.JRIP_UI_SCREENSHOTS,{recursive:true});await page.screenshot({path:`${process.env.JRIP_UI_SCREENSHOTS}/delivery-failure.png`,fullPage:true});}throw error;}finally{await browser.close();}

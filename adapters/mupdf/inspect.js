@@ -1,5 +1,5 @@
 // Pinned Debian bookworm MuPDF API: bound() includes CropBox, rotation and UserUnit.
-var document = new Document("/input/document");
+var document = new Document(scriptArgs.length ? scriptArgs[0] : "/input/document");
 if (document.needsPassword()) throw new Error("encrypted_pdf_unsupported");
 var count = document.countPages();
 if (count < 1 || count > 100) throw new Error("page_limit");

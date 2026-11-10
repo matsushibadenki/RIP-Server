@@ -26,7 +26,7 @@ fn mismatch() -> ApiError {
 async fn verify(app: &App, id: Uuid) -> Result<Verified, ApiError> {
     let delivery = app.repo.delivery(id).await?;
     let ticket = delivery.ticket.clone();
-    if !(1..=32 * 1024 * 1024).contains(&ticket.artifact_bytes) {
+    if !(1..=64 * 1024 * 1024).contains(&ticket.artifact_bytes) {
         return Err(mismatch());
     }
     let contract = match app.repo.delivery_contract(id).await {
@@ -62,7 +62,7 @@ async fn verify(app: &App, id: Uuid) -> Result<Verified, ApiError> {
             .await?;
     let mut bytes = Vec::new();
     (&mut snapshot.0)
-        .take(32 * 1024 * 1024 + 1)
+        .take(64 * 1024 * 1024 + 1)
         .read_to_end(&mut bytes)
         .await
         .map_err(internal)?;
@@ -81,7 +81,7 @@ async fn verify(app: &App, id: Uuid) -> Result<Verified, ApiError> {
             let end=name.iter().position(|b|*b==0).unwrap_or(64);
             if page.dpi!=ticket.dpi || page.document_type!=ticket.document_type || &name[..end]!=ticket.media.as_bytes() {return Err(mismatch())}
             facts.push(json!({"page":index+1,"width":page.width,"height":page.height,"dpi":[page.dpi,page.dpi],
-                "bitsPerComponent":8,"documentType":page.document_type,"colorSpace":match page.document_type {"rgb_8"=>"rgb","cmyk_8"=>"cmyk",_=>"gray"}}));
+                "bitsPerComponent":8,"documentType":page.document_type,"colorSpace":match page.document_type {"rgb_8"|"srgb_8"=>"rgb","cmyk_8"=>"cmyk",_=>"gray"}}));
         }
         Ok(facts)
     }).await.map_err(internal)??;

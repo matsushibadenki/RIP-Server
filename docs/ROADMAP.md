@@ -339,3 +339,22 @@ Printer
 - 🟢 [Done] 信頼されたPDF検査CLI、Docker MuPDFの内容解釈・実効寸法検査、原稿hash・主体に拘束した保存結果、API/MCP読取、inspectionId指定時の用紙照合とcommit固定を実装。継承CropBox/回転/UserUnitと修復PDFの拒否、検査から偽IPP完了までを検証。 / Trusted PDF inspection CLI and opt-in bound evidence, verified geometry and end-to-end fake device output / 信任PDF检查CLI与可选绑定证据，已验证尺寸及模拟设备完整输出。
 
 - 🟢 [Done] HTTP/MCPのPDF検査非同期受付、主体・原稿hash固定の並行再送、状態照会・revision付き待機中取消、32件/256 MiB制限、trusted worker、成功状態と証跡の原子的保存、中断時FAILED、永続cleanupと孤立原稿・新CLI snapshot回収。Dockerで処理・中断復旧・lock保護・清掃を検証。 / Async bounded PDF inspection queue, MCP controls, trusted worker and durable recovery/cleanup / 有界异步PDF检查队列、MCP控制、可信worker与持久恢复/清理。
+
+## Local Mac physical forwarding / Mac実機配送 / Mac实体投递
+
+- 🟢 [Done] 新規IPP原稿だけの配送先URI固定、既存pipelineへの永続接続、PWG sRGB、実機完了待ち、取消と再起動時の重複防止。 / Intake-bound physical forwarding and device-confirmed completion / 接收时绑定的实体投递与设备确认完成。
+- ⭕️ [Pending] RICOH実機の紙出力とMacアプリからの受入確認（[手順と対応範囲](MAC-RICOH-PRINT.md)）。 / RICOH paper-output acceptance / RICOH实机出纸验收。
+
+- 🟢 [Done] ジョブ一覧のFinder表示・確認付き削除、配送中の削除拒否、見出しと一覧の間への原本プレビュー／情報配置。英日中と320px幅のブラウザー検証を完了。 / Finder reveal and guarded deletion with preview above list / Finder显示、受保护删除及列表上方预览。
+
+- 🟢 [Done] 実機出力欄の用紙比率・原寸配置プレビュー、寸法警告、ページ範囲／色変換結果の連動。 / Paper-aspect actual-size placement preview / 纸张比例与原尺寸位置预览。
+
+- 🟢 [Done] 用紙への拡縮・回転・9点配置・mm移動をプレビューとPWGへ反映し、配置設定を承認と出力hashに固定。 / Approved scaling/rotation/placement in preview and PWG / 预览与PWG的缩放旋转布局及审批绑定。
+
+- 🟢 [Done] ジョブ・実機出力・プリンターのタブ化、ジョブ初期表示、設定保持とキーボード切替。 / Accessible workspace tabs / 工作区选项卡。
+
+- 🟢 [Done] 認証・承認を維持した追加LAN HTTPリスナー、LANでのFinder無効化、起動前の待受検査。 / Authenticated additional private-network console / 认证的局域网操作界面。
+
+- 🟢 [Done] 右揃えのフォントタブ、実RIP環境のフォント解決検査、検索・エンジン／使用形式／代替先表示。 / Verified RIP font catalog / 已验证的RIP字体列表。
+- 🟢 [Done] フォントタブから静的TTF／OTF・TTC／OTCの選択／ドロップ追加。FontsプロジェクトのMIT版SFNT組立を移植し、MuPDF／GhostscriptのPDFとGSのPS／EPSへ完全一致名で適用。不変スナップショット・永続化・管理者権限・設定承認と実エンジン／ブラウザー検証。[FONT-INSTALLATION.md](FONT-INSTALLATION.md)。 / Registered RIP font installation / 注册RIP字体安装。
+- 🔴 [Later] 可変・カラー・Web／旧式フォントの追加変換。 / Variable, color, web and legacy font conversion / 可变、彩色、Web及旧式字体转换。

@@ -6,6 +6,7 @@ import tempfile
 import sys
 sys.path.append("/usr/local/lib/jrip")
 from font_policy import inspect_fonts
+import font_prepare
 
 
 def command(*args):
@@ -22,10 +23,12 @@ def command(*args):
 
 
 def main():
-    if command("show", "/input/document", "trailer/Encrypt").strip() != b"null":
+    source=font_prepare.prepare_pdf("/input/document")
+    if command("show", source, "trailer/Encrypt").strip() != b"null":
         raise ValueError("encrypted_pdf_unsupported")
-    fonts = inspect_fonts("/input/document")
-    report = json.loads(command("run", "/usr/local/lib/jrip/inspect.js"))
+    fonts = inspect_fonts(source)
+    if font_prepare.LAST_RESOLUTION:fonts["registeredResolution"]=font_prepare.LAST_RESOLUTION
+    report = json.loads(command("run", "/usr/local/lib/jrip/inspect.js",source))
     fonts["runtimeEvidence"] = report.pop("fontUsage")
     report["fontPolicy"] = fonts
     for page in report["pages"]:

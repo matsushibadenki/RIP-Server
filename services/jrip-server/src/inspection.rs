@@ -233,9 +233,12 @@ pub async fn tick(app: &App) -> Result<bool, Box<dyn std::error::Error>> {
                 )
                 .await
                 .map_err(|_| "INSPECTION_SOURCE_CHANGED".to_string())?;
-                let mut report = match rip_interpreter::inspect_pdf_attempt(
+                let mut report = match rip_interpreter::inspect_pdf_attempt_with_fonts(
                     &snapshot.join("document"),
                     id,
+                    "jrip-mupdf:local",
+                    rip_font::store::current(&app.root)
+                        .map_err(|_| "FONT_STORE_INTEGRITY_MISMATCH".to_string())?,
                 )
                 .await
                 {

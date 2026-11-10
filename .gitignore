@@ -57,3 +57,6 @@ Desktop.ini
 
 # Browser test dependencies
 node_modules/
+
+# Machine-local physical IPP route
+/config/ipp-forward.local.json

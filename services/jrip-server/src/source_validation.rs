@@ -78,6 +78,11 @@ pub async fn render(
     output: &Path,
     repo: &rip_storage::Repository,
 ) -> Result<ValidatedRender, InterpreterError> {
+    let font_snapshot = rip_font::store::current(root)
+        .map_err(|_| InterpreterError::Rejected("font_store_integrity_mismatch"))?;
+    let mut engine = engine.clone();
+    engine.mupdf.sandbox.font_snapshot = font_snapshot.clone();
+    engine.ghostscript.sandbox.font_snapshot = font_snapshot.clone();
     let mut snapshot = Snapshot::open(root, directory, job).await?;
     let source = snapshot.directory.join("document");
     let strict_pdf = job.manifest.format == DocumentFormat::Pdf;
@@ -85,10 +90,11 @@ pub async fn render(
         let mut font_policy = None;
         let mut source_geometry = None;
         let inspected = if strict_pdf {
-            let report = rip_interpreter::inspect_pdf_attempt_with_image(
+            let report = rip_interpreter::inspect_pdf_attempt_with_fonts(
                 &source,
                 uuid::Uuid::new_v4(),
                 &engine.mupdf.sandbox.image,
+                font_snapshot,
             )
             .await?;
             font_policy = Some(report["fontPolicy"].clone());
