@@ -53,7 +53,7 @@ function controls() {
 async function request(path, options={}, s=session) {
  if(!s) throw new Stale();
  let response;
- try { response=await fetch(path,{...options,headers:{...options.headers,Authorization:`Bearer ${s.token}`,'Accept-Language':language},signal:s.abort.signal,credentials:'omit',cache:'no-store',redirect:'error'}); }
+ try { response=await fetch(path,{...options,headers:{...options.headers,Authorization:`Bearer ${s.token}`,'Accept-Language':language},signal:options.signal?AbortSignal.any([s.abort.signal,options.signal]):s.abort.signal,credentials:'omit',cache:'no-store',redirect:'error'}); }
  catch(error) { if(s!==session||s.abort.signal.aborted) throw new Stale(); throw error; }
  if(s!==session) throw new Stale();
  if(!response.ok) {

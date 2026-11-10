@@ -7,6 +7,10 @@
 
 ## 当面の優先順位：一般RIPの実用度
 
+🟢 [Done] 独立プリンターパネルの保存状態をREST SSEで自動更新。Bearer認証、cursor再接続、通知経路と機器照会失敗の区別、切替／切断時の解放を3言語・狭幅と実ブラウザーで検証。[詳細](CONSOLE-PRINTER-SUBSCRIPTIONS.md)。 / Automatic console printer subscriptions / 操作界面打印机自动订阅。
+
+🟢 [Done] 保存済み機器状態の認証付きREST SSE。最新snapshot集約、照会時刻更新、stream／cursorの再開、認可失効、共有接続上限、実HTTPと切断解放を検証。購読自体は機器へ接続しない。[詳細](PRINTER-OBSERVATION-STREAM.md)。 / Authenticated coalesced printer observation SSE / 认证合并设备观察SSE。
+
 🟢 [Done] ジョブ／原稿未選択でも使える独立プリンター状態パネル。保存情報の読取と明示的な最新照会を分離し、読取専用権限・機器切替の応答競合・切断／再接続・3言語と狭幅を検証。[詳細](CONSOLE-PRINTER-STATUS.md)。 / Independent no-job printer status panel / 无作业也可用的独立打印机状态面板。
 
 🟢 [Done] 操作画面で再起動後の保存済みプリンター状態を復元。前回観測時刻・期限・失敗を区別し、能力確認／承認へ流用しない。App再生成と実ブラウザー再読込、3言語・狭幅・復旧を検証。[詳細](CONSOLE-PRINTER-STATUS.md)。 / Console restores saved printer reports after restart without granting capabilities or approval / 操作界面重启后恢复保存设备报告，不授予能力或审批。

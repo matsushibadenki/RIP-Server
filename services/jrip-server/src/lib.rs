@@ -34,6 +34,7 @@ mod preflight;
 mod preview;
 pub mod print;
 mod printer_observation;
+mod printer_observation_stream;
 pub mod printer_observer;
 mod retention;
 mod retry;
@@ -102,6 +103,10 @@ pub fn router(app: App) -> Router {
         .route("/console/", get(console::index))
         .route("/console/app.js", get(console::script))
         .route("/console/delivery.js", get(console::delivery_script))
+        .route(
+            "/console/printer-stream.js",
+            get(console::printer_stream_script),
+        )
         .route(
             "/console/printer-dashboard.js",
             get(console::printer_dashboard_script),
@@ -209,6 +214,10 @@ pub fn router(app: App) -> Router {
         .route(
             "/api/v1/printers/{id}/observations",
             get(printer_observation::list),
+        )
+        .route(
+            "/api/v1/printers/{id}/observations/stream",
+            get(printer_observation_stream::connect),
         )
         .route(
             "/api/v1/printers/{id}/observations/{sequence}",

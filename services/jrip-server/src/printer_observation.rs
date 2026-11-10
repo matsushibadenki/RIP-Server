@@ -63,7 +63,7 @@ pub(crate) async fn probe(app: &App, printer: &Printer) -> Result<Capabilities, 
         }
     }
 }
-fn configured<'a>(app: &'a App, id: &str) -> Result<&'a Printer, ApiError> {
+pub(crate) fn configured<'a>(app: &'a App, id: &str) -> Result<&'a Printer, ApiError> {
     if id.is_empty()
         || id.len() > 128
         || !id

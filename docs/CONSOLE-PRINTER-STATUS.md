@@ -24,7 +24,7 @@ Zero is visible; unknown, unsupported and absent values remain distinct. Only pe
 
 Validation / 検証 / 验证: real local Chrome + Playwright, isolated Rust HTTP server, mock IPP and actual Docker color conversion. EN/JA/zh-CN at 320/375/430/1440px; zero/unknown/units, localized recovery tooltips, malformed reports, expiry, failed-query recovery, long/HTML-like labels, input preservation, approval invalidation and read-only credentials are exercised alongside the existing print/cancel/reload/lost-response flow. Screenshots are QA artifacts outside the repository. Browser skill was unavailable; installed Chrome was used without installing browser dependencies.
 
-🟠 [Next] Push subscriptions / push購読 / push订阅。
+🟢 [Done] [Independent panel push subscriptions / 独立パネルのpush購読 / 独立面板push订阅](CONSOLE-PRINTER-SUBSCRIPTIONS.md)。
 
 ⭕️ [Pending] Real-device labels, supply accuracy and vendor recovery procedures / 実機ラベル・残量精度・機種別復旧手順 / 实机标签、余量精度及厂商恢复步骤。
 
@@ -51,3 +51,5 @@ Tests reopen the Rust application/repository after persisting a fake-device repo
 🟢 [Done] 连接后可在零作业、未选择原稿时使用打印机面板。打开时读取注册列表，选择设备只读取保存观察；刷新图标明确查询所选设备，失败时保留保存报告及时间。界面定时器仅更新过期提示。刷新注册列表反映配置变化，无注册或历史时显示未知／未报告。版本检查防止切换设备、关闭面板及断开会话后被延迟响应覆盖。jobs:read界面不提交、取消、重试、审批或修改投递确认，只共享renderer，不共享输出状态。实时报告不代表审批或耗材充足；实体输出仍独立检查能力及审批。不自动查询所有设备。
 
 Validation: no-job Rust HTTP fixture with a fake IPP backend and a reopened repository; read-only credential; explicit query counters; failed response, device-switch race, disconnect/reconnect; EN/JA/zh-CN at 320/375/430/1440px. Real-printer accuracy remains Pending. / ジョブなし・Repository再生成・模擬IPP・読取専用資格情報で照会件数、失敗、切替競合、切断／再接続と3言語／各画面幅を検証。実機精度はPending。 / 无作业、重建Repository、模拟IPP与只读凭据下验证查询计数、失败、切换竞争、断开／重连及三语言／各宽度；实体设备精度仍为Pending。
+
+🟢 [Done] [REST SSE transport / REST SSE配信 / REST SSE传输](PRINTER-OBSERVATION-STREAM.md) is available. [Console subscriptions](CONSOLE-PRINTER-SUBSCRIPTIONS.md) are implemented for the independent panel / 独立パネルへの接続も実装済み / 独立面板接入也已实现。

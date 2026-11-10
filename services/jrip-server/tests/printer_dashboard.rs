@@ -13,9 +13,19 @@ use tower::ServiceExt;
 #[tokio::test]
 #[ignore = "requires Playwright Chromium"]
 async fn printer_dashboard_works_without_jobs_and_fences_session_and_device_changes() {
+    let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let unit = tokio::process::Command::new("node")
+        .args(["--test", "tests/ui/printer-stream.test.mjs"])
+        .current_dir(&workspace)
+        .status()
+        .await
+        .unwrap();
+    assert!(unit.success(), "SSE reader protocol tests failed");
     let dir = tempfile::tempdir().unwrap();
     let count = Arc::new(AtomicUsize::new(0));
     let failure = Arc::new(AtomicBool::new(false));
+    let queue = Arc::new(AtomicUsize::new(0));
+    let reported_queue = queue.clone();
     let queries = count.clone();
     let broken = failure.clone();
     let device = Router::new().route(
@@ -23,6 +33,7 @@ async fn printer_dashboard_works_without_jobs_and_fences_session_and_device_chan
         post(move |bytes: Bytes| {
             let count = queries.clone();
             let failure = broken.clone();
+            let queued = reported_queue.clone();
             async move {
                 count.fetch_add(1, Ordering::SeqCst);
                 let request = rip_ipp::Request::parse(&bytes).unwrap();
@@ -42,7 +53,7 @@ async fn printer_dashboard_works_without_jobs_and_fences_session_and_device_chan
                 r.attribute(0x23, "printer-state", &5i32.to_be_bytes());
                 r.attribute(0x22, "printer-is-accepting-jobs", &[1]);
                 r.text(0x44, "printer-state-reasons", "media-jam-error");
-                r.integer("queued-job-count", 0);
+                r.integer("queued-job-count", queued.load(Ordering::SeqCst) as i32);
                 r.integer("marker-levels", 0);
                 ([("content-type", "application/ipp")], r.finish())
             }
@@ -90,6 +101,7 @@ async fn printer_dashboard_works_without_jobs_and_fences_session_and_device_chan
         scopes: vec!["jobs:read".into()],
         validity: None,
     }];
+    let slots = app.event_streams.clone();
     let counter = count.clone();
     let fail = failure.clone();
     let router = jrip_server::router(app)
@@ -97,7 +109,8 @@ async fn printer_dashboard_works_without_jobs_and_fences_session_and_device_chan
             "/__test/status",
             get(move || {
                 let count = counter.load(Ordering::SeqCst);
-                async move { axum::Json(serde_json::json!({"queries":count})) }
+                let streams = 64 - slots.available_permits();
+                async move { axum::Json(serde_json::json!({"queries":count,"streams":streams})) }
             }),
         )
         .route(
@@ -107,6 +120,13 @@ async fn printer_dashboard_works_without_jobs_and_fences_session_and_device_chan
                 async { StatusCode::NO_CONTENT }
             }),
         );
+    let router = router.route(
+        "/__test/queue",
+        post(move |axum::Json(value): axum::Json<usize>| {
+            queue.store(value, Ordering::SeqCst);
+            async { StatusCode::NO_CONTENT }
+        }),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
