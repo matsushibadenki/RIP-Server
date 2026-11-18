@@ -91,7 +91,9 @@
    🟢 [Done] Noto CJK地域別サブセットの業務風3言語PDFを追加。複数FDのCID CFFを両エンジンのRGB／グレー・288dpiで独立輪郭検査し、誤CIDを検出。[多言語コーパス](../tests/corpus/multilingual/README.md)。 / Multilingual realistic font corpus / 多语言实际字体原稿回归。
    🟢 [Done] 1ページのファイル上限を最大ページ数から独立させ、通常設定でA4 RGB高解像度ページを許容。65MiB／総spool上限の小さい方、tmpfs・フレーム総量制限を維持。 / Independent bounded page file limit / 独立有界页面文件上限。
    🟢 [Done] PDF埋め込みFontFile系プログラムを復号SHA-256と格納SHA-256で識別。容量制限・共有参照・識別不能の明示・原稿別API／永続化を検証。[EMBEDDED-FONT-IDENTITY.md](EMBEDDED-FONT-IDENTITY.md)。 / Bounded embedded program identities / 有界内嵌程序标识。
-   🟠 [Next] 実ラスタライズ時・Ghostscript／PS／EPSの使用書体記録、実行字形とプログラムの対応、Type3識別、実用原稿の比較、OpenType縦字形置換を拡充。 / Raster-stage program/glyph association, Ghostscript/PS/EPS evidence, Type3 identities, practical documents and shaping / 栅格阶段程序与字形关联、Ghostscript/PS/EPS证据、Type3标识、实际原稿及排版扩展。
+   🟢 [Done] PDF Type 3の字形名と復号済み描画命令を識別し、検査結果に記録。 / Identify declared PDF Type 3 glyph programs / 识别PDF Type 3声明的字形程序。
+   🟢 [Done] MuPDFの実描画でFreeTypeがビットマップ化した字形IDを、読み込んだフォントのSHA-256・フェイス番号と対応付けて保存。 / Persist actual MuPDF bitmap glyphs with program hashes and face indices / 保存MuPDF实际位图字形及程序哈希和字体索引。
+   🟠 [Next] 輪郭描画・ストローク・Type 3とGhostscript／PS／EPSへ実描画の観測範囲を拡張し、実用原稿との比較とOpenType縦字形置換を拡充。 / Extend raster evidence to outlines, strokes, Type 3 and Ghostscript/PS/EPS, plus practical documents and shaping / 扩展轮廓、描边、Type 3及Ghostscript/PS/EPS证据与实际原稿及排版验证。
 6. ⭕️ [Pending] 実機1台で複数部、両面、色、取消、障害復旧、Mac／Windowsアプリ投入を通して受入確認。実機を使える検証環境が必要。 / Real-printer acceptance / 实体打印机验收。
 
 - 🟢 [Done] Agent向けジョブ状態履歴API：`GET /api/v1/jobs/{id}/events?after=0&limit=50`。Bearer認証、永続sequenceによる差分取得、最大100件、再起動・メタデータ削除後の履歴参照に対応。状態変更と実測したページ成果物検証進捗を記録する。 / Authenticated, persistent, resumable state history / 认证、持久化、可恢复的状态历史。

@@ -1,3 +1,8 @@
+FROM debian:bookworm-slim AS observer
+RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev libfreetype-dev libssl-dev
+COPY adapters/mupdf/raster_fonts.c /src.c
+RUN gcc -O2 -Wall -Wextra -Werror -shared -fPIC -I/usr/include/freetype2 /src.c -o /observer.so -ldl -lcrypto
+
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends mupdf-tools python3 python3-venv fonts-noto-cjk && rm -rf /var/lib/apt/lists/*
 COPY adapters/source_profiles/requirements.txt /tmp/source-profile-requirements.txt
@@ -12,5 +17,6 @@ COPY adapters/font_prepare.py /usr/local/lib/jrip/font_prepare.py
 COPY adapters/font_policy.py /usr/local/lib/jrip/font_policy.py
 COPY adapters/page_selection.py /usr/local/lib/jrip/page_selection.py
 COPY adapters/stream_pages.py /usr/local/lib/jrip/stream_pages.py
+COPY --from=observer /observer.so /usr/local/lib/jrip/raster_fonts.so
 USER 1000:1000
 ENTRYPOINT ["python3", "-I", "/usr/local/lib/jrip/render.py"]

@@ -64,12 +64,20 @@ impl Repository {
             if let Some(usage) = policy.get("runtimeEvidence") {
                 rip_core::font_usage::validate(usage, pages).map_err(|_| StorageError::Conflict)?;
             }
+            let mut inspection_policy = policy.clone();
+            if let Some(evidence) = inspection_policy
+                .as_object_mut()
+                .and_then(|fields| fields.remove("rasterEvidence"))
+            {
+                rip_core::font_programs::parse_raster_evidence(&serde_json::to_vec(&evidence)?)
+                    .map_err(|_| StorageError::Conflict)?;
+            }
             if !strict_pdf
                 || policy["profile"] != "org.jrip.pdf-font-policy-v1"
                 || policy["accepted"] != true
                 || policy["scope"] != "declared-resources"
                 || fonts.len() > 128
-                || serde_json::to_vec(policy)?.len() > 65536
+                || serde_json::to_vec(&inspection_policy)?.len() > 65536
                 || fonts.iter().any(|font| {
                     !matches!(
                         font["state"].as_str(),

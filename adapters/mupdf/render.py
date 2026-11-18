@@ -3,6 +3,7 @@
 No reshaping, resampling, or color conversion occurs in this packaging step.
 Both rendering and packaging run inside the same bounded sandbox.
 """
+import os
 import pathlib
 import shutil
 import struct
@@ -107,11 +108,21 @@ def main():
         page.unlink()
         return target
 
+    report = pathlib.Path("/tmp/jrip-raster-fonts.json")
+    def evidence():
+        with report.open("rb") as stream:
+            payload = stream.read(256 * 1024 + 1)
+        if not 0 < len(payload) <= 256 * 1024:
+            raise ValueError("invalid raster font evidence size")
+        return payload
+
     stream_pages([
         "mutool", "draw", "-q", "-F", "pam", "-c", mode,
         "-r", str(dpi), "-B", "128", "-o", "/output/page-%06d.pam",
         source, ",".join(map(str, chosen)) if chosen else "1-" + str(last_page),
-    ], "pam", len(chosen) if chosen else last_page - 1, prepare, total, chosen)
+    ], "pam", len(chosen) if chosen else last_page - 1, prepare, total, chosen, evidence=evidence,
+       env=dict(os.environ, LD_PRELOAD="/usr/local/lib/jrip/raster_fonts.so",
+                JRIP_RASTER_FONT_REPORT=str(report)))
 
 
 if __name__ == "__main__":

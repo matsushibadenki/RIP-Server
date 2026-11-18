@@ -2,6 +2,8 @@
 
 This inventories declared resources, not executed glyph use or shaping quality.
 """
+import hashlib
+import json
 from pathlib import Path
 from font_identity import identify, PROFILE as IDENTITY_PROFILE, MAX_TOTAL
 from pypdf import PdfReader
@@ -13,6 +15,8 @@ STANDARD14 = frozenset(("Times-Roman", "Times-Bold", "Times-Italic", "Times-Bold
     "Courier", "Courier-Bold", "Courier-Oblique", "Courier-BoldOblique", "Symbol", "ZapfDingbats"))
 MAX_NODES = 8192
 MAX_FONTS = 128
+MAX_CHAR_PROCS = 256
+TYPE3_PROFILE = "org.jrip.type3-charprocs-v1"
 
 
 def inspect_fonts(path):
@@ -35,6 +39,28 @@ def inspect_fonts(path):
 
     def key(obj):
         return (obj.idnum, obj.generation) if isinstance(obj, IndirectObject) else (id(obj),)
+
+    def type3_identity(procs):
+        nonlocal total_program_bytes
+        result = {'profile': TYPE3_PROFILE, 'status': 'UNAVAILABLE'}
+        if len(procs) > MAX_CHAR_PROCS:
+            return dict(result, reason='GLYPH_LIMIT')
+        entries = []
+        for name, ref in sorted(procs.items()):
+            stream = resolve(ref)
+            if not isinstance(stream, StreamObject) or any(k in stream for k in ('/F', '/FFilter', '/FDecodeParms')):
+                return dict(result, reason='INVALID_STREAM')
+            stream_key = key(ref)
+            if stream_key not in programs:
+                programs[stream_key] = identify(stream, MAX_TOTAL - total_program_bytes)
+                total_program_bytes += programs[stream_key].charged_bytes
+            identity = programs[stream_key]
+            if identity['status'] != 'HASHED':
+                return dict(result, reason='STREAM_UNAVAILABLE')
+            entries.append([str(name), identity['sha256']])
+        canonical = json.dumps(entries, ensure_ascii=True, separators=(',', ':')).encode('ascii')
+        return {'profile': TYPE3_PROFILE, 'status': 'HASHED',
+                'sha256': hashlib.sha256(canonical).hexdigest(), 'glyphCount': len(entries)}
 
     def font(obj):
         nonlocal total_program_bytes
@@ -104,6 +130,8 @@ def inspect_fonts(path):
             else:
                 raise ValueError("font_policy_unembedded_font")
         record = {'baseFont': name, 'subtype': kind[1:], 'state': state}
+        if kind == '/Type3':
+            record['charProcsIdentity'] = type3_identity(procs)
         if program_identity is not None: record['programIdentity'] = program_identity
         records.append(record)
 

@@ -14,7 +14,7 @@ import subprocess
 import sys
 
 
-def stream_pages(command, suffix, max_pages, prepare, source_count=None, page_numbers=None):
+def stream_pages(command, suffix, max_pages, prepare, source_count=None, page_numbers=None, *, evidence=None, env=None):
     libc = ctypes.CDLL(None, use_errno=True)
     fd = libc.inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)
     if fd < 0:
@@ -25,7 +25,7 @@ def stream_pages(command, suffix, max_pages, prepare, source_count=None, page_nu
         if libc.inotify_add_watch(fd, b"/output", 0x8) < 0:
             raise OSError(ctypes.get_errno(), "inotify_add_watch")
         child = subprocess.Popen(command, stdin=subprocess.DEVNULL,
-                                 stdout=subprocess.DEVNULL, stderr=sys.stderr)
+                                 stdout=subprocess.DEVNULL, stderr=sys.stderr, env=env)
         output = sys.stdout.buffer
         output.write(b"JRIP-PAGES-1\n" if source_count is None else b"JRIP-PAGES-2\n" + struct.pack(">I", source_count))
         output.flush()
@@ -81,6 +81,10 @@ def stream_pages(command, suffix, max_pages, prepare, source_count=None, page_nu
                     continue
                 if child.returncode or not completed or pending or (source_count is not None and completed != max_pages):
                     raise ValueError("interpreter failed or noncontiguous output")
+                if evidence is not None:
+                    payload = evidence()
+                    output.write(struct.pack(">IQ", 0, len(payload)))
+                    output.write(payload)
                 output.write(struct.pack(">IQ", 0, 0))
                 output.flush()
                 return

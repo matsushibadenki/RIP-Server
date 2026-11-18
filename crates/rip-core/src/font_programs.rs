@@ -17,6 +17,16 @@ struct Identity {
     reason: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Type3Identity {
+    profile: String,
+    status: String,
+    sha256: Option<String>,
+    glyph_count: Option<u64>,
+    reason: Option<String>,
+}
+
 pub fn validate(policy: &Value) -> Result<(), ValidationError> {
     let invalid = || ValidationError("invalid_font_program_identity");
     if policy["programIdentityProfile"] != PROFILE {
@@ -34,6 +44,35 @@ pub fn validate(policy: &Value) -> Result<(), ValidationError> {
             Some("EMBEDDED" | "SELF_CONTAINED_TYPE3" | "STANDARD14_SUBSTITUTION")
         ) {
             return Err(invalid());
+        }
+        // Older inspectors and stored reports may omit this optional field.
+        if let Some(value) = font.get("charProcsIdentity") {
+            let identity: Type3Identity =
+                serde_json::from_value(value.clone()).map_err(|_| invalid())?;
+            let valid_status = match identity.status.as_str() {
+                "HASHED" => {
+                    identity.sha256.as_deref().is_some_and(valid_digest)
+                        && identity
+                            .glyph_count
+                            .is_some_and(|count| (1..=256).contains(&count))
+                        && identity.reason.is_none()
+                }
+                "UNAVAILABLE" => {
+                    identity.sha256.is_none()
+                        && identity.glyph_count.is_none()
+                        && matches!(
+                            identity.reason.as_deref(),
+                            Some("GLYPH_LIMIT" | "INVALID_STREAM" | "STREAM_UNAVAILABLE")
+                        )
+                }
+                _ => false,
+            };
+            if font["state"] != "SELF_CONTAINED_TYPE3"
+                || identity.profile != "org.jrip.type3-charprocs-v1"
+                || !valid_status
+            {
+                return Err(invalid());
+            }
         }
         if font["state"] != "EMBEDDED" {
             if font.get("programIdentity").is_some() {
@@ -97,10 +136,58 @@ pub fn validate(policy: &Value) -> Result<(), ValidationError> {
     Ok(())
 }
 
+pub fn parse_raster_evidence(payload: &[u8]) -> Result<serde_json::Value, ValidationError> {
+    #[derive(serde::Deserialize, serde::Serialize)]
+    #[serde(deny_unknown_fields)]
+    struct Evidence {
+        profile: String,
+        truncated: bool,
+        glyphs: Vec<(String, u32, u32)>,
+    }
+
+    let invalid = || ValidationError("invalid_raster_font_evidence");
+    if payload.len() > 256 * 1024 {
+        return Err(invalid());
+    }
+    let mut evidence: Evidence = serde_json::from_slice(payload).map_err(|_| invalid())?;
+    if evidence.profile != "org.jrip.mupdf-bitmap-glyphs-v1"
+        || evidence.glyphs.len() > 2048
+        || !evidence.glyphs.iter().all(|(digest, _, _)| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
+    {
+        return Err(invalid());
+    }
+    evidence.glyphs.sort_unstable();
+    if evidence.glyphs.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(invalid());
+    }
+    serde_json::to_value(evidence).map_err(|_| invalid())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn raster_evidence_rejects_duplicate_or_invalid_attribution() {
+        let first = json!(["a".repeat(64), 0, 12]);
+        let second = json!(["a".repeat(64), 1, 12]);
+        let mut report = json!({
+            "profile": "org.jrip.mupdf-bitmap-glyphs-v1",
+            "truncated": false,
+            "glyphs": [second, first],
+        });
+        let parse = |report: &Value| parse_raster_evidence(&serde_json::to_vec(report).unwrap());
+        assert_eq!(parse(&report).unwrap()["glyphs"][0], first);
+        report["glyphs"][0] = first;
+        assert!(parse(&report).is_err());
+        report["glyphs"][0] = json!(["not-a-digest", 0, 4]);
+        assert!(parse(&report).is_err());
+    }
     fn policy() -> Value {
         json!({"programIdentityProfile":PROFILE,"fonts":[{"state":"EMBEDDED","programIdentity":{"profile":PROFILE,"status":"HASHED","field":"FontFile2","encodedSha256":"a".repeat(64),"encodedBytes":100,"sha256":"b".repeat(64),"bytes":200}}]})
     }

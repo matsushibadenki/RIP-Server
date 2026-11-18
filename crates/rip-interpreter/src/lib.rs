@@ -20,6 +20,7 @@ pub enum InterpreterError {
 }
 pub struct RenderedDocument {
     pub pages: Vec<PathBuf>,
+    pub raster_font_evidence: Option<serde_json::Value>,
     pub source_page_count: Option<u32>,
 }
 pub trait DocumentInterpreter: Send + Sync {
@@ -242,6 +243,9 @@ impl SandboxConfig {
                 &mut progress,
             )
             .await?;
+            if rendered.raster_font_evidence.is_some() && !matches!(engine, EngineKind::MuPdf) {
+                return Err(InterpreterError::Rejected("invalid_raster_font_evidence"));
+            }
             let status = child.wait().await?;
             if !status.success() {
                 return Err(InterpreterError::Rejected("interpreter_failed"));

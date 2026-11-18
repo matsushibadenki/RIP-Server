@@ -68,6 +68,25 @@ class FontPolicyTests(unittest.TestCase):
         self.assertEqual(report['fonts'][0]['state'], 'SELF_CONTAINED_TYPE3')
         self.assertFalse(report['standard14Substitution'])
 
+    def test_type3_identity_tracks_glyph_names_and_decoded_commands(self):
+        def identity(commands, name='A', compressed=False):
+            proc = DecodedStreamObject()
+            proc.set_data(commands)
+            if compressed:
+                proc = proc.flate_encode()
+            report = self.inspect(dictionary(Type='Font', Subtype='Type3',
+                                             CharProcs=dictionary(**{name: proc})))
+            return report['fonts'][0]['charProcsIdentity']
+
+        baseline = identity(b'0 0 d0')
+        self.assertEqual(baseline['status'], 'HASHED')
+        self.assertEqual(baseline['glyphCount'], 1)
+        self.assertEqual(baseline, identity(b'0 0 d0', compressed=True))
+        self.assertNotEqual(baseline, identity(b'1 0 d0'))
+        self.assertNotEqual(baseline, identity(b'0 0 d0', name='B'))
+        with patch('font_policy.MAX_CHAR_PROCS', 0):
+            self.assertEqual(identity(b'0 0 d0')['reason'], 'GLYPH_LIMIT')
+
     def test_embedded_stream_and_external_program_rejection(self):
         for external in (False, True):
             stream = DecodedStreamObject()

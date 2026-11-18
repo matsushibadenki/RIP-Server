@@ -687,3 +687,48 @@ async fn inspection_records_executed_font_names_glyphs_and_vertical_modes() {
         serde_json::json!([])
     );
 }
+
+#[tokio::test]
+#[ignore = "requires Docker and rebuilt MuPDF image"]
+async fn raster_font_evidence_matches_embedded_program_bytes() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("document.pdf");
+    std::fs::write(
+        &source,
+        include_bytes!("../../../tests/corpus/fonts/font-quality.pdf"),
+    )
+    .unwrap();
+    let manifest = Manifest {
+        page_ranges: Default::default(),
+        name: "font-quality.pdf".into(),
+        format: DocumentFormat::Pdf,
+        dpi: 288,
+        color_mode: ColorMode::Gray,
+        priority: 50,
+        engine: Default::default(),
+    };
+    let rendered = rip_interpreter::MuPdfInterpreter::default()
+        .render(&source, &directory.path().join("raster"), &manifest)
+        .await
+        .unwrap();
+    let evidence = rendered.raster_font_evidence.unwrap();
+    assert_eq!(evidence["profile"], "org.jrip.mupdf-bitmap-glyphs-v1");
+    assert_eq!(evidence["truncated"], false);
+    let report = rip_interpreter::inspect_pdf_attempt(&source, uuid::Uuid::new_v4())
+        .await
+        .unwrap();
+    let fonts = report["fontPolicy"]["fonts"].as_array().unwrap();
+    let observed = evidence["glyphs"].as_array().unwrap();
+    assert!(!observed.is_empty());
+    for font in fonts {
+        let digest = &font["programIdentity"]["sha256"];
+        if digest.is_string() {
+            assert!(
+                observed
+                    .iter()
+                    .any(|glyph| &glyph[0] == digest && glyph[2].as_u64().unwrap() > 0),
+                "embedded program {digest} missing from actual raster observations: {observed:?}"
+            );
+        }
+    }
+}

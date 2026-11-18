@@ -786,6 +786,21 @@ async fn worker_persists_font_usage_with_inspection_provenance_for_both_engines(
         assert_eq!(usage["fonts"].as_array().unwrap().len(), 2);
         assert_eq!(usage["engine"], "mupdf");
         assert_eq!(usage["phase"], "pdf-inspection");
+        let evidence = report["fontPolicy"].get("rasterEvidence");
+        if preference == rip_core::EnginePreference::MuPdf {
+            let evidence = evidence.unwrap();
+            assert_eq!(evidence["truncated"], false);
+            let pairs = evidence["glyphs"].as_array().unwrap();
+            for digest in programs {
+                assert!(
+                    pairs
+                        .iter()
+                        .any(|pair| pair[0] == digest && pair[2].as_u64().unwrap() > 0)
+                );
+            }
+        } else {
+            assert!(evidence.is_none());
+        }
         let reopened = rip_storage::Repository::open(&root.join("jobs.sqlite3"))
             .await
             .unwrap();

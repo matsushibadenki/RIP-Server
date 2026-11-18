@@ -76,11 +76,24 @@ where
         source_page_count.map(|total| selection.indices(total).expect("checked indices").len());
     let mut pages = Vec::new();
     let mut total = 0u64;
+    let mut raster_font_evidence = None;
     loop {
         let mut frame = [0u8; 12];
         exact(reader, &mut frame).await?;
         let page = u32::from_be_bytes(frame[..4].try_into().unwrap());
         let size = u64::from_be_bytes(frame[4..].try_into().unwrap());
+        if page == 0 && size != 0 {
+            if pages.is_empty() || raster_font_evidence.is_some() || size > 256 * 1024 {
+                return Err(InterpreterError::Rejected("invalid_raster_font_evidence"));
+            }
+            let mut payload = vec![0; size as usize];
+            exact(reader, &mut payload).await?;
+            raster_font_evidence = Some(
+                rip_core::font_programs::parse_raster_evidence(&payload)
+                    .map_err(|_| InterpreterError::Rejected("invalid_raster_font_evidence"))?,
+            );
+            continue;
+        }
         if page == 0 && size == 0 {
             if pages.is_empty() && expected != Some(0) {
                 return Err(InterpreterError::Rejected("empty_output"));
@@ -95,9 +108,11 @@ where
             return Ok(RenderedDocument {
                 pages,
                 source_page_count,
+                raster_font_evidence,
             });
         }
-        if page != pages.len() as u32 + 1
+        if raster_font_evidence.is_some()
+            || page != pages.len() as u32 + 1
             || page > max_pages
             || size < 8
             || expected.is_some_and(|n| page as usize > n)

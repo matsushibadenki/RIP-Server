@@ -148,6 +148,9 @@ pub async fn render(
         {
             return Err(InterpreterError::Rejected("source_page_count_mismatch"));
         }
+        if let (Some(policy), Some(evidence)) = (&mut font_policy, &rendered.raster_font_evidence) {
+            policy["rasterEvidence"] = evidence.clone();
+        }
         Ok(ValidatedRender {
             rendered,
             source_bytes: snapshot.bytes,

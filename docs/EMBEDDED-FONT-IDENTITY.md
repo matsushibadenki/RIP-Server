@@ -101,3 +101,15 @@ worker/API/reopen tests verify identities persist with source/run provenance.
 Type3 graph identities and additional decoder parameter coverage remain unfinished.
 日本語: ラスター工程でのプログラム・字形対応、Ghostscript／PS／EPS実行時記録、Type3グラフ識別・復号条件拡充は未完了です。
 简体中文: 栅格阶段程序与字形关联、Ghostscript／PS／EPS运行记录、Type3图标识及更多解码参数仍未完成。
+
+PDF Type 3 entries expose `charProcsIdentity` (`org.jrip.type3-charprocs-v1`). The digest hashes an ASCII JSON array of pairs of glyph names and decoded stream SHA-256 hashes, ordered by glyph name. It identifies declared drawing commands. Glyph encoding, external resource definitions and executed glyph use are outside its scope. Inspection returns `UNAVAILABLE` when a stream cannot be identified within the shared decoding budget.
+
+PDF Type 3では、字形名と復号済みの描画命令から `charProcsIdentity` を生成します。符号化情報、参照先リソースの定義、実際に使われた字形は識別対象外です。上限内で識別できない場合は `UNAVAILABLE` を返します。
+
+PDF Type 3通过字形名称及解码后的绘制命令生成 `charProcsIdentity`。字形编码、引用资源定义及实际使用的字形不在识别范围内。超出限制时返回 `UNAVAILABLE`。
+
+Completed MuPDF jobs can include `fontPolicy.rasterEvidence` in the source-validation API. Its `org.jrip.mupdf-bitmap-glyphs-v1` profile lists unique tuples of program SHA-256, FreeType face index and glyph ID. The observer runs inside the same `mutool draw` process that produces the TIFF pages. It records successful FreeType bitmap rasterizations across the rendered page selection, up to 2,048 distinct tuples. `truncated` flags observations omitted due to limits or an unavailable program identity. The scope excludes alternative outline and stroke paths, Type 3, cache-hit counts, and Ghostscript.
+
+MuPDFのジョブ結果では `fontPolicy.rasterEvidence` に、選択ページの実描画でビットマップ化した字形ID、フォントプログラムのSHA-256、フェイス番号を記録します。最大2,048組で、記録できなかった観測がある場合は `truncated` が有効になります。輪郭描画、ストローク、Type 3、キャッシュ再利用回数、Ghostscriptは対象外です。
+
+MuPDF作业结果的 `fontPolicy.rasterEvidence` 记录所选页实际栅格化的位图字形ID、字体程序SHA-256及字体索引。最多2,048组，存在未能记录的观测时标记 `truncated`。不覆盖轮廓路径、描边、Type 3、缓存命中计数及Ghostscript。
